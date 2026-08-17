@@ -192,3 +192,41 @@ def diff(from_id, to_id):
               AND (b.points - COALESCE(a.points,0) > 0 OR b.milestone != COALESCE(a.milestone,-1))
             ORDER BY gained DESC
         """, (from_id, to_id))]
+
+
+LOBBY_SCHEMA = """
+DROP TABLE IF EXISTS lobby;
+CREATE TABLE lobby (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    champion_ids TEXT NOT NULL,
+    queue        TEXT,
+    pool_kind    TEXT,
+    updated_at   INTEGER NOT NULL
+);
+"""
+
+
+def init_lobby():
+    with connect() as con:
+        con.executescript(LOBBY_SCHEMA)
+
+
+def set_lobby(champion_ids, queue, pool_kind, ts):
+    with connect() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO lobby VALUES (1,?,?,?,?)",
+            (json.dumps(champion_ids), queue, pool_kind, ts),
+        )
+
+
+def get_lobby():
+    with connect() as con:
+        row = con.execute("SELECT * FROM lobby WHERE id=1").fetchone()
+    if not row:
+        return None
+    return {
+        "champion_ids": json.loads(row["champion_ids"]),
+        "queue": row["queue"],
+        "pool_kind": row["pool_kind"],
+        "updated_at": row["updated_at"],
+    }

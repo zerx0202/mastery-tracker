@@ -25,6 +25,7 @@ state = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+    db.init_lobby()
     state["client"] = httpx.AsyncClient(
         headers={"X-Riot-Token": API_KEY}, timeout=15.0)
     state["plain"] = httpx.AsyncClient(timeout=15.0)
@@ -127,13 +128,17 @@ def path_to_goal(current, ladder):
 
 
 @api.get("/targets")
-async def targets(limit: int = 30, only: str | None = None):
+async def targets(limit: int = 30, only: str | None = None, ids: str | None = None):
     """Championi posortowani po tym, jak blisko sa GOAL_MILESTONE."""
     sid = db.latest_snapshot_id()
     if sid is None:
         raise HTTPException(400, "Brak snapshotow - zrob POST /snapshot")
 
     ladder = db.get_ladder()
+    wanted_ids = None
+    if ids:
+        wanted_ids = {int(x) for x in ids.split(",") if x.strip()}
+
     wanted = None
     if only:
         wanted = {norm(s) for s in only.split(",") if s.strip()}
@@ -141,6 +146,8 @@ async def targets(limit: int = 30, only: str | None = None):
     out = []
     for r in db.snapshot_rows(sid):
         name = r["name"] or str(r["champion_id"])
+        if wanted_ids is not None and r["champion_id"] not in wanted_ids:
+            continue
         if wanted and norm(name) not in wanted and norm(r["key"] or "") not in wanted:
             continue
         if r["milestone"] >= GOAL:
@@ -175,6 +182,34 @@ async def targets(limit: int = 30, only: str | None = None):
         -x["points"],
     ))
     return {"goal": GOAL, "snapshot_id": sid, "targets": out[:limit]}
+
+
+@api.post("/lobby")
+async def push_lobby(payload: dict):
+    """Agent LCU wysyla tu pule z champ selecta."""
+    ids = [int(x) for x in payload.get("champion_ids", [])]
+    db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), int(time.time()))
+    return {"ok": True, "count": len(ids), "pool_kind": payload.get("pool_kind")}
+
+
+@api.get("/lobby")
+async def read_lobby(max_age: int = 900):
+    lob = db.get_lobby()
+    if not lob or not lob["champion_ids"]:
+        return {"active": False, "targets": []}
+    age = int(time.time()) - lob["updated_at"]
+    if age > max_age:
+        return {"active": False, "age": age, "targets": []}
+    ids = ",".join(str(i) for i in lob["champion_ids"])
+    t = await targets(limit=200, ids=ids)
+    return {
+        "active": True,
+        "age": age,
+        "queue": lob["queue"],
+        "pool_kind": lob["pool_kind"],
+        "champion_ids": lob["champion_ids"],
+        "targets": t["targets"],
+    }
 
 
 @api.get("/snapshots")
