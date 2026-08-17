@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mastery Tracker</title>
+<style>
+:root {
+  --bg: #0a0e14; --panel: #131822; --line: #232a38;
+  --txt: #e4e8f0; --dim: #7c8798; --gold: #c8aa6e; --hl: #1e2534;
+}
+* { box-sizing: border-box; margin: 0; }
+body { background: var(--bg); color: var(--txt); font: 14px/1.5 system-ui, sans-serif; padding: 24px; }
+h1 { font-size: 20px; font-weight: 600; letter-spacing: .02em; }
+.sub { color: var(--dim); font-size: 13px; margin-top: 4px; }
+.bar { display: flex; gap: 8px; align-items: center; margin: 20px 0; flex-wrap: wrap; }
+button, input {
+  background: var(--panel); color: var(--txt); border: 1px solid var(--line);
+  padding: 8px 14px; border-radius: 6px; font-size: 13px; font-family: inherit;
+}
+button { cursor: pointer; }
+button:hover { border-color: var(--gold); }
+button.primary { background: var(--gold); color: #0a0e14; border-color: var(--gold); font-weight: 600; }
+input { flex: 1; min-width: 220px; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+     color: var(--dim); padding: 8px 10px; border-bottom: 1px solid var(--line); font-weight: 500; }
+td { padding: 10px; border-bottom: 1px solid var(--line); }
+tr:hover td { background: var(--hl); }
+.champ { display: flex; align-items: center; gap: 10px; }
+.champ img { width: 32px; height: 32px; border-radius: 4px; }
+.name { font-weight: 500; }
+.ms { display: inline-block; min-width: 26px; text-align: center; padding: 2px 6px;
+      border-radius: 4px; background: var(--hl); border: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.grade { font-weight: 700; color: var(--gold); }
+.dim { color: var(--dim); }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.tag { font-size: 11px; padding: 1px 5px; border-radius: 3px; background: var(--hl); color: var(--dim); margin-right: 3px; }
+.note { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--gold);
+        padding: 12px 14px; border-radius: 6px; margin-bottom: 20px; font-size: 13px; }
+.note b { color: var(--gold); }
+.note ul { margin: 6px 0 0 18px; padding: 0; color: var(--dim); }
+#msg { color: var(--dim); padding: 20px 0; }
+</style>
+</head>
+<body>
+
+<h1>Mastery Tracker</h1>
+<div class="sub" id="meta">wczytywanie…</div>
+
+<div class="note">
+  <b>Co wpływa na ocenę</b> — Riot nie publikuje wzoru. Ocena jest względna:
+  porównanie z innymi grającymi tym samym championem w tej samej kolejce.
+  <ul>
+    <li>KDA i kill participation — waży najwięcej w ARAM</li>
+    <li>Obrażenia zadane championom, obrażenia w obiektywy</li>
+    <li>Leczenie i tarcze (istotne na supportach)</li>
+    <li>CS i vision score — w ARAM waży mniej niż na Riftcie</li>
+  </ul>
+</div>
+
+<div class="bar">
+  <input id="pool" placeholder="Pula z ARAM-a, po przecinku: Jhin, Lulu, Ezreal">
+  <button onclick="load()">Filtruj</button>
+  <button onclick="document.getElementById('pool').value=''; load()">Wyczyść</button>
+  <button class="primary" onclick="snap()">Nowy snapshot</button>
+</div>
+
+<div id="msg"></div>
+<table id="tbl" hidden>
+<thead><tr>
+  <th>#</th><th>Champion</th><th>MS</th><th>Trzeba</th>
+  <th>Do celu</th><th>Zebrane oceny</th><th class="num">Punkty</th><th class="num">Poziom</th>
+</tr></thead>
+<tbody id="rows"></tbody>
+</table>
+
+<script>
+let PATCH = "15.1.1";
+
+async function ddragonVersion() {
+  try {
+    const r = await fetch("https://ddragon.leagueoflegends.com/api/versions.json");
+    PATCH = (await r.json())[0];
+  } catch (e) { /* zostaje fallback */ }
+}
+
+function icon(key) {
+  return `https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${key}.png`;
+}
+
+async function load() {
+  const msg = document.getElementById("msg");
+  const tbl = document.getElementById("tbl");
+  msg.textContent = "wczytywanie…";
+  tbl.hidden = true;
+
+  const pool = document.getElementById("pool").value.trim();
+  const url = "/api/targets?limit=60" + (pool ? "&only=" + encodeURIComponent(pool) : "");
+
+  try {
+    const d = await (await fetch(url)).json();
+    if (d.detail) { msg.textContent = "Błąd: " + d.detail; return; }
+
+    document.getElementById("meta").textContent =
+      `cel: milestone ${d.goal} · snapshot #${d.snapshot_id} · ${d.targets.length} championów`;
+
+    const rows = document.getElementById("rows");
+    rows.innerHTML = "";
+    d.targets.forEach((t, i) => {
+      const toGoal = t.games_to_goal !== null
+        ? `${t.games_to_goal} gier`
+        : `≥${t.games_known} gier <span class="dim">(szczebel nieznany)</span>`;
+      const grades = t.grades_earned.length
+        ? t.grades_earned.map(g => `<span class="tag">${g}</span>`).join("")
+        : '<span class="dim">—</span>';
+      rows.insertAdjacentHTML("beforeend", `
+        <tr>
+          <td class="dim">${i + 1}</td>
+          <td><div class="champ"><img src="${icon(t.key)}" alt=""><span class="name">${t.name}</span></div></td>
+          <td><span class="ms">${t.milestone}</span></td>
+          <td><span class="grade">${t.next_grade || "—"}</span>
+              <span class="dim">×${t.next_games || 1}</span></td>
+          <td>${toGoal}</td>
+          <td>${grades}</td>
+          <td class="num">${t.points.toLocaleString("pl-PL")}</td>
+          <td class="num dim">${t.level}</td>
+        </tr>`);
+    });
+    msg.textContent = "";
+    tbl.hidden = false;
+  } catch (e) {
+    msg.textContent = "Nie udało się połączyć z backendem: " + e.message;
+  }
+}
+
+async function snap() {
+  const msg = document.getElementById("msg");
+  msg.textContent = "pobieranie z Riot API…";
+  try {
+    const d = await (await fetch("/api/snapshot", { method: "POST" })).json();
+    if (d.detail) { msg.textContent = "Błąd: " + d.detail; return; }
+    await load();
+  } catch (e) {
+    msg.textContent = "Błąd: " + e.message;
+  }
+}
+
+(async () => { await ddragonVersion(); load(); })();
+</script>
+</body>
+</html>
