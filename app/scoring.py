@@ -1,12 +1,12 @@
 """Dwupoziomowy ranking championow.
 
-Poziom 1 (twardy): ile szczebli milestone zostalo do celu. Nie da sie ich
-przeskoczyc, wiec to porzadek nadrzedny - nie skladnik sumy wazonej.
-
+Poziom 1 (twardy): ile szczebli milestone zostalo do celu.
 Poziom 2 (wynik 0..100): jak prawdopodobne, ze dowieziesz NASTEPNY szczebel.
-Wszystkie podwyniki sa normalizowane w obrebie puli, zeby wagi mialy
-porownywalny wplyw. Brak danych = 0.5 (neutralnie), nie pominiecie -
-inaczej kiepska ocena bilaby brak oceny.
+
+Brakujace dane sa POMIJANE, nie zastepowane wartoscia neutralna - inaczej
+wynik jest sredniá z polowek i wagi przestaja cokolwiek zmieniac. Zamiast
+tego kazdy wiersz dostaje `confidence`: jaka czesc lacznej wagi opiera sie
+na realnych danych.
 """
 
 import math
@@ -16,17 +16,18 @@ from .db import GRADE_RANK
 MAX_RANK = GRADE_RANK["S+"]
 
 DEFAULT_WEIGHTS = {
-    "grade_req":  2.0,   # jak lekki wymog na nastepny szczebel
-    "grade_hist": 2.5,   # jak blisko progu byly Twoje oceny
-    "winrate":    1.5,   # WR w trybie, sciagniety do sredniej
-    "recency":    1.0,   # swiezosc
+    "grade_hist": 2.5,   # jak blisko progu byly Twoje oceny w tym milestonie
+    "winrate":    1.0,   # WR w trybie, sciagniety do sredniej
+    "recency":    1.2,   # swiezosc
     "ppg":        1.0,   # punkty maestrii na gre
-    "experience": 0.8,   # ogolne obycie (log punktow)
+    "experience": 1.0,   # obycie (log punktow)
 }
 
 SHRINK_K = 5.0
 RECENCY_HALFLIFE = 30.0
-NEUTRAL = 0.5
+
+# ile realnej wagi musi byc obecne, zeby wynik traktowac powaznie
+CONFIDENCE_OK = 0.6
 
 
 def _shrunk_winrate(wins, games, prior):
@@ -36,7 +37,8 @@ def _shrunk_winrate(wins, games, prior):
 
 
 def _grade_hist(grades, required):
-    """Najlepsza zebrana ocena wzgledem wymaganej. Brak ocen -> None."""
+    """Najlepsza zebrana ocena wzgledem wymaganej.
+    Brak ocen w tym milestonie = brak informacji, nie zero."""
     if not grades or not required:
         return None
     req = GRADE_RANK.get(required)
@@ -56,20 +58,21 @@ def _recency(last_play_ms, now_s):
 
 
 def _normalizer(values):
-    """Min-max w obrebie puli. Zbyt maly rozrzut -> wszystko neutralnie."""
+    """Min-max w obrebie puli. None zostaje None."""
     vals = [v for v in values if v is not None]
     if not vals:
-        return lambda x: NEUTRAL
+        return lambda x: None
     lo, hi = min(vals), max(vals)
     if hi - lo < 1e-9:
-        return lambda x: NEUTRAL
-    return lambda x: NEUTRAL if x is None else (x - lo) / (hi - lo)
+        return lambda x: None if x is None else 0.5
+    return lambda x: None if x is None else (x - lo) / (hi - lo)
 
 
 def score_rows(rows, stats, prior, weights, now_s, goal):
     w = {**DEFAULT_WEIGHTS, **(weights or {})}
+    w = {k: v for k, v in w.items() if k in DEFAULT_WEIGHTS}
+    total_w = sum(w.values()) or 1.0
 
-    # --- surowe podwyniki ---
     for r in rows:
         st = stats.get(r["champion_id"]) or {}
         games = st.get("games") or 0
@@ -83,7 +86,6 @@ def score_rows(rows, stats, prior, weights, now_s, goal):
             key=lambda g: GRADE_RANK[g], default=None)
 
         r["_raw"] = {
-            "grade_req": (1.0 - GRADE_RANK.get(req, MAX_RANK) / MAX_RANK) if req else None,
             "grade_hist": _grade_hist(r.get("grades_earned"), req),
             "winrate": _shrunk_winrate(st.get("wins") or 0, games, prior),
             "recency": _recency(r.get("last_play"), now_s),
@@ -91,21 +93,21 @@ def score_rows(rows, stats, prior, weights, now_s, goal):
             "experience": math.log1p(r["points"]),
         }
 
-    # --- normalizacja per podwynik, w obrebie puli ---
-    norms = {
-        k: _normalizer([r["_raw"][k] for r in rows])
-        for k in DEFAULT_WEIGHTS
-    }
+    norms = {k: _normalizer([r["_raw"][k] for r in rows]) for k in DEFAULT_WEIGHTS}
 
     for r in rows:
         raw = r.pop("_raw")
         parts = {k: norms[k](raw[k]) for k in DEFAULT_WEIGHTS}
-        num = sum(w[k] * v for k, v in parts.items())
-        den = sum(w[k] for k in parts)
-        r["score"] = round(100.0 * num / den, 1) if den else 0.0
-        r["score_parts"] = {k: round(v, 3) for k, v in parts.items()}
-        r["score_raw"] = {k: (round(v, 3) if v is not None else None) for k, v in raw.items()}
+        present = {k: v for k, v in parts.items() if v is not None}
 
-    # --- porzadek: najpierw najmniej szczebli, potem najwyzszy wynik ---
+        den = sum(w[k] for k in present) or 1.0
+        num = sum(w[k] * v for k, v in present.items())
+
+        r["score"] = round(100.0 * num / den, 1) if present else 0.0
+        r["confidence"] = round(sum(w[k] for k in present) / total_w, 2)
+        r["thin"] = r["confidence"] < CONFIDENCE_OK
+        r["score_parts"] = {k: (round(v, 3) if v is not None else None) for k, v in parts.items()}
+        r["missing"] = [k for k, v in parts.items() if v is None]
+
     rows.sort(key=lambda x: (x["steps_remaining"], -x["score"]))
     return rows

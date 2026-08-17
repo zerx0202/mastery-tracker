@@ -30,11 +30,16 @@ td { padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:middl
 tr.champ-row:hover td { background:var(--hl); cursor:pointer; }
 tr.tier th { padding-top:22px; font-size:12px; color:var(--gold); letter-spacing:.05em;
              text-transform:none; border-bottom:1px solid var(--gold); }
-tr.top1 td { background:rgba(200,170,110,.10); }
-tr.top2 td { background:rgba(200,170,110,.06); }
-tr.top3 td { background:rgba(200,170,110,.03); }
-.rank { color:var(--dim); font-variant-numeric:tabular-nums; }
-.rank.medal { color:var(--gold); font-weight:700; }
+tr.top1 td:first-child { box-shadow:inset 3px 0 0 var(--gold); }
+tr.top2 td:first-child { box-shadow:inset 3px 0 0 rgba(200,170,110,.55); }
+tr.top3 td:first-child { box-shadow:inset 3px 0 0 rgba(200,170,110,.28); }
+tr.top1 td { background:rgba(200,170,110,.07); }
+tr.top2 td { background:rgba(200,170,110,.04); }
+.rank { color:var(--dim); font-variant-numeric:tabular-nums; font-size:13px; }
+.rank.medal { color:var(--gold); font-weight:600; }
+.badge { display:inline-block; min-width:17px; height:17px; line-height:17px; text-align:center;
+         border-radius:3px; background:var(--gold); color:#0a0e14; font-size:11px;
+         font-weight:700; margin-right:5px; }
 .champ { display:flex; align-items:center; gap:10px; }
 .champ img { width:30px; height:30px; border-radius:4px; background:var(--hl); }
 .name { font-weight:500; }
@@ -146,7 +151,7 @@ async function ddragonVersion() {
 }
 
 const icon = k => `https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${k}.png`;
-const medal = i => i === 1 ? "①" : i === 2 ? "②" : i === 3 ? "③" : i;
+const medal = i => i;
 
 function render(targets, label) {
   document.getElementById("meta").textContent = `${label} · ${targets.length} championów`;
@@ -248,7 +253,7 @@ async function pollLobby() {
     const podium = top.length
       ? `<div class="podium">${top.map((t, i) => `
           <div class="pick"><img src="${icon(t.key)}" alt="">
-            <div><div class="p-n">${medal(i + 1)} ${t.name} <span class="dim">${t.score}</span></div>
+            <div><div class="p-n"><span class="badge">${i + 1}</span> ${t.name} <span class="dim">${t.score}</span></div>
             <div class="p-d">${t.steps_remaining} szczebli · trzeba ${t.next_grade}</div></div>
           </div>`).join("")}</div>`
       : `<div class="dim" style="margin-top:6px">Żaden champion z puli nie zbliża do celu.</div>`;
