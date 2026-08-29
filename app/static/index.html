@@ -102,6 +102,11 @@ h2{font:700 22px/1.2 var(--display);letter-spacing:.01em;margin-bottom:4px}
 .card-games .u{font:600 10px/1 var(--display);letter-spacing:.12em;
                 text-transform:uppercase;color:var(--dim)}
 .tagline{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:10px}
+.rank-badge{flex:none;min-width:26px;height:22px;padding:0 6px;border-radius:4px;
+            background:var(--panel2);border:1px solid var(--line);color:var(--dim);
+            font:600 12px/22px var(--mono);text-align:center}
+.rank-badge.lead{background:var(--gold);border-color:var(--gold);color:#0B0E13;
+                 margin-right:10px;vertical-align:4px;display:inline-block}
 .card.group{grid-column:1 / -1}
 .heads{display:flex;flex-wrap:wrap;gap:5px;margin-top:12px}
 .heads img{width:34px;height:34px;border-radius:5px;background:var(--panel2);
@@ -362,7 +367,8 @@ async function renderNow() {
         <div class="big">${steps}<small>${steps === 1 ? "szczebel" : "szczeble"} do celu</small></div>
       </div>
       <div class="hero-side">
-        <div class="who"><img src="${icon(b.key)}" alt="">${esc(b.name)}</div>
+        <div class="who"><span class="rank-badge lead">1</span><img src="${icon(b.key)}"
+          alt="">${esc(b.name)}</div>
         ${rail(b.milestone, GOAL, b.next_grade)}
         <div class="range">${gamesLine} przy Twoim tempie${
           b.own_games_on_champ < 8
@@ -372,7 +378,8 @@ async function renderNow() {
       </div>
     </div>`;
 
-  $("cards-label").textContent = inSelect ? "Reszta puli" : "Pozostali kandydaci";
+  $("cards-label").textContent = inSelect
+    ? "Kolejność w tej puli" : "Ranking pozostałych";
 
   // Grupujemy identyczne wiersze - jedenascie kart z ta sama liczba
   // to powtorka, nie informacja.
@@ -385,21 +392,23 @@ async function renderNow() {
     groups.get(k).push(t);
   }
 
-  // Grupa to grupa - zaden z jej czlonkow nie jest wazniejszy,
-  // wiec pokazujemy je jako zestaw ikon, a nie jednego z przypisem.
-  const cardsHtml = shown.slice(0, 6).map(t => {
+  // Ranking musi byc widoczny jako ranking. Grupujemy tylko ogon -
+  // championow nieodroznialnych od siebie - a nie cala liste.
+  let rank = 1;
+  const cardsHtml = shown.slice(0, 8).map(t => {
     const grp = groups.get(key(t));
     const many = grp.length > 1;
-    const heads = grp.map(x =>
-      `<img src="${icon(x.key)}" alt="" title="${esc(x.name)}">`).join("");
+    const pos = rank;
+    rank += grp.length;
+    const heads = many ? grp.map(x =>
+      `<img src="${icon(x.key)}" alt="" title="${esc(x.name)}">`).join("") : "";
 
     return `
     <div class="card${many ? " group" : ""}">
       <div class="card-top">
+        <span class="rank-badge">${many ? `${pos}–${pos + grp.length - 1}` : pos}</span>
         ${many ? "" : `<img src="${icon(t.key)}" alt="">`}
-        <div class="card-name">${many
-          ? `${grp.length} championów`
-          : esc(t.name)}</div>
+        <div class="card-name">${many ? `${grp.length} championów` : esc(t.name)}</div>
         <div class="card-games">
           <div class="n">${t.steps_remaining}</div>
           <div class="u">${t.steps_remaining === 1 ? "szczebel" : "szczeble"}</div>
@@ -411,7 +420,7 @@ async function renderNow() {
     </div>`;
   }).join("");
 
-  const hiddenCount = rest.length - shown.slice(0, 6)
+  const hiddenCount = rest.length - shown.slice(0, 8)
     .reduce((n, t) => n + groups.get(key(t)).length, 0);
   $("cards").innerHTML = cardsHtml + (hiddenCount > 0
     ? `<div class="card" style="display:flex;align-items:center;justify-content:center;
