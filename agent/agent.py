@@ -40,6 +40,11 @@ PHASES_AFTER_GAME = {"WaitingForStats", "PreEndOfGame", "EndOfGame",
 MASTERY_UPDATES = "/lol-end-of-game/v1/champion-mastery-updates"
 EOG_STATS_BLOCK = "/lol-end-of-game/v1/eog-stats-block"
 
+# Live Client Data - osobny serwer na stalym porcie 2999, dostepny tylko
+# w trakcie meczu. Brak polaczenia = nie gramy, i to jest caly mechanizm
+# wykrywania; nic nie trzeba uruchamiac recznie.
+LIVE_BASE = "https://127.0.0.1:2999/liveclientdata"
+
 DIAG_ENDPOINTS = [
     "/lol-end-of-game/v1/eog-stats-block",
     MASTERY_UPDATES,
@@ -162,6 +167,7 @@ class Agent:
         self.pre_snapshot_done = False
         self.history_bootstrapped = False
         self.ws_failures = 0
+        self.champ_ids = {}
 
     # ---------- akcje ----------
 
@@ -338,6 +344,93 @@ class Agent:
 
     # ---------- petle ----------
 
+    async def live_loop(self):
+        """Odczyt stanu gry na zywo. Port 2999 istnieje tylko podczas meczu,
+        wiec ConnectionError jest normalnym stanem, nie bledem."""
+        was_live = False
+        while True:
+            try:
+                async with self.session.get(
+                    LIVE_BASE + "/allgamedata", ssl=self.lcu.ssl,
+                    timeout=aiohttp.ClientTimeout(total=4)
+                ) as r:
+                    data = await r.json(content_type=None) if r.status == 200 else None
+            except Exception:
+                data = None
+
+            if not data:
+                if was_live:
+                    was_live = False
+                    log("koniec danych na zywo", "dim")
+                    await self.server.post("/live", {"ended": True}, timeout=15)
+                await asyncio.sleep(self.cfg.get("live_poll_seconds", 5))
+                continue
+
+            try:
+                await self.send_live(data)
+                if not was_live:
+                    was_live = True
+                    log("dane na zywo aktywne", "ok")
+            except Exception as e:
+                log(f"blad odczytu na zywo: {type(e).__name__}: {e}", "warn")
+
+            await asyncio.sleep(self.cfg.get("live_poll_seconds", 5))
+
+    async def send_live(self, data):
+        ap = data.get("activePlayer") or {}
+        gd = data.get("gameData") or {}
+        name = ap.get("summonerName") or ap.get("riotId") or ""
+
+        me = None
+        for pl in data.get("allPlayers") or []:
+            cand = [pl.get("summonerName"), pl.get("riotId"),
+                    pl.get("riotIdGameName")]
+            if name and any(c and (c == name or str(c).startswith(name)) for c in cand):
+                me = pl
+                break
+        if me is None:
+            return
+
+        sc = me.get("scores") or {}
+
+        # Zlota zarobionego nie ma w API. Suma cen kupionych przedmiotow
+        # plus zloto w kieszeni to pomiar, a nie zgadywanie z zabojstw i CS.
+        spent = 0
+        for it in me.get("items") or []:
+            price = it.get("price") or 0
+            spent += price * (it.get("count") or 1)
+        gold_est = int((ap.get("currentGold") or 0) + spent)
+
+        await self.server.post("/live", {
+            "champion": me.get("championName"),
+            "champion_id": self.champ_ids.get(
+                (me.get("championName") or "").replace(" ", "").replace("'", "")),
+            "game_mode": gd.get("gameMode"),
+            "game_time": gd.get("gameTime"),
+            "kills": sc.get("kills"), "deaths": sc.get("deaths"),
+            "assists": sc.get("assists"), "cs": sc.get("creepScore"),
+            "ward_score": sc.get("wardScore"),
+            "gold_est": gold_est, "level": me.get("level"),
+            "raw": {"items": me.get("items"), "spent": spent,
+                    "current_gold": ap.get("currentGold")},
+        }, timeout=15)
+
+    async def load_champ_ids(self):
+        """Nazwa championa -> id, z Data Dragon. Live API podaje tylko nazwe."""
+        try:
+            async with self.session.get(
+                "https://ddragon.leagueoflegends.com/api/versions.json",
+                timeout=aiohttp.ClientTimeout(total=10)) as r:
+                patch = (await r.json())[0]
+            async with self.session.get(
+                f"https://ddragon.leagueoflegends.com/cdn/{patch}/data/en_US/champion.json",
+                timeout=aiohttp.ClientTimeout(total=20)) as r:
+                data = await r.json()
+            self.champ_ids = {v["id"]: int(v["key"]) for v in data["data"].values()}
+            log(f"mapa championow zaladowana ({len(self.champ_ids)})", "dim")
+        except Exception as e:
+            log(f"nie udalo sie zaladowac mapy championow: {e}", "warn")
+
     async def poll_loop(self):
         """Siatka bezpieczenstwa - gdyby WebSocket przeoczyl zmiane stanu."""
         while True:
@@ -400,7 +493,9 @@ class Agent:
             log("agent startuje")
             log(f"serwer: {self.cfg['api_base']}", "dim")
 
+            await self.load_champ_ids()
             asyncio.create_task(self.poll_loop())
+            asyncio.create_task(self.live_loop())
 
             while True:
                 port, pw = self.lcu.read_lockfile()

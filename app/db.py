@@ -1208,3 +1208,96 @@ def model_status(min_games=40):
         "ready_for_tuning": usable >= min_games,
         "still_needed": max(0, min_games - usable),
     }
+
+
+LIVE_SCHEMA = """
+DROP TABLE IF EXISTS live_game;
+CREATE TABLE live_game (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    champion_id  INTEGER,
+    champion     TEXT,
+    game_mode    TEXT,
+    game_time    REAL,
+    kills        INTEGER, deaths INTEGER, assists INTEGER,
+    cs           INTEGER,
+    ward_score   REAL,
+    gold_est     INTEGER,
+    level        INTEGER,
+    payload      TEXT,
+    updated_at   INTEGER NOT NULL
+);
+"""
+
+
+def init_live():
+    with connect() as con:
+        con.executescript(LIVE_SCHEMA)
+
+
+def set_live(row):
+    with connect() as con:
+        con.execute("""
+            INSERT OR REPLACE INTO live_game
+              (id, champion_id, champion, game_mode, game_time, kills, deaths,
+               assists, cs, ward_score, gold_est, level, payload, updated_at)
+            VALUES (1, :champion_id, :champion, :game_mode, :game_time, :kills,
+                    :deaths, :assists, :cs, :ward_score, :gold_est, :level,
+                    :payload, :updated_at)""", row)
+
+
+def get_live(max_age=90):
+    import time as _t
+    with connect() as con:
+        r = con.execute("SELECT * FROM live_game WHERE id=1").fetchone()
+    if not r:
+        return None
+    d = dict(r)
+    d["age"] = int(_t.time()) - d["updated_at"]
+    return d if d["age"] <= max_age else None
+
+
+def clear_live():
+    with connect() as con:
+        con.execute("DELETE FROM live_game WHERE id=1")
+
+
+def reference_pace(threshold="A-", mode=None):
+    """Tempo z gier, ktore skonczyly sie ocena >= progu. To jest punkt
+    odniesienia dla overlaya: 'tak wygladaly Twoje udane gry'."""
+    want = GRADE_RANK.get(threshold)
+    clause = "AND m.game_mode = ?" if mode else ""
+    args = (mode,) if mode else ()
+    with connect() as con:
+        rows = [dict(r) for r in con.execute(f"""
+            SELECT g.grade, m.kills, m.deaths, m.assists, m.cs, m.gold, m.duration
+            FROM grade_observation g JOIN match_player m ON m.match_id = g.match_id
+            WHERE m.duration > 300 {clause}""", args)]
+
+    import statistics
+    hit, miss = [], []
+    for r in rows:
+        g = r["grade"]
+        rank = GRADE_RANK.get(g[2:].strip()) if g.startswith(">=") else GRADE_RANK.get(g)
+        if rank is None:
+            continue
+        mins = r["duration"] / 60
+        vals = {
+            "ka_per_min": (r["kills"] + r["assists"]) / mins,
+            "cs_per_min": (r["cs"] or 0) / mins,
+            "deaths_per_min": (r["deaths"] or 0) / mins,
+            "gold_per_min": (r["gold"] or 0) / mins,
+        }
+        (hit if rank >= want else miss).append(vals)
+
+    def med(rows_, key):
+        v = [x[key] for x in rows_]
+        return round(statistics.median(v), 2) if v else None
+
+    keys = ["ka_per_min", "cs_per_min", "deaths_per_min", "gold_per_min"]
+    return {
+        "threshold": threshold,
+        "hit_games": len(hit),
+        "miss_games": len(miss),
+        "hit": {k: med(hit, k) for k in keys},
+        "miss": {k: med(miss, k) for k in keys},
+    }

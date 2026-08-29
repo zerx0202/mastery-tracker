@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
     db.init_extra()
     db.init_pool()
     db.upgrade_grades()
+    db.init_live()
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
@@ -673,6 +674,69 @@ async def model_targets(champion_id: int, threshold: str = "S-",
     if r is None:
         raise HTTPException(404, "brak modelu albo danych dla tego championa")
     return r
+
+
+@api.post("/live")
+async def push_live(payload: dict):
+    """Agent wysyla tu stan z Live Client Data (port 2999)."""
+    if payload.get("ended"):
+        await asyncio.to_thread(db.clear_live)
+        return {"cleared": True}
+
+    row = {
+        "champion_id": payload.get("champion_id"),
+        "champion": payload.get("champion"),
+        "game_mode": payload.get("game_mode"),
+        "game_time": payload.get("game_time"),
+        "kills": payload.get("kills"), "deaths": payload.get("deaths"),
+        "assists": payload.get("assists"), "cs": payload.get("cs"),
+        "ward_score": payload.get("ward_score"),
+        "gold_est": payload.get("gold_est"), "level": payload.get("level"),
+        "payload": json.dumps(payload.get("raw") or {}),
+        "updated_at": int(time.time()),
+    }
+    await asyncio.to_thread(db.set_live, row)
+    return {"ok": True}
+
+
+@api.get("/live")
+async def read_live():
+    live = await asyncio.to_thread(db.get_live)
+    if not live:
+        return {"active": False}
+
+    mins = max((live["game_time"] or 0) / 60, 0.5)
+    now = {
+        "ka_per_min": round(((live["kills"] or 0) + (live["assists"] or 0)) / mins, 2),
+        "cs_per_min": round((live["cs"] or 0) / mins, 2),
+        "deaths_per_min": round((live["deaths"] or 0) / mins, 2),
+        "gold_per_min": round((live["gold_est"] or 0) / mins, 2),
+    }
+
+    # jaki prog obowiazuje na tym championie
+    sid = db.latest_snapshot_id()
+    need, milestone = None, None
+    if sid and live["champion_id"]:
+        for r in db.snapshot_rows(sid):
+            if r["champion_id"] == live["champion_id"]:
+                milestone = r["milestone"]
+                nxt = json.loads(r["next_grades"] or "null")
+                need = scoring.cheapest_grade(nxt)
+                break
+
+    ref = await asyncio.to_thread(
+        db.reference_pace, need or "A-", live["game_mode"] or DEFAULT_MODE)
+
+    return {
+        "active": True, "age": live["age"],
+        "champion": live["champion"], "champion_id": live["champion_id"],
+        "milestone": milestone, "need": need,
+        "game_time": live["game_time"], "minutes": round(mins, 1),
+        "kills": live["kills"], "deaths": live["deaths"], "assists": live["assists"],
+        "level": live["level"],
+        "now": now, "reference": ref,
+        "missing": ["obrażenia — Live Client Data ich nie udostępnia"],
+    }
 
 
 app.include_router(api)

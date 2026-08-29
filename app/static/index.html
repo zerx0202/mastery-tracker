@@ -182,6 +182,7 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
 <!-- ============ TERAZ ============ -->
 <section id="v-now">
   <div id="live-bar"></div>
+  <div id="live-panel"></div>
   <div class="deck">
     <div>
       <div id="hero"></div>
@@ -262,7 +263,52 @@ function rail(milestone, goal, nextGrade) {
 }
 
 /* ---------- TERAZ ---------- */
+function livePanel(d) {
+  const cmp = (key, higher) => {
+    const now = d.now[key], ref = (d.reference.hit || {})[key];
+    if (ref == null) return {cls: "", note: "brak odniesienia"};
+    const good = higher ? now >= ref : now <= ref;
+    return {cls: good ? "ok" : "warn",
+            note: `${good ? "powyżej" : "poniżej"} mediany udanych gier (${ref})`};
+  };
+  const ROWS = [
+    ["ka_per_min", "Zabójstwa + asysty / min", true],
+    ["gold_per_min", "Złoto / min (szacowane)", true],
+    ["cs_per_min", "CS / min", true],
+    ["deaths_per_min", "Zgony / min", false],
+  ];
+  const rows = ROWS.map(([k, label, hi]) => {
+    const c = cmp(k, hi);
+    const ref = (d.reference.hit || {})[k];
+    return `<div class="kv">
+      <span>${label}</span>
+      <span style="color:var(--${c.cls === "ok" ? "ok" : "warn"})">
+        ${d.now[k]} <span class="dim" style="font-size:11px">/ ${ref ?? "—"}</span></span>
+    </div>`;
+  }).join("");
+
+  return `<div class="panel" style="border-left:3px solid var(--ok);margin-bottom:22px">
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
+      <span class="dot"></span>
+      <div style="font:700 22px/1 var(--display)">${esc(d.champion || "?")}</div>
+      <div class="dim num">${Math.floor(d.minutes)} min · ${d.kills}/${d.deaths}/${d.assists}
+        · poziom ${d.level ?? "?"}</div>
+      <div style="margin-left:auto" class="chip gold">${
+        d.need ? "trzeba " + esc(d.need) : "brak progu"}</div>
+    </div>
+    ${d.milestone != null ? rail(d.milestone, GOAL, d.need) : ""}
+    <div style="margin-top:14px">${rows}</div>
+    <div class="tagline">Porównanie z medianą Twoich gier zakończonych ocenami
+      ${esc(d.reference.threshold)} lub lepszymi (${d.reference.hit_games} gier).
+      Obrażeń nie da się odczytać w trakcie gry — Riot ich nie udostępnia.</div>
+  </div>`;
+}
+
 async function renderNow() {
+  let live = {active: false};
+  try { live = await api("/live"); } catch (e) {}
+  $("live-panel") && ($("live-panel").innerHTML = live.active ? livePanel(live) : "");
+
   let lobby = {active: false};
   try { lobby = await api("/lobby"); } catch (e) {}
 

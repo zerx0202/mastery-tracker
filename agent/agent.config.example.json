@@ -3,6 +3,7 @@
   "api_base": "https://TWOJ-NODE.tailnet.ts.net/api",
   "backup_url": "https://TWOJ-NODE.tailnet.ts.net:8443/backup",
   "fallback_poll_seconds": 10,
+  "live_poll_seconds": 5,
   "enable_dumps": true,
   "post_game_delay_seconds": 25,
   "history_pages_on_start": 10,
