@@ -792,6 +792,21 @@ async def read_live():
     }
 
 
+@api.get("/norms")
+async def norms(stat: str = "totalDamageDealtToChampions", mode: str | None = None):
+    """Rozklad danej statystyki per champion, zebrany ze wszystkich graczy
+    w Mayhemie. Zastepuje zrodlo zewnetrzne, ktore tego trybu nie ma."""
+    d = await asyncio.to_thread(db.champion_norms, stat, mode or DEFAULT_MODE)
+    names = {}
+    with db.connect() as c:
+        names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM champion")}
+    d["champions"] = {
+        str(cid): {**v, "name": names.get(cid, str(cid))}
+        for cid, v in sorted(d["champions"].items(), key=lambda kv: -kv[1]["mean"])}
+    d["available_stats"] = db.NORM_STATS
+    return d
+
+
 app.include_router(api)
 app.include_router(write_api)
 app.mount("/", StaticFiles(directory="app/static", html=True), name="static")

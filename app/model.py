@@ -21,7 +21,8 @@ import math
 import statistics
 import time
 
-from .db import GRADE_RANK, connect, get_json_setting, log_event, set_json_setting
+from .db import (GRADE_RANK, connect, get_json_setting, log_event, norm_z,
+                 set_json_setting)
 
 # Progi, dla ktorych trenujemy osobne modele
 THRESHOLDS = ["A-", "S-"]
@@ -65,25 +66,43 @@ def champion_baselines(mode=None):
     return ({c: statistics.median(v) for c, v in per_champ.items()}, global_median)
 
 
-def extract_features(row, baselines, global_median, external=None):
-    """row: mecz z match_player. external: {champion_id: srednia_dpm} ze zrodla
-    zewnetrznego, gdy bedzie dostepne - ma pierwszenstwo przed wlasna mediana."""
-    mins = max((row.get("duration") or 0) / 60, 1.0)
-    dpm = (row.get("dmg_champ") or 0) / mins
+# Mapowanie cech modelu na klucze w player_stat. Tam, gdzie klucz istnieje,
+# normalizujemy przez rozklad tego championa w Mayhemie zamiast brac wartosc
+# bezwzgledna. Zrodla zewnetrzne odpadaja - zaden nie ma tej kolejki.
+NORM_KEYS = {
+    "gold_per_min": "goldEarned",
+    "dmg_ratio": "totalDamageDealtToChampions",
+}
 
-    base = None
-    if external:
-        base = external.get(row.get("champion_id"))
-    if base is None:
-        own = baselines.get(row.get("champion_id"))
-        # wlasna mediana ma sens dopiero przy kilku grach na postaci
-        base = own if own and own > 0 else global_median
+
+def extract_features(row, baselines, global_median, external=None, mode=None):
+    """external zostaje dla zgodnosci, ale zrodlem normalizacji jest teraz
+    rozklad z player_stat - dane z Mayhema, nie ze zwyklego ARAM-a."""
+    mins = max((row.get("duration") or 0) / 60, 1.0)
+    cid = row.get("champion_id")
+    dpm = (row.get("dmg_champ") or 0) / mins
+    gpm = (row.get("gold") or 0) / mins
+
+    # obrazenia: z-score wzgledem tego championa, z fallbackiem na stara
+    # metode (wlasna mediana), gdy player_stat jeszcze nic nie wie
+    zd = norm_z(cid, NORM_KEYS["dmg_ratio"], dpm, mode) if cid else None
+    if zd and zd["observations"] >= 1:
+        dmg_feature = zd["z"]
+    else:
+        base = None
+        if external:
+            base = external.get(cid)
+        if base is None:
+            own = baselines.get(cid)
+            base = own if own and own > 0 else global_median
+        # stara miara byla ilorazem wokol 1.0; przesuwamy na te sama skale
+        dmg_feature = (dpm / base - 1.0) if base else 0.0
 
     return {
-        "gold_per_min": (row.get("gold") or 0) / mins,
+        "gold_per_min": gpm,
         "ka_per_min": ((row.get("kills") or 0) + (row.get("assists") or 0)) / mins,
         "deaths_per_min": (row.get("deaths") or 0) / mins,
-        "dmg_ratio": dpm / base if base else 1.0,
+        "dmg_ratio": dmg_feature,
         "duration_min": mins,
     }
 
@@ -197,7 +216,7 @@ def train(mode=None, save=True):
             lab = label_for(r["grade"], th)
             if lab is None:
                 continue
-            f = extract_features(r, baselines, global_median, external)
+            f = extract_features(r, baselines, global_median, external, mode)
             X_raw.append([f[k] for k in FEATURES])
             y.append(lab)
 
@@ -244,7 +263,7 @@ def train(mode=None, save=True):
 
 # ---------- predykcja ----------
 
-def predict(row, threshold, model=None, baselines=None):
+def predict(row, threshold, model=None, baselines=None, mode=None):
     model = model or get_json_setting("grade_model")
     if not model:
         return None
@@ -258,7 +277,7 @@ def predict(row, threshold, model=None, baselines=None):
                      cached.get("global") or 1.0)
 
     external = get_json_setting("external_dpm") or None
-    f = extract_features(row, baselines[0], baselines[1], external)
+    f = extract_features(row, baselines[0], baselines[1], external, mode)
     z = m["bias"]
     for j, key in enumerate(model["features"]):
         z += m["weights"][key] * (f[key] - m["means"][j]) / m["stds"][j]
@@ -423,7 +442,7 @@ def champion_medians(champion_id, mode=None):
         return None, 0
 
     baselines, gmed = champion_baselines(mode)
-    feats = [extract_features(r, baselines, gmed) for r in rows]
+    feats = [extract_features(r, baselines, gmed, None, mode) for r in rows]
     med = {k: statistics.median(f[k] for f in feats) for k in FEATURES}
     return med, len(rows)
 
@@ -442,7 +461,7 @@ def _observed_range(key, mode=None, dmg_base=None):
     baselines, gmed = champion_baselines(mode)
     vals = []
     for r in rows:
-        f = extract_features(r, baselines, gmed)
+        f = extract_features(r, baselines, gmed, None, mode)
         v = f[key]
         if key == "dmg_ratio" and dmg_base:
             v *= dmg_base

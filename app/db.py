@@ -1375,3 +1375,103 @@ class RiotLimiter:
 
 
 LIMITER = RiotLimiter()
+
+
+# ============================================================
+#  Normalizator z danych Mayhema (wlasnych i cudzych)
+# ============================================================
+#
+# Zewnetrzne serwisy nie maja Mayhema - aramstats.lol jawnie pisze, ze Riot
+# nie wystawia tej kolejki w API. Zwykly ARAM nie jest przyblizeniem, bo
+# augmenty nie skaluja wszystkich championow rowno, wiec ranking jest
+# przetasowany. Za to eog-stats-block daje statystyki WSZYSTKICH dziesieciu
+# graczy z kazdej gry - czyli 10 obserwacji o Mayhemie na mecz, w tym
+# o championach, ktorymi sam nie gralem.
+
+NORM_STATS = [
+    "totalDamageDealtToChampions", "goldEarned", "totalMinionsKilled",
+    "damageSelfMitigated", "totalDamageTaken", "totalHealsOnTeammates",
+    "totalHeal", "timeCCingOthers", "totalDamageShieldedOnTeammates",
+    "visionScore", "championLevel",
+]
+
+# Ponizej tylu obserwacji na championie ufamy bardziej sredniej globalnej.
+NORM_SHRINK = 8.0
+
+
+def champion_norms(stat_key="totalDamageDealtToChampions", mode=None, min_obs=1):
+    """Srednia i odchylenie per champion, w przeliczeniu na minute,
+    liczone ze wszystkich graczy w zebranych meczach.
+
+    Wartosci per champion sa sciagane do sredniej globalnej proporcjonalnie
+    do liczby obserwacji - przy dwoch grach na postaci wynik bedzie prawie
+    rowny globalnemu i tak ma byc."""
+    import statistics
+
+    clause = "AND m.game_mode = ?" if mode else ""
+    args = [stat_key] + ([mode] if mode else [])
+    with connect() as con:
+        rows = [dict(r) for r in con.execute(f"""
+            SELECT p.champion_id, p.stat_value, m.duration
+            FROM player_stat p
+            JOIN match_player m ON m.match_id = p.match_id
+            WHERE p.stat_key = ? AND m.duration > 300 {clause}""", args)]
+
+    per = {}
+    allv = []
+    for r in rows:
+        v = r["stat_value"] / (r["duration"] / 60)
+        per.setdefault(r["champion_id"], []).append(v)
+        allv.append(v)
+
+    if not allv:
+        return {"stat": stat_key, "global": None, "champions": {}, "matches": 0}
+
+    g_mean = statistics.mean(allv)
+    g_sd = statistics.pstdev(allv) or 1.0
+
+    out = {}
+    for cid, vals in per.items():
+        n = len(vals)
+        if n < min_obs:
+            continue
+        m = statistics.mean(vals)
+        sd = statistics.pstdev(vals) if n > 1 else g_sd
+        w = n / (n + NORM_SHRINK)
+        out[cid] = {
+            "n": n,
+            "mean_raw": round(m, 2),
+            "mean": round(w * m + (1 - w) * g_mean, 2),
+            "sd": round(max(w * sd + (1 - w) * g_sd, g_sd * 0.3), 2),
+            "confidence": round(w, 2),
+        }
+
+    with connect() as con:
+        nm = con.execute("SELECT COUNT(DISTINCT match_id) c FROM player_stat").fetchone()["c"]
+
+    return {
+        "stat": stat_key,
+        "global": {"mean": round(g_mean, 2), "sd": round(g_sd, 2), "n": len(allv)},
+        "champions": out,
+        "matches": nm,
+    }
+
+
+def norm_z(champion_id, stat_key, value_per_min, mode=None, cache={}):
+    """Ile odchylen powyzej typowego wyniku na tym championie.
+    To jest miara, ktora Riot faktycznie stosuje przy ocenie."""
+    key = (stat_key, mode)
+    if key not in cache:
+        cache[key] = champion_norms(stat_key, mode)
+    d = cache[key]
+    if not d["global"]:
+        return None
+    c = d["champions"].get(champion_id)
+    mean = c["mean"] if c else d["global"]["mean"]
+    sd = c["sd"] if c else d["global"]["sd"]
+    return {
+        "z": round((value_per_min - mean) / (sd or 1.0), 3),
+        "mean": mean, "sd": sd,
+        "observations": (c or {}).get("n", 0),
+        "confidence": (c or {}).get("confidence", 0.0),
+    }
