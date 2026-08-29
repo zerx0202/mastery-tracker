@@ -498,7 +498,9 @@ async def push_eog(payload: dict):
             reroll = (block.get("rerollData") or {}).get("rerollCount")
             pool_id = await asyncio.to_thread(
                 db.link_pool_to_match, match_id,
-                db.normalize_champion_id(me.get("championId") or 0), reroll, ts)
+                db.normalize_champion_id(me.get("championId") or 0,
+                                         state.get("last_queue_mode")),
+                reroll, ts)
 
         await asyncio.to_thread(db.log_event, "eog", {
             "new": new, "stats_rows": stats_rows, "pool_id": pool_id}, ts)

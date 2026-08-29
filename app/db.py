@@ -428,11 +428,29 @@ def short_patch(version):
     return ".".join(parts[:2]) if len(parts) >= 2 else str(version)
 
 
-def normalize_champion_id(cid):
-    """Tryby typu JADE przesuwaja ID o wielokrotnosc 1000 (60029 -> 29)."""
-    cid = int(cid)
-    return cid % 1000 if cid >= 1000 else cid
+# Tryby, w ktorych Riot przesuwa identyfikatory championow.
+OFFSET_MODES = {"JADE"}
 
+
+def _mode_of(match_id):
+    """Tryb meczu z bazy. Oceny i bloki koncowe go nie zawieraja, a bez niego
+    nie wiadomo, czy id championa jest przesuniete."""
+    with connect() as con:
+        r = con.execute("SELECT game_mode FROM match_player WHERE match_id=?",
+                        (match_id,)).fetchone()
+    return r["game_mode"] if r else None
+
+
+def normalize_champion_id(cid, game_mode=None):
+    """W trybie JADE (league classic na boty) Riot dodaje do id offset +60000.
+    Modulo stosujemy TYLKO tam - w innych trybach wysokie id to po prostu
+    nowy champion i dzielenie zepsuloby dane."""
+    if cid is None:
+        return None
+    cid = int(cid)
+    if game_mode in OFFSET_MODES and cid >= 1000:
+        return cid % 1000
+    return cid
 
 def save_lcu_game(g):
     """Mecz z historii LCU (stary format v4). Zwraca True jesli wiersz byl nowy."""
@@ -455,7 +473,7 @@ def save_lcu_game(g):
         "game_mode": g.get("gameMode"),
         "game_creation": g.get("gameCreation"),
         "duration": g.get("gameDuration"),
-        "champion_id": normalize_champion_id(raw_cid),
+        "champion_id": normalize_champion_id(raw_cid, g.get("gameMode")),
         "win": 1 if st.get("win") else 0,
         "kills": st.get("kills"),
         "deaths": st.get("deaths"),
@@ -585,7 +603,8 @@ def save_grade(entry, platform, ts):
     row = {
         "match_id": f"{platform.upper()}_{gid}",
         "game_id": gid,
-        "champion_id": normalize_champion_id(entry.get("championId", 0)),
+        "champion_id": normalize_champion_id(
+            entry.get("championId", 0), _mode_of(f"{platform.upper()}_{gid}")),
         "grade": grade,
         "score": entry.get("score"),
         "points_gained": entry.get("pointsGained"),
@@ -697,7 +716,8 @@ def save_eog(block, platform, ts):
     row = {
         "match_id": f"{platform.upper()}_{gid}",
         "game_id": gid,
-        "champion_id": normalize_champion_id(me.get("championId") or 0),
+        "champion_id": normalize_champion_id(
+            me.get("championId") or 0, _mode_of(f"{platform.upper()}_{gid}")),
         "augments": json.dumps([a for a in augments if a]),
         "payload": zlib.compress(json.dumps(block, separators=(",", ":")).encode()),
         "captured_at": ts,

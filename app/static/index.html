@@ -245,9 +245,16 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
 let PATCH = "16.17.1";
 const $ = id => document.getElementById(id);
 const api = p => fetch("/api" + p).then(r => r.json());
+// Data Dragon zna 173 championow, snapshot ma 175 - najnowsi trafiaja tam
+// z opoznieniem. Zamiast pustego kwadratu pokazujemy zastepnik.
+const BLANK = "data:image/svg+xml," + encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
+     <rect width="40" height="40" rx="5" fill="#1A212C"/>
+     <text x="20" y="26" text-anchor="middle" fill="#3D4757"
+       font-family="monospace" font-size="18">?</text></svg>`);
 const icon = k => k
   ? `https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${k}.png`
-  : "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E";
+  : BLANK;
 const esc = s => String(s ?? "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
 
 const ROMAN = ["I", "II", "III", "IV"];
@@ -376,7 +383,7 @@ async function renderNow() {
           b.steps_remaining === 1 ? "szczebel" : "szczeble"} do celu</small></div>
       </div>
       <div class="hero-side">
-        <div class="who"><span class="rank-badge lead">1</span><img src="${icon(b.key)}"
+        <div class="who"><span class="rank-badge lead">1</span><img onerror="this.src=BLANK" src="${icon(b.key)}"
           alt="">${esc(b.name)}</div>
         ${rail(b.milestone, GOAL, b.next_grade)}
         <div class="range" style="margin-top:8px">${modelNote(b)}</div>
@@ -411,7 +418,7 @@ async function renderNow() {
       return `
       <tr>
         <td class="rank-cell">${i + 2}</td>
-        <td><div class="champ-cell"><img src="${icon(t.key)}" alt="">
+        <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(t.key)}" alt="">
           ${esc(t.name)}</div></td>
         <td class="r num">${t.steps_remaining}</td>
         <td><span class="chip ${t.next_grade === "S-" ? "gold" : ""}">${
@@ -448,7 +455,7 @@ async function renderSide() {
 
     const last = (gr.grades || []).map(g => `
       <div class="mini">
-        <img src="${icon(g.key)}" alt="">
+        <img onerror="this.src=BLANK" src="${icon(g.key)}" alt="">
         <span>${esc(g.name)}</span>
         <span class="chip ${g.grade.startsWith(">=") ? "gold" : ""}"
           style="margin-left:auto">${esc(g.grade)}</span>
@@ -524,7 +531,7 @@ async function renderGrades() {
     const ps = (ok("S-") && g.p_S != null) ? (100 * g.p_S).toFixed(0) + "%" : "—";
     return `<tr>
       <td><span class="chip ${cls}">${esc(g.grade)}</span></td>
-      <td><div class="champ-cell"><img src="${icon(g.key)}" alt="">
+      <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(g.key)}" alt="">
         ${esc(g.name)}</div></td>
       <td class="num">${g.kills}/${g.deaths}/${g.assists}</td>
       <td class="r num">${g.gpm}</td>
