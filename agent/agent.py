@@ -314,6 +314,28 @@ class Agent:
         elif r and r.get("errors"):
             log(f"blad zapisu statystyk: {r['errors'][0]}", "warn")
 
+    def _puuids_from_text(self, text, my_puuid=""):
+        import re
+        return [q for q in dict.fromkeys(
+            re.findall(r'"puuid"\s*:\s*"([0-9a-f\-]{36})"', text))
+            if q and q != my_puuid]
+
+    async def snowball_harvest(self, texts):
+        """Wysyla na serwer puuid-y graczy z podanych zrzutow eog."""
+        if not self.cfg.get("snowball"):
+            return
+        me = await self.lcu.get("/lol-summoner/v1/current-summoner") or {}
+        my = me.get("puuid", "")
+        found = []
+        for t in texts:
+            found += self._puuids_from_text(t, my)
+        found = list(dict.fromkeys(found))
+        if not found:
+            return
+        r = await self.server.post("/snowball/candidates", {"puuids": found})
+        if r:
+            log(f"snowball: {r['received']} kandydatow, w rejestrze {r['known_total']}", "dim")
+
     async def snowball_probe(self):
         """Jednorazowa sonda pod snowball: czy /lol-match-history dziala dla
         OBCYCH puuid. Wlacza sie tylko przy "snowball": "probe" w configu.
@@ -642,6 +664,10 @@ class Agent:
                     self.lcu.port, self.lcu.password = port, pw
                     log(f"klient wykryty (port {port})", "ok")
                     await self.snowball_probe()
+                    if self.cfg.get("snowball"):
+                        texts = [f.read_text(encoding="utf-8", errors="ignore")
+                                 for f in sorted((HERE / "dumps").glob("*eog-stats-block*.json"))]
+                        await self.snowball_harvest(texts)
                     if not self.history_bootstrapped:
                         self.history_bootstrapped = True
                         await self.sync_history(self.cfg["history_pages_on_start"])

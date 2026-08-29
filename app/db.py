@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 from . import features
@@ -1581,3 +1582,55 @@ def init_predictions():
     powstawala leniwie przy pierwszym zapisie, jako jedyna poza migrate()."""
     with connect() as con:
         con.executescript(PRED_SCHEMA)
+
+
+# ============================================================
+#  Snowball: rejestr graczy z wlasnych meczow
+# ============================================================
+#
+# Sonda potwierdzila: LCU oddaje historie obcych puuid. Kazdy wlasny mecz
+# daje 9 kandydatow; ich gry KIWI to paliwo dla normalizatora (player_stat).
+# Zabezpieczenia: gracz odpytywany najwyzej raz na REVISIT_DAYS, mecze
+# deduplikowane po match_id - powtorka gracza wnosi tylko nowe gry.
+
+SNOWBALL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS snowball_seen (
+    puuid      TEXT PRIMARY KEY,
+    added_at   INTEGER NOT NULL,
+    checked_at INTEGER DEFAULT 0,
+    kiwi_games INTEGER DEFAULT 0,
+    new_rows   INTEGER DEFAULT 0
+);
+"""
+
+SNOWBALL_REVISIT_DAYS = 7
+
+
+def init_snowball():
+    with connect() as con:
+        con.executescript(SNOWBALL_SCHEMA)
+
+
+def snowball_add_candidates(puuids, ts):
+    """Nowi kandydaci z wlasnych meczow. Znani sa ignorowani."""
+    with connect() as con:
+        for p in puuids:
+            con.execute("INSERT OR IGNORE INTO snowball_seen (puuid, added_at) "
+                        "VALUES (?, ?)", (p, ts))
+        return con.execute("SELECT COUNT(*) c FROM snowball_seen").fetchone()["c"]
+
+
+def snowball_next(limit=1):
+    """Gracze do sprawdzenia: nigdy nie sprawdzani albo starsi niz okno."""
+    cutoff = int(time.time()) - SNOWBALL_REVISIT_DAYS * 86400
+    with connect() as con:
+        return [r["puuid"] for r in con.execute(
+            "SELECT puuid FROM snowball_seen WHERE checked_at < ? "
+            "ORDER BY checked_at ASC, added_at ASC LIMIT ?", (cutoff, limit))]
+
+
+def snowball_mark(puuid, kiwi_games, new_rows):
+    with connect() as con:
+        con.execute("UPDATE snowball_seen SET checked_at=?, kiwi_games=?, "
+                    "new_rows=new_rows+? WHERE puuid=?",
+                    (int(time.time()), kiwi_games, new_rows, puuid))

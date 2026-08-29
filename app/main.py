@@ -770,6 +770,21 @@ async def predictions_scorecard():
     return out
 
 
+@write_api.post("/snowball/candidates")
+async def snowball_candidates(payload: dict):
+    """Agent po kazdej grze przysyla puuid-y pozostalych graczy."""
+    puuids = [p for p in payload.get("puuids", [])
+              if isinstance(p, str) and len(p) == 36]
+    ts = int(time.time())
+    total = await asyncio.to_thread(db.snowball_add_candidates, puuids, ts)
+    return {"received": len(puuids), "known_total": total}
+
+
+@api.get("/snowball/next")
+async def snowball_next(limit: int = 1):
+    return {"puuids": await asyncio.to_thread(db.snowball_next, min(limit, 5))}
+
+
 @api.get("/sentinel")
 async def sentinel_status():
     return db.get_json_setting("mayhem_api") or {"open": False, "checked_at": 0}
