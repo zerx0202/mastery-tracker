@@ -328,6 +328,12 @@ class Agent:
                 name = path.strip("/").replace("/", "_")
                 (out_dir / f"{stamp}-{name}.json").write_text(body, encoding="utf-8")
                 found.append(f"{path} ({len(body)} B)")
+        # rotacja: dumps to material diagnostyczny, nie archiwum - wszystko
+        # trwale i tak plynie do bazy na serwerze
+        keep = int(self.cfg.get("dumps_keep", 60))
+        old_files = sorted(out_dir.glob("*.json"))[:-keep] if keep else []
+        for f in old_files:
+            f.unlink(missing_ok=True)
         if found:
             log(f"zrzut diagnostyczny -> agent/dumps/: {len(found)} plikow", "ok")
             for f in found:
