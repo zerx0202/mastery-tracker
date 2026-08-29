@@ -201,16 +201,23 @@ def train(mode=None, save=True):
             X_raw.append([f[k] for k in FEATURES])
             y.append(lab)
 
-        info = {"samples": len(y), "positives": sum(y)}
+        pos = sum(y)
+        info = {"samples": len(y), "positives": pos}
         if len(y) < 8 or len(set(y)) < 2:
             info["status"] = "za malo danych albo brak obu klas"
             out["models"][th] = info
             continue
+        # przy garstce pozytywow model uczy sie mowic "nie" na wszystko
+        # i raportuje 100% trafnosci - to arytmetyka, nie umiejetnosc
+        if pos < 5 or (len(y) - pos) < 5:
+            info["status"] = "niewiarygodny"
+            info["reason"] = f"tylko {pos} pozytywow na {len(y)} obserwacji"
 
         X, means, stds = _standardize(X_raw)
         w, b = _fit(X, y)
         info.update({
-            "status": "ok" if len(y) >= MIN_SAMPLES else "poglądowy",
+            "status": info.get("status") or
+                      ("ok" if len(y) >= MIN_SAMPLES else "poglądowy"),
             "weights": dict(zip(FEATURES, [round(x, 4) for x in w])),
             "bias": round(b, 4),
             "means": means, "stds": stds,
@@ -249,8 +256,18 @@ def predict(row, threshold, model=None, baselines=None):
     z = m["bias"]
     for j, key in enumerate(model["features"]):
         z += m["weights"][key] * (f[key] - m["means"][j]) / m["stds"][j]
-    return {"p": round(_sigmoid(z), 4), "features": {k: round(v, 2) for k, v in f.items()},
-            "quality": m.get("status"), "samples": m.get("samples")}
+    p = _sigmoid(z)
+    quality = m.get("status")
+    out = {"p": round(p, 4), "quality": quality, "samples": m.get("samples"),
+           "positives": m.get("positives"),
+           "features": {k: round(v, 2) for k, v in f.items()}}
+    if quality == "niewiarygodny":
+        # ciagniemy w strone czestosci bazowej, zeby nie sugerowac pewnosci
+        base = (m.get("metrics") or {}).get("base_rate", 0.1)
+        out["p_raw"] = round(p, 4)
+        out["p"] = round(0.3 * p + 0.7 * base, 4)
+        out["warning"] = m.get("reason")
+    return out
 
 
 def champion_rates(mode=None, shrink=6.0):
