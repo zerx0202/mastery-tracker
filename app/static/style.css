@@ -155,3 +155,42 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
   nav .inner{padding:0 16px;overflow-x:auto}
   main{padding:24px 16px 60px}
 }
+
+/* ============================================================
+   Telefon. Style pisane byly pod monitor - ten blok nie zmienia
+   niczego powyzej 700 px.
+   ============================================================ */
+@media (max-width: 700px) {
+  main{padding:18px 14px 60px}
+
+  /* zakladki: przewijalne w bok zamiast ucietego LABOR... */
+  nav .inner{padding:0 14px;overflow-x:auto;scrollbar-width:none;
+             -webkit-overflow-scrolling:touch}
+  nav .inner::-webkit-scrollbar{display:none}
+  nav a.tab{white-space:nowrap;padding:20px 10px 18px}
+  nav .pulse-wrap{display:none}   /* zegar zbedny, telefon ma wlasny */
+
+  /* hero: mniejsza liczba, uklad w pionie */
+  .hero{grid-template-columns:1fr;gap:14px;padding:18px 16px}
+  .big{font-size:52px}
+  .hero-side .who{font-size:23px}
+  .hero-side .who img{width:27px;height:27px;vertical-align:-6px}
+
+  /* panel boczny pod trescia (deck i tak sklada sie <1180px) */
+  .deck{gap:16px}
+
+  /* tabela: ciasniej, kolumna Ostatnio znika, calosc przewijalna
+     w bok gdyby mimo to nie weszla */
+  #cards{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .pool-table{min-width:520px}
+  .pool-table th,.pool-table td{padding:8px 7px;font-size:13px}
+  .pool-table th:nth-child(7),.pool-table td:nth-child(7){display:none}
+  .rank-cell{width:30px}
+  .champ-cell img{width:26px;height:26px}
+
+  /* szyna milestone'ow: czytelna przy malej szerokosci */
+  .chev{height:22px;font-size:10px}
+
+  .panel{padding:14px 14px}
+  h2{font-size:19px}
+}
