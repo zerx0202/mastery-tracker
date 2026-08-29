@@ -168,6 +168,7 @@ class Agent:
         self.history_bootstrapped = False
         self.ws_failures = 0
         self.champ_ids = {}
+        self.live_state = {}
 
     # ---------- akcje ----------
 
@@ -363,7 +364,7 @@ class Agent:
                     was_live = False
                     log("koniec danych na zywo", "dim")
                     await self.server.post("/live", {"ended": True}, timeout=15)
-                await asyncio.sleep(self.cfg.get("live_poll_seconds", 5))
+                await asyncio.sleep(self.cfg.get("live_poll_seconds", 2))
                 continue
 
             try:
@@ -374,7 +375,7 @@ class Agent:
             except Exception as e:
                 log(f"blad odczytu na zywo: {type(e).__name__}: {e}", "warn")
 
-            await asyncio.sleep(self.cfg.get("live_poll_seconds", 5))
+            await asyncio.sleep(self.cfg.get("live_poll_seconds", 2))
 
     async def send_live(self, data):
         ap = data.get("activePlayer") or {}
@@ -383,8 +384,7 @@ class Agent:
 
         me = None
         for pl in data.get("allPlayers") or []:
-            cand = [pl.get("summonerName"), pl.get("riotId"),
-                    pl.get("riotIdGameName")]
+            cand = [pl.get("summonerName"), pl.get("riotId"), pl.get("riotIdGameName")]
             if name and any(c and (c == name or str(c).startswith(name)) for c in cand):
                 me = pl
                 break
@@ -392,27 +392,42 @@ class Agent:
             return
 
         sc = me.get("scores") or {}
+        gold_now = ap.get("currentGold") or 0
+        gt = gd.get("gameTime") or 0
 
-        # Zlota zarobionego nie ma w API. Suma cen kupionych przedmiotow
-        # plus zloto w kieszeni to pomiar, a nie zgadywanie z zabojstw i CS.
-        spent = 0
-        for it in me.get("items") or []:
-            price = it.get("price") or 0
-            spent += price * (it.get("count") or 1)
-        gold_est = int((ap.get("currentGold") or 0) + spent)
+        # Zlota zarobionego nie ma w API, a suma cen przedmiotow nie wystarcza:
+        # kowadla (750 zl) znikaja po uzyciu, mikstury sie zuzywaja, sprzedaz
+        # zwraca czesc. Liczymy wiec wydatki z ubytkow stanu zlota - kazde
+        # kupno to spadek, niezaleznie od tego, czy cos zostalo w ekwipunku.
+        if gt < self.live_state.get("game_time", 0) - 5 or \
+           me.get("championName") != self.live_state.get("champion"):
+            self.live_state = {"spent": 0.0, "champion": me.get("championName")}
+
+        prev = self.live_state.get("gold")
+        if prev is not None and gold_now < prev:
+            self.live_state["spent"] = self.live_state.get("spent", 0.0) + (prev - gold_now)
+        self.live_state["gold"] = gold_now
+        self.live_state["game_time"] = gt
+
+        spent = self.live_state.get("spent", 0.0)
+        gold_est = int(gold_now + spent)
+        inventory = sum((it.get("price") or 0) * (it.get("count") or 1)
+                        for it in (me.get("items") or []))
 
         await self.server.post("/live", {
             "champion": me.get("championName"),
             "champion_id": self.champ_ids.get(
                 (me.get("championName") or "").replace(" ", "").replace("'", "")),
             "game_mode": gd.get("gameMode"),
-            "game_time": gd.get("gameTime"),
+            "game_time": gt,
             "kills": sc.get("kills"), "deaths": sc.get("deaths"),
             "assists": sc.get("assists"), "cs": sc.get("creepScore"),
             "ward_score": sc.get("wardScore"),
             "gold_est": gold_est, "level": me.get("level"),
-            "raw": {"items": me.get("items"), "spent": spent,
-                    "current_gold": ap.get("currentGold")},
+            "raw": {"spent": round(spent), "current_gold": gold_now,
+                    "inventory_value": inventory,
+                    "consumed": round(spent - inventory),
+                    "items": [i.get("displayName") for i in (me.get("items") or [])]},
         }, timeout=15)
 
     async def load_champ_ids(self):
