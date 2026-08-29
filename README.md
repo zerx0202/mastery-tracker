@@ -164,3 +164,35 @@ Riot Games properties. Riot Games and all associated properties are trademarks
 or registered trademarks of Riot Games, Inc.
 
 Projekt niekomercyjny, do użytku własnego.
+
+## Uruchomienie
+
+Backend (Mac/Linux z Dockerem):
+
+cp .env.example .env # uzupełnij RIOT_API_KEY i RIOT_ID
+docker compose up -d --build
+curl localhost:8000/api/health
+
+
+Agent (Windows, przy kliencie gry):
+
+git clone git@github.com:zerx0202/mastery-tracker.git C:\repos\mastery-tracker
+cd C:\repos\mastery-tracker\agent
+copy agent.config.example.json agent.config.json # uzupełnij api_base
+start-agent.cmd
+
+
+Agent wymaga Pythona 3.11+ (`winget install Python.Python.3.12`). Środowisko
+wirtualne i zależności stawia sam przy pierwszym starcie. Dostęp do backendu
+spoza localhosta najprościej przez Tailscale (`tailscale serve`).
+
+## Zastrzeżenie
+
+Mastery Tracker isn't endorsed by Riot Games and doesn't reflect the views or
+opinions of Riot Games or anyone officially involved in producing or managing
+Riot Games properties. Riot Games, and all associated properties are trademarks
+or registered trademarks of Riot Games, Inc.
+
+Projekt prywatny i niekomercyjny. Korzysta z Riot API, lokalnego API klienta
+(LCU) oraz Live Client Data API zgodnie z polityką Riot Games dla aplikacji
+third-party.
