@@ -1069,3 +1069,142 @@ def my_share(match_id, stat_key):
         "rank_in_game": better + 1,
         "of": len(rows),
     }
+
+
+def upgrade_grades():
+    """Kolumny pod oceny odzyskane ze snapshotow."""
+    with connect() as con:
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(grade_observation)")}
+        for name, ddl in {
+            "source": "TEXT DEFAULT 'lcu'",
+            "censored": "INTEGER DEFAULT 0",       # 1 = znamy tylko prog, nie dokladna ocene
+            "threshold": "TEXT",                    # prog przy obserwacji cenzurowanej
+            "confidence": "TEXT DEFAULT 'exact'",   # exact | window | unmatched
+        }.items():
+            if name not in cols:
+                con.execute(f"ALTER TABLE grade_observation ADD COLUMN {name} {ddl}")
+
+
+def backfill_grades_from_snapshots(window=7200):
+    """Odzyskuje oceny z historii snapshotow: przyrost tablicy grades_earned
+    to nowa ocena, awans milestone'a to ocena >= progu (tablica sie zeruje).
+    Doklejamy mecz po championie i bliskosci czasowej."""
+    import time as _t
+
+    ladder = get_ladder()
+
+    def threshold_for(ms):
+        step = ladder.get(ms) or {}
+        req = step.get("require_grades") or {}
+        if not req:
+            return None
+        return min(req.keys(), key=lambda g: GRADE_RANK.get(g, 99))
+
+    with connect() as con:
+        snaps = [dict(r) for r in con.execute(
+            "SELECT id, taken_at FROM snapshot ORDER BY taken_at")]
+        matches = [dict(r) for r in con.execute(
+            "SELECT match_id, champion_id, game_creation, duration "
+            "FROM match_player WHERE game_creation IS NOT NULL")]
+
+    by_champ = {}
+    for m in matches:
+        by_champ.setdefault(m["champion_id"], []).append(m)
+
+    def find_match(cid, ts):
+        """Mecz tym championem zakonczony przed snapshotem, najblizszy w czasie."""
+        best, best_gap = None, None
+        for m in by_champ.get(cid, []):
+            end = (m["game_creation"] or 0) / 1000 + (m["duration"] or 0)
+            gap = ts - end
+            if 0 <= gap <= window and (best_gap is None or gap < best_gap):
+                best, best_gap = m, gap
+        return best
+
+    events = []
+    prev = {}
+    with connect() as con:
+        for s in snaps:
+            cur = {r["champion_id"]: (json.loads(r["grades_earned"] or "[]"), r["milestone"])
+                   for r in con.execute(
+                       "SELECT champion_id, grades_earned, milestone FROM mastery "
+                       "WHERE snapshot_id=?", (s["id"],))}
+            for cid, (grades, ms) in cur.items():
+                old_g, old_ms = prev.get(cid, (None, None))
+                if old_ms is None:
+                    continue
+                if len(grades) > len(old_g):
+                    for g in grades[len(old_g):]:
+                        events.append((s["taken_at"], cid, g, None, 0))
+                elif ms > old_ms:
+                    events.append((s["taken_at"], cid, None, threshold_for(old_ms), 1))
+            prev = cur
+
+    added = skipped = unmatched = 0
+    now = int(_t.time())
+    for ts, cid, grade, threshold, censored in events:
+        m = find_match(cid, ts)
+        if not m:
+            unmatched += 1
+            continue
+        row = {
+            "match_id": m["match_id"],
+            "game_id": int(m["match_id"].split("_")[-1]),
+            "champion_id": cid,
+            "grade": grade or f">={threshold}" if (grade or threshold) else "?",
+            "score": None, "points_gained": None, "points_contrib": None,
+            "points_before": None, "level_after": None, "leveled_up": None,
+            "tokens_earned": None, "token_after": None,
+            "observed_at": ts, "split_id": current_split_id(),
+            "source": "snapshot_diff", "censored": censored,
+            "threshold": threshold, "confidence": "window",
+        }
+        cols = list(row.keys())
+        with connect() as con:
+            exists = con.execute("SELECT 1 FROM grade_observation WHERE match_id=?",
+                                 (row["match_id"],)).fetchone()
+            if exists:
+                skipped += 1
+                continue
+            con.execute(
+                "INSERT INTO grade_observation (" + ", ".join(cols) + ") VALUES ("
+                + ", ".join(f":{c}" for c in cols) + ")", row)
+            added += 1
+
+    log_event("grade_backfill", {"added": added, "skipped": skipped,
+                                 "unmatched": unmatched, "events": len(events)}, now)
+    return {"events": len(events), "added": added,
+            "skipped_existing": skipped, "unmatched": unmatched}
+
+
+def model_status(min_games=40):
+    """Marker: ile obserwacji mamy i czy juz warto stroic model."""
+    with connect() as con:
+        total = con.execute("SELECT COUNT(*) c FROM grade_observation").fetchone()["c"]
+        joined = con.execute("""
+            SELECT COUNT(*) c FROM grade_observation g
+            JOIN player_stat p ON p.match_id = g.match_id AND p.is_local = 1
+            """).fetchone()["c"]
+        exact = con.execute(
+            "SELECT COUNT(*) c FROM grade_observation WHERE COALESCE(censored,0)=0").fetchone()["c"]
+        by_src = [dict(r) for r in con.execute(
+            "SELECT COALESCE(source,'lcu') source, COUNT(*) n FROM grade_observation GROUP BY 1")]
+    with connect() as con:
+        with_match = con.execute("""
+            SELECT COUNT(*) c FROM grade_observation g
+            JOIN match_player m ON m.match_id = g.match_id""").fetchone()["c"]
+        with_rich = con.execute("""
+            SELECT COUNT(DISTINCT g.match_id) c FROM grade_observation g
+            JOIN player_stat p ON p.match_id = g.match_id AND p.is_local = 1""").fetchone()["c"]
+    usable = with_match
+    return {
+        "grades_total": total,
+        "grades_exact": exact,
+        "grades_censored": total - exact,
+        "grades_with_match_stats": with_match,
+        "grades_with_full_stats": with_rich,
+        "by_source": by_src,
+        "threshold": min_games,
+        "ready_for_tuning": usable >= min_games,
+        "still_needed": max(0, min_games - usable),
+    }

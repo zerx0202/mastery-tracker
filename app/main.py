@@ -43,6 +43,7 @@ async def lifespan(app: FastAPI):
     db.init_eog()
     db.init_extra()
     db.init_pool()
+    db.upgrade_grades()
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["weights"] = dict(scoring.DEFAULT_WEIGHTS)
@@ -501,6 +502,17 @@ async def stats_share(match_id: str, stat_key: str):
     if r is None:
         raise HTTPException(404, "brak danych dla tego meczu lub pola")
     return r
+
+
+@api.post("/grades/backfill")
+async def grades_backfill(window: int = 7200):
+    """Odzyskuje oceny z historii snapshotow. Bezpieczne do powtarzania."""
+    return await asyncio.to_thread(db.backfill_grades_from_snapshots, window)
+
+
+@api.get("/model/status")
+async def model_status(min_games: int = 40):
+    return db.model_status(min_games)
 
 
 app.include_router(api)
