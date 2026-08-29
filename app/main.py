@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 
-from . import db, model, scoring
+from . import db, features, model, scoring
 from .db import GRADE_RANK
 from .limiter import RateLimiter
 
@@ -629,7 +629,7 @@ async def grades_history(limit: int = 60, mode: str | None = None):
     for r in rows[:limit]:
         pa = model.predict(r, "A-") or {}
         ps = model.predict(r, "S-") or {}
-        mins = max((r["duration"] or 0) / 60, 1)
+        fv = features.match_features(r)
         out.append({
             "grade": r["grade"],
             "champion_id": r["champion_id"],
@@ -638,8 +638,8 @@ async def grades_history(limit: int = 60, mode: str | None = None):
             "observed_at": r["observed_at"],
             "kills": r["kills"], "deaths": r["deaths"], "assists": r["assists"],
             "dmg": r["dmg_champ"], "gold": r["gold"], "duration": r["duration"],
-            "gpm": round((r["gold"] or 0) / mins),
-            "dpm": round((r["dmg_champ"] or 0) / mins),
+            "gpm": round(fv["gpm"]),
+            "dpm": round(fv["dpm"]),
             "p_A": pa.get("p"), "p_S": ps.get("p"),
             "censored": r["grade"].startswith(">="),
         })
@@ -731,14 +731,10 @@ async def lab_distribution(stat: str = "gpm", mode: str | None = None):
     rows = await asyncio.to_thread(model.training_rows, mode or DEFAULT_MODE)
     buckets = {}
     for r in rows:
-        mins = max((r["duration"] or 0) / 60, 1)
-        val = {
-            "gpm": (r["gold"] or 0) / mins,
-            "dpm": (r["dmg_champ"] or 0) / mins,
-            "kda": (r["kills"] + r["assists"]) / max(r["deaths"], 1),
-            "ka_per_min": (r["kills"] + r["assists"]) / mins,
-            "deaths_per_min": (r["deaths"] or 0) / mins,
-        }.get(stat)
+        fv = features.match_features(r)
+        val = {**fv,
+               "kda": (r["kills"] + r["assists"]) / max(r["deaths"], 1),
+               }.get(stat)
         if val is None:
             raise HTTPException(400, f"nieznana statystyka: {stat}")
         buckets.setdefault(r["grade"], []).append(round(val, 1))
@@ -790,12 +786,17 @@ async def read_live():
     if not live:
         return {"active": False}
 
-    mins = max((live["game_time"] or 0) / 60, 0.5)
+    fv = features.match_features(
+        {"duration": live["game_time"], "gold": live["gold_est"],
+         "kills": live["kills"], "assists": live["assists"],
+         "deaths": live["deaths"], "cs": live["cs"]},
+        floor=features.FLOOR_LIVE)
+    mins = fv["minutes"]
     now = {
-        "ka_per_min": round(((live["kills"] or 0) + (live["assists"] or 0)) / mins, 2),
-        "cs_per_min": round((live["cs"] or 0) / mins, 2),
-        "deaths_per_min": round((live["deaths"] or 0) / mins, 2),
-        "gold_per_min": round((live["gold_est"] or 0) / mins, 2),
+        "ka_per_min": round(fv["ka_per_min"], 2),
+        "cs_per_min": round(fv["cs_per_min"], 2),
+        "deaths_per_min": round(fv["deaths_per_min"], 2),
+        "gold_per_min": round(fv["gpm"], 2),
     }
 
     # jaki prog obowiazuje na tym championie

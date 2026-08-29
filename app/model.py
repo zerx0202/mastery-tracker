@@ -20,6 +20,7 @@ import math
 import statistics
 import time
 
+from . import features
 from .db import (
     GRADE_RANK,
     connect,
@@ -83,10 +84,11 @@ NORM_KEYS = {
 def extract_features(row, baselines, global_median, external=None, mode=None):
     """external zostaje dla zgodnosci, ale zrodlem normalizacji jest teraz
     rozklad z player_stat - dane z Mayhema, nie ze zwyklego ARAM-a."""
-    mins = max((row.get("duration") or 0) / 60, 1.0)
+    fv = features.match_features(row)
+    mins = fv["minutes"]
     cid = row.get("champion_id")
-    dpm = (row.get("dmg_champ") or 0) / mins
-    gpm = (row.get("gold") or 0) / mins
+    dpm = fv["dpm"]
+    gpm = fv["gpm"]
 
     # obrazenia: z-score wzgledem tego championa, z fallbackiem na stara
     # metode (wlasna mediana), gdy player_stat jeszcze nic nie wie
@@ -105,8 +107,8 @@ def extract_features(row, baselines, global_median, external=None, mode=None):
 
     return {
         "gold_per_min": gpm,
-        "ka_per_min": ((row.get("kills") or 0) + (row.get("assists") or 0)) / mins,
-        "deaths_per_min": (row.get("deaths") or 0) / mins,
+        "ka_per_min": fv["ka_per_min"],
+        "deaths_per_min": fv["deaths_per_min"],
         "dmg_ratio": dmg_feature,
         "duration_min": mins,
     }

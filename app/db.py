@@ -3,6 +3,8 @@ import os
 import sqlite3
 from pathlib import Path
 
+from . import features
+
 DB_PATH = Path(os.environ.get("DB_PATH", "/code/data/mastery.db"))
 
 GRADES = ["D-", "D", "D+", "C-", "C", "C+", "B-", "B", "B+",
@@ -1305,12 +1307,12 @@ def reference_pace(threshold="A-", mode=None):
         rank = GRADE_RANK.get(g[2:].strip()) if g.startswith(">=") else GRADE_RANK.get(g)
         if rank is None:
             continue
-        mins = r["duration"] / 60
+        f = features.match_features(r)
         vals = {
-            "ka_per_min": (r["kills"] + r["assists"]) / mins,
-            "cs_per_min": (r["cs"] or 0) / mins,
-            "deaths_per_min": (r["deaths"] or 0) / mins,
-            "gold_per_min": (r["gold"] or 0) / mins,
+            "ka_per_min": f["ka_per_min"],
+            "cs_per_min": f["cs_per_min"],
+            "deaths_per_min": f["deaths_per_min"],
+            "gold_per_min": f["gpm"],
         }
         (hit if rank >= want else miss).append(vals)
 
