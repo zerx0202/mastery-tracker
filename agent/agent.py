@@ -314,6 +314,38 @@ class Agent:
         elif r and r.get("errors"):
             log(f"blad zapisu statystyk: {r['errors'][0]}", "warn")
 
+    async def snowball_probe(self):
+        """Jednorazowa sonda pod snowball: czy /lol-match-history dziala dla
+        OBCYCH puuid. Wlacza sie tylko przy "snowball": "probe" w configu.
+        Bierze puuid innego gracza z najnowszego zrzutu eog i pyta o 1 gre.
+        Dedup meczow po gameId juz istnieje po stronie serwera, wiec docelowy
+        snowball nie zdubluje danych powtarzajacych sie graczy."""
+        if self.cfg.get("snowball") != "probe":
+            return
+        import re
+        dumps = sorted((HERE / "dumps").glob("*eog-stats-block*.json"))
+        if not dumps:
+            log("sonda snowball: brak zrzutow eog w agent/dumps", "warn")
+            return
+        text = dumps[-1].read_text(encoding="utf-8", errors="ignore")
+        me = await self.lcu.get("/lol-summoner/v1/current-summoner") or {}
+        my = me.get("puuid", "")
+        others = [q for q in dict.fromkeys(
+            re.findall(r'"puuid"\s*:\s*"([0-9a-f\-]{36})"', text)) if q and q != my]
+        if not others:
+            log("sonda snowball: nie znalazlem obcego puuid w zrzucie", "warn")
+            return
+        status, body = await self.lcu.get_raw(
+            f"/lol-match-history/v1/products/lol/{others[0]}/matches"
+            f"?begIndex=0&endIndex=1", timeout=15)
+        n = "?"
+        try:
+            n = len((json.loads(body).get("games") or {}).get("games") or [])
+        except Exception:
+            pass
+        log(f"sonda snowball: HTTP {status}, gier w odpowiedzi: {n}",
+            "ok" if status == 200 else "warn")
+
     async def dump_diagnostics(self):
         """Zrzuca surowe odpowiedzi endpointow, ktore moga zawierac ocene."""
         if not self.cfg.get("enable_dumps", True):
@@ -609,6 +641,7 @@ class Agent:
                 if port != self.lcu.port:
                     self.lcu.port, self.lcu.password = port, pw
                     log(f"klient wykryty (port {port})", "ok")
+                    await self.snowball_probe()
                     if not self.history_bootstrapped:
                         self.history_bootstrapped = True
                         await self.sync_history(self.cfg["history_pages_on_start"])

@@ -33,11 +33,44 @@ def norm(x: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (x or "").lower())
 
 
+async def mayhem_sentinel_loop():
+    """Riot dzis celowo blokuje Mayhema w match-v5 (403; developer-relations
+    #1109 i #1154). Raz na dobe sprawdzamy jednym zapytaniem, czy to sie
+    zmienilo - w dniu otwarcia dostajemy baner i mozliwosc backfillu
+    pelnych danych z timeline'ami."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            st = db.get_json_setting("mayhem_api") or {}
+            if time.time() - st.get("checked_at", 0) >= 20 * 3600:
+                region = os.getenv("REGION", "europe")
+                puuid = await my_puuid()
+                ids = []
+                try:
+                    ids = await riot_get(
+                        f"https://{region}.api.riotgames.com/lol/match/v5/"
+                        f"matches/by-puuid/{puuid}/ids",
+                        params={"queue": 2400, "count": 1}) or []
+                except HTTPException:
+                    ids = []  # 403/404 = nadal zablokowane, to norma
+                db.set_json_setting("mayhem_api", {
+                    "checked_at": int(time.time()),
+                    "open": bool(ids),
+                    "sample": (ids or [None])[0]})
+                if ids:
+                    db.log_event("mayhem_api_open", {"match_id": ids[0]},
+                                 int(time.time()))
+        except Exception:
+            pass
+        await asyncio.sleep(3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # jeden punkt wejscia do schematu - nowa funkcja init_*/upgrade_* w db.py
     # wykona sie sama, bez pamietania o tej liscie (to tu ginely nowe wpisy)
     db.migrate()
+    asyncio.create_task(mayhem_sentinel_loop())
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
@@ -735,6 +768,11 @@ async def predictions_scorecard():
         out["hit_rate"] = round(sum(x["hit"] for x in pairs) / len(pairs), 3)
         out["mean_p"] = round(sum(x["p"] for x in pairs) / len(pairs), 3)
     return out
+
+
+@api.get("/sentinel")
+async def sentinel_status():
+    return db.get_json_setting("mayhem_api") or {"open": False, "checked_at": 0}
 
 
 @api.get("/limits")

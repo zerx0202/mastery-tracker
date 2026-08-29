@@ -992,7 +992,10 @@ def save_pool(champion_ids, queue, queue_id, pool_kind, ts):
 
 def link_pool_to_match(match_id, champion_id, reroll_count, ts, max_age=14400):
     """Po grze doklejamy do ostatniej niezamknietej puli: co wybrales
-    i w ktorym meczu. Bez tego nie wiadomo, jaki mial byc wybor."""
+    i w ktorym meczu. Bez tego nie wiadomo, jaki mial byc wybor.
+
+    UWAGA: reroll_count to relikt - od V25.13 ARAM nie ma rerolli, sa karty
+    2-3 championow z systemem litosci. Nie budowac na tym polu logiki."""
     with connect() as con:
         row = con.execute(
             "SELECT id FROM champ_select_pool WHERE match_id IS NULL AND ts > ? "
@@ -1571,3 +1574,10 @@ def migrate():
     with connect() as con:
         con.execute(f"PRAGMA user_version = {len(fns)}")
     return [f.__name__ for f in fns]
+
+
+def init_predictions():
+    """pool_prediction w jednym punkcie wejscia do schematu - dotad tabela
+    powstawala leniwie przy pierwszym zapisie, jako jedyna poza migrate()."""
+    with connect() as con:
+        con.executescript(PRED_SCHEMA)

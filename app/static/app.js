@@ -8,9 +8,13 @@ const BLANK = "data:image/svg+xml," + encodeURIComponent(
      <rect width="40" height="40" rx="5" fill="#1A212C"/>
      <text x="20" y="26" text-anchor="middle" fill="#3D4757"
        font-family="monospace" font-size="18">?</text></svg>`);
-const icon = k => k
+// CDragon dostaje nowych championow szybciej niz Data Dragon - dla postaci
+// bez klucza w DD probujemy tam, zanim pokazemy zastepnik.
+const CDRAGON = id =>
+  `https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/v1/champion-icons/${id}.png`;
+const icon = (k, cid) => k
   ? `https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${k}.png`
-  : BLANK;
+  : (cid ? CDRAGON(cid) : BLANK);
 const esc = s => String(s ?? "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
 
 const ROMAN = ["I", "II", "III", "IV"];
@@ -89,6 +93,15 @@ async function renderNow() {
       <div>Nie udało się odczytać champ selecta: ${esc(e.message)}</div></div>`;
   }
 
+  try {
+    const sen = await api("/sentinel");
+    if (sen.open) $("live-bar").insertAdjacentHTML("afterbegin", `
+      <div class="live" style="border-color:var(--gold)">
+        <span style="color:var(--gold)">★</span>
+        <div><b>Riot otworzył API Mayhema</b> — match-v5 zwraca gry z kolejki
+        2400. Można robić backfill pełnych danych.</div></div>`);
+  } catch (e) {}
+
   const inSelect = !!(lobby.active && lobby.targets && lobby.targets.length);
   let targets;
 
@@ -139,7 +152,7 @@ async function renderNow() {
           b.steps_remaining === 1 ? "szczebel" : "szczeble"} do celu</small></div>
       </div>
       <div class="hero-side">
-        <div class="who"><span class="rank-badge lead">1</span><img onerror="this.src=BLANK" src="${icon(b.key)}"
+        <div class="who"><span class="rank-badge lead">1</span><img onerror="this.src=BLANK" src="${icon(b.key, b.champion_id)}"
           alt="">${esc(b.name)}</div>
         ${rail(b.milestone, GOAL, b.next_grade)}
         <div class="range" style="margin-top:8px">${modelNote(b)}</div>
@@ -174,7 +187,7 @@ async function renderNow() {
       return `
       <tr>
         <td class="rank-cell">${i + 2}</td>
-        <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(t.key)}" alt="">
+        <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(t.key, t.champion_id)}" alt="">
           ${esc(t.name)}</div></td>
         <td class="r num">${t.steps_remaining}</td>
         <td><span class="chip ${t.next_grade === "S-" ? "gold" : ""}">${
@@ -211,7 +224,7 @@ async function renderSide() {
 
     const last = (gr.grades || []).map(g => `
       <div class="mini">
-        <img onerror="this.src=BLANK" src="${icon(g.key)}" alt="">
+        <img onerror="this.src=BLANK" src="${icon(g.key, g.champion_id)}" alt="">
         <span>${esc(g.name)}</span>
         <span class="chip ${g.grade.startsWith(">=") ? "gold" : ""}"
           style="margin-left:auto">${esc(g.grade)}</span>
@@ -287,7 +300,7 @@ async function renderGrades() {
     const ps = (ok("S-") && g.p_S != null) ? (100 * g.p_S).toFixed(0) + "%" : "—";
     return `<tr>
       <td><span class="chip ${cls}">${esc(g.grade)}</span></td>
-      <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(g.key)}" alt="">
+      <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(g.key, g.champion_id)}" alt="">
         ${esc(g.name)}</div></td>
       <td class="num">${g.kills}/${g.deaths}/${g.assists}</td>
       <td class="r num">${g.gpm}</td>
