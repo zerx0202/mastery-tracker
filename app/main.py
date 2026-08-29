@@ -202,6 +202,24 @@ async def targets(limit: int = 30, only: str | None = None,
         })
 
     scoring.score_rows(out, ladder, rates, prior, GOAL)
+
+    # progi "co trafic" dla kilku pierwszych - to jest odpowiedz na pytanie
+    # "co mam zrobic", ktorej sama liczba gier nie daje
+    md = db.get_json_setting("grade_model")
+    ready = await asyncio.to_thread(model.readiness)
+    for r in out[:limit]:
+        th = r.get("next_threshold")
+        if not th:
+            continue
+        aim = await asyncio.to_thread(
+            model.targets_for, r["champion_id"], th, use_mode, md)
+        r["aim"] = aim
+        # szansa z modelu jest wiarygodna tylko dla progow, ktore przeszly walidacje
+        v = (ready.get(th) or {}).get("validation") or {}
+        r["model_p"] = None if (not aim or aim.get("unavailable")) else aim.get("p_at_current")
+        r["model_verdict"] = (ready.get(th) or {}).get("verdict")
+        r["model_auc"] = v.get("auc")
+        r["model_games"] = None if not aim else aim.get("based_on_games")
     return {
         "goal": GOAL,
         "snapshot_id": sid,
@@ -640,6 +658,21 @@ async def lab_distribution(stat: str = "gpm", mode: str | None = None):
         buckets.setdefault(r["grade"], []).append(round(val, 1))
     return {"stat": stat,
             "buckets": {k: sorted(v) for k, v in buckets.items()}}
+
+
+@api.get("/model/readiness")
+async def model_readiness():
+    return await asyncio.to_thread(model.readiness)
+
+
+@api.get("/model/targets/{champion_id}")
+async def model_targets(champion_id: int, threshold: str = "S-",
+                        mode: str | None = None):
+    r = await asyncio.to_thread(model.targets_for, champion_id, threshold,
+                                mode or DEFAULT_MODE)
+    if r is None:
+        raise HTTPException(404, "brak modelu albo danych dla tego championa")
+    return r
 
 
 app.include_router(api)
