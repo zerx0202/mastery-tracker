@@ -671,6 +671,28 @@ async def split_progress():
     }
 
 
+@api.get("/split/timeline")
+async def split_timeline(split: int | None = None):
+    """Przebieg splitu w czasie z zapisanych snapshotow: suma marks
+    i liczba championow na kazdym szczeblu. 62 snapshoty lezaly nieuzyte."""
+    def build():
+        with db.connect() as c:
+            sid = split or (c.execute(
+                "SELECT MAX(split_id) s FROM snapshot").fetchone()["s"] or 1)
+            rows = [dict(r) for r in c.execute("""
+                SELECT s.id, s.taken_at,
+                       SUM(m.tokens) marks,
+                       SUM(CASE WHEN m.milestone >= 1 THEN 1 ELSE 0 END) ms1,
+                       SUM(CASE WHEN m.milestone >= 2 THEN 1 ELSE 0 END) ms2,
+                       SUM(CASE WHEN m.milestone >= 3 THEN 1 ELSE 0 END) ms3,
+                       SUM(CASE WHEN m.milestone >= 4 THEN 1 ELSE 0 END) ms4
+                FROM snapshot s JOIN mastery m ON m.snapshot_id = s.id
+                WHERE s.split_id = ?
+                GROUP BY s.id ORDER BY s.taken_at""", (sid,))]
+        return {"split_id": sid, "points": rows}
+    return await asyncio.to_thread(build)
+
+
 @api.get("/export")
 async def export_all():
     """Zrzut wszystkich tabel do JSON-a. Drugi kanal wyjscia obok restica -

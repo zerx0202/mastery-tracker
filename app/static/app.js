@@ -335,10 +335,67 @@ async function renderSplit() {
         ${ladder || '<div class="sub">jeszcze nieznana</div>'}
         <div class="kv" style="margin-top:14px"><span>Marks of Mastery zdobyte łącznie</span>
           <span>${d.marks_total}</span></div>
-        <div class="kv"><span>Championów na celu</span><span>${d.at_goal}</span></div>
+        <div class="kv"><span>Championów z ukończonym IV (cel misji)</span><span>${d.at_goal}</span></div>
         <div class="kv"><span>Śledzone od</span><span>${since}</span></div>
       </div>
     </div>`;
+
+
+
+
+  // ---- marks dziennie ----
+  let tl = {};
+  try { tl = await api("/split/timeline"); } catch (e) { return; }
+  const pts = tl.points || [];
+  if (pts.length < 2) return;
+
+  const dayKey = t => new Date(t * 1000).toISOString().slice(0, 10);
+  const fmtD = k => new Date(k).toLocaleDateString("pl-PL",
+    {day: "numeric", month: "short"});
+
+  const endOfDay = new Map();
+  for (const q of pts) endOfDay.set(dayKey(q.taken_at), q);
+  const daysAll = [];
+  for (let t = pts[0].taken_at; t <= pts[pts.length - 1].taken_at + 86399; t += 86400)
+    daysAll.push(dayKey(t));
+  let prevMarks = pts[0].marks, prevMs3 = pts[0].ms3;
+  const dayBars = [];
+  for (const k of daysAll) {
+    const q = endOfDay.get(k);
+    dayBars.push({k, v: q ? q.marks - prevMarks : 0, hit3: q ? q.ms3 > prevMs3 : false});
+    if (q) { prevMarks = q.marks; prevMs3 = q.ms3; }
+  }
+
+  const total = dayBars.reduce((a, b) => a + b.v, 0);
+  const W = 900, H = 220, PAD = 40;
+  const vMax = Math.max(...dayBars.map(b => b.v), 1);
+  const plotW = W - 2 * PAD, bw = Math.min(46, plotW / dayBars.length * 0.62);
+  const xB = i2 => PAD + plotW * (i2 + 0.5) / dayBars.length;
+  const yB = v => H - PAD - (H - 2 * PAD) * v / vMax;
+
+  $("split-body").insertAdjacentHTML("beforeend", `
+    <div class="panel" style="margin-top:14px">
+      <div class="panel-label">Marks dziennie ·
+        <span class="dim">łącznie +${total} od ${fmtD(dayBars[0].k)} ·
+        obrysowany słupek = tego dnia champion wszedł na III</span></div>
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;display:block">
+        <line x1="${PAD}" x2="${W - PAD}" y1="${H - PAD}" y2="${H - PAD}"
+          stroke="var(--line)"/>
+        ${dayBars.map((b, i2) => b.v === 0 ? "" : `
+          <rect x="${(xB(i2) - bw / 2).toFixed(1)}" y="${yB(b.v).toFixed(1)}"
+            width="${bw.toFixed(1)}" height="${(H - PAD - yB(b.v)).toFixed(1)}"
+            rx="3" fill="var(--gold)"
+            ${b.hit3 ? 'stroke="#F4E9CF" stroke-width="2"' : ""}/>
+          <text x="${xB(i2).toFixed(1)}" y="${(yB(b.v) - 6).toFixed(1)}"
+            text-anchor="middle" fill="var(--gold)"
+            font-size="12" font-family="var(--mono)">+${b.v}${
+            b.hit3 ? ' <tspan fill="#F4E9CF" font-weight="700">· III</tspan>' : ""}</text>`).join("")}
+        ${dayBars.map((b, i2) => `
+          <text x="${xB(i2).toFixed(1)}" y="${H - PAD + 16}" text-anchor="middle"
+            fill="var(--dim)" font-size="10.5" font-family="var(--mono)">${
+            fmtD(b.k).replace(" ", "\u00a0")}</text>`).join("")}
+      </svg>
+    </div>`);
 }
 
 /* ---------- LABORATORIUM ---------- */
