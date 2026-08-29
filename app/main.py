@@ -42,6 +42,7 @@ async def lifespan(app: FastAPI):
     db.init_grades()
     db.init_eog()
     db.init_extra()
+    db.init_pool()
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["weights"] = dict(scoring.DEFAULT_WEIGHTS)
@@ -239,9 +240,22 @@ async def set_weights(payload: dict):
 @api.post("/lobby")
 async def push_lobby(payload: dict):
     ids = [int(x) for x in payload.get("champion_ids", [])]
-    db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), int(time.time()))
+    ts = int(time.time())
+    db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), ts)
     state["last_queue_id"] = payload.get("queue_id")
-    return {"ok": True, "count": len(ids), "pool_kind": payload.get("pool_kind")}
+
+    # historia pul: bez tego nie wiadomo, jaki mial byc wybor
+    pool_id = None
+    if ids:
+        pool_id = await asyncio.to_thread(
+            db.save_pool, ids, payload.get("queue"), payload.get("queue_id"),
+            payload.get("pool_kind"), ts)
+        if pool_id:
+            await asyncio.to_thread(db.log_event, "champ_select",
+                                    {"pool_id": pool_id, "size": len(ids),
+                                     "queue": payload.get("queue")}, ts)
+    return {"ok": True, "count": len(ids), "pool_id": pool_id,
+            "pool_kind": payload.get("pool_kind")}
 
 
 @api.get("/lobby")
@@ -426,8 +440,22 @@ async def push_eog(payload: dict):
     try:
         ts = int(time.time())
         new = await asyncio.to_thread(db.save_eog, block, PLATFORM, ts)
-        await asyncio.to_thread(db.log_event, "eog", {"new": new}, ts)
-        return {"stored": True, "new": new}
+
+        gid = block.get("gameId") or block.get("gameID")
+        match_id = f"{PLATFORM.upper()}_{gid}" if gid else None
+        stats_rows = 0
+        pool_id = None
+        if match_id:
+            stats_rows = await asyncio.to_thread(db.flatten_eog_stats, block, match_id)
+            me = db._find_local_player(block)
+            reroll = (block.get("rerollData") or {}).get("rerollCount")
+            pool_id = await asyncio.to_thread(
+                db.link_pool_to_match, match_id,
+                db.normalize_champion_id(me.get("championId") or 0), reroll, ts)
+
+        await asyncio.to_thread(db.log_event, "eog", {
+            "new": new, "stats_rows": stats_rows, "pool_id": pool_id}, ts)
+        return {"stored": True, "new": new, "stats_rows": stats_rows, "pool_id": pool_id}
     except Exception as e:
         return {"stored": False, "errors": [f"{type(e).__name__}: {e}"]}
 
@@ -455,6 +483,24 @@ async def splits():
 @api.get("/events")
 async def events(limit: int = 50, kind: str | None = None):
     return db.recent_events(limit, kind)
+
+
+@api.get("/pools")
+async def pools(limit: int = 50):
+    return db.pool_history(limit)
+
+
+@api.get("/stats/keys")
+async def stats_keys():
+    return db.stat_keys()
+
+
+@api.get("/stats/share/{match_id}/{stat_key}")
+async def stats_share(match_id: str, stat_key: str):
+    r = db.my_share(match_id, stat_key)
+    if r is None:
+        raise HTTPException(404, "brak danych dla tego meczu lub pola")
+    return r
 
 
 app.include_router(api)

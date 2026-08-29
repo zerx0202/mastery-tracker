@@ -897,3 +897,175 @@ def list_splits():
                    MIN(sn.taken_at) first_snapshot, MAX(sn.taken_at) last_snapshot
             FROM split s LEFT JOIN snapshot sn ON sn.split_id = s.id
             GROUP BY s.id ORDER BY s.started_at DESC""")]
+
+
+# ============================================================
+#  Pula z champ selecta + wyplaszczone statystyki graczy
+# ============================================================
+
+POOL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS champ_select_pool (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            INTEGER NOT NULL,
+    queue         TEXT,
+    queue_id      INTEGER,
+    pool_kind     TEXT,
+    champion_ids  TEXT NOT NULL,
+    pool_size     INTEGER NOT NULL,
+    picked_id     INTEGER,
+    match_id      TEXT,
+    reroll_count  INTEGER,
+    split_id      INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_pool_ts    ON champ_select_pool(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_pool_match ON champ_select_pool(match_id);
+
+CREATE TABLE IF NOT EXISTS player_stat (
+    match_id       TEXT NOT NULL,
+    participant_no INTEGER NOT NULL,
+    champion_id    INTEGER,
+    team_id        INTEGER,
+    is_local       INTEGER NOT NULL DEFAULT 0,
+    stat_key       TEXT NOT NULL,
+    stat_value     REAL,
+    PRIMARY KEY (match_id, participant_no, stat_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ps_key   ON player_stat(stat_key);
+CREATE INDEX IF NOT EXISTS idx_ps_local ON player_stat(match_id, is_local);
+CREATE INDEX IF NOT EXISTS idx_ps_champ ON player_stat(champion_id, stat_key);
+"""
+
+
+def init_pool():
+    with connect() as con:
+        con.executescript(POOL_SCHEMA)
+
+
+def save_pool(champion_ids, queue, queue_id, pool_kind, ts):
+    """Zapisuje pule z champ selecta. Nie duplikuje, jesli ta sama pula
+    zostala juz zapisana i nie jest jeszcze przypisana do meczu."""
+    if not champion_ids:
+        return None
+    ids_json = json.dumps(sorted(champion_ids))
+    with connect() as con:
+        last = con.execute(
+            "SELECT id, champion_ids FROM champ_select_pool "
+            "WHERE match_id IS NULL ORDER BY ts DESC LIMIT 1").fetchone()
+        if last and last["champion_ids"] == ids_json:
+            return last["id"]
+        return con.execute("""
+            INSERT INTO champ_select_pool
+              (ts, queue, queue_id, pool_kind, champion_ids, pool_size, split_id)
+            VALUES (:ts, :queue, :queue_id, :pool_kind, :ids, :size, :split)
+        """, {"ts": ts, "queue": queue, "queue_id": queue_id, "pool_kind": pool_kind,
+              "ids": ids_json, "size": len(champion_ids),
+              "split": current_split_id()}).lastrowid
+
+
+def link_pool_to_match(match_id, champion_id, reroll_count, ts, max_age=14400):
+    """Po grze doklejamy do ostatniej niezamknietej puli: co wybrales
+    i w ktorym meczu. Bez tego nie wiadomo, jaki mial byc wybor."""
+    with connect() as con:
+        row = con.execute(
+            "SELECT id FROM champ_select_pool WHERE match_id IS NULL AND ts > ? "
+            "ORDER BY ts DESC LIMIT 1", (ts - max_age,)).fetchone()
+        if not row:
+            return None
+        con.execute(
+            "UPDATE champ_select_pool SET picked_id=?, match_id=?, reroll_count=? WHERE id=?",
+            (champion_id, match_id, reroll_count, row["id"]))
+    return row["id"]
+
+
+def pool_history(limit=100):
+    with connect() as con:
+        return [dict(r) for r in con.execute("""
+            SELECT p.*, c.name AS picked_name
+            FROM champ_select_pool p
+            LEFT JOIN champion c ON c.id = p.picked_id
+            ORDER BY p.ts DESC LIMIT ?""", (int(limit),))]
+
+
+# ---------- wyplaszczanie statystyk ----------
+
+def _is_camel(key):
+    """Blok zwraca kazde pole dwa razy: TOTAL_DAMAGE i totalDamage.
+    Zostawiamy jedna konwencje."""
+    return not (key.isupper() or "_" in key and key.upper() == key)
+
+
+def flatten_eog_stats(block, match_id):
+    """Rozklada statystyki wszystkich 10 graczy na wiersze klucz-wartosc.
+    Nie decydujemy z gory, ktore pola sa wazne - zapisujemy wszystkie."""
+    rows = []
+    n = 0
+    for team in block.get("teams") or []:
+        team_id = team.get("teamId")
+        for p in team.get("players") or []:
+            n += 1
+            st = p.get("stats") or {}
+            is_local = 1 if (p.get("isLocalPlayer") or p.get("selfIndex")) else 0
+            for k, v in st.items():
+                if not _is_camel(k):
+                    continue
+                if isinstance(v, bool):
+                    v = int(v)
+                if not isinstance(v, (int, float)):
+                    continue
+                rows.append({
+                    "match_id": match_id,
+                    "participant_no": n,
+                    "champion_id": p.get("championId"),
+                    "team_id": team_id,
+                    "is_local": is_local,
+                    "stat_key": k,
+                    "stat_value": float(v),
+                })
+
+    # gdy blok nie oznacza gracza lokalnego, rozpoznajemy go po championId
+    if rows and not any(r["is_local"] for r in rows):
+        me = _find_local_player(block)
+        mine = me.get("championId")
+        for r in rows:
+            if r["champion_id"] == mine:
+                r["is_local"] = 1
+
+    if not rows:
+        return 0
+    with connect() as con:
+        con.execute("DELETE FROM player_stat WHERE match_id=?", (match_id,))
+        con.executemany("""
+            INSERT INTO player_stat
+              (match_id, participant_no, champion_id, team_id, is_local, stat_key, stat_value)
+            VALUES (:match_id, :participant_no, :champion_id, :team_id, :is_local,
+                    :stat_key, :stat_value)""", rows)
+    return len(rows)
+
+
+def stat_keys():
+    with connect() as con:
+        return [dict(r) for r in con.execute(
+            "SELECT stat_key, COUNT(*) n FROM player_stat GROUP BY stat_key ORDER BY stat_key")]
+
+
+def my_share(match_id, stat_key):
+    """Twoj udzial w stawce danej gry - normalizacja na dlugosc i tempo meczu."""
+    with connect() as con:
+        rows = [dict(r) for r in con.execute(
+            "SELECT is_local, stat_value FROM player_stat "
+            "WHERE match_id=? AND stat_key=?", (match_id, stat_key))]
+    if not rows:
+        return None
+    mine = next((r["stat_value"] for r in rows if r["is_local"]), None)
+    if mine is None:
+        return None
+    total = sum(r["stat_value"] for r in rows)
+    better = sum(1 for r in rows if r["stat_value"] > mine)
+    return {
+        "value": mine,
+        "share": (mine / total) if total else None,
+        "rank_in_game": better + 1,
+        "of": len(rows),
+    }
