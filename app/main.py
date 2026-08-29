@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Header, Depends
 from fastapi.staticfiles import StaticFiles
 
 from . import db, model, scoring
@@ -56,18 +56,42 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Mastery Tracker", lifespan=lifespan)
 api = APIRouter(prefix="/api")
+write_api = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 
 
-async def riot_get(url):
-    lim = state.get("limiter")
-    if lim:
-        await lim.acquire()
-    r = await state["client"].get(url)
-    if r.status_code == 429:
-        raise HTTPException(429, f"Rate limit, ponow za {r.headers.get('Retry-After','?')}s")
-    if r.status_code != 200:
-        raise HTTPException(r.status_code, r.text)
-    return r.json()
+async def riot_get(client, url, params=None, attempts=4):
+    """Limiter czyta naglowki Riota, wiec czekamy tylko gdy naprawde trzeba.
+    Przy 429 i bledach 5xx wycofujemy sie wykladniczo zamiast bic w sciane."""
+    delay = db.LIMITER.delay()
+    if delay > 0:
+        await asyncio.sleep(min(delay, 20))
+
+    backoff = 1.0
+    last = None
+    for attempt in range(attempts):
+        r = await client.get(url, params=params,
+                             headers={"X-Riot-Token": RIOT_API_KEY}, timeout=20)
+        db.LIMITER.note(r.headers)
+
+        if r.status_code == 200:
+            return r.json()
+        if r.status_code == 404:
+            return None
+        if r.status_code in (429, 500, 502, 503, 504):
+            wait = backoff
+            ra = r.headers.get("Retry-After")
+            if ra:
+                try:
+                    wait = max(wait, float(ra))
+                except ValueError:
+                    pass
+            last = f"HTTP {r.status_code}"
+            if attempt < attempts - 1:
+                await asyncio.sleep(min(wait, 30))
+                backoff *= 2
+                continue
+        raise HTTPException(r.status_code, f"Riot API: {r.text[:200]}")
+    raise HTTPException(503, f"Riot API nie odpowiada ({last})")
 
 
 async def my_puuid():
@@ -95,7 +119,7 @@ async def health():
     }
 
 
-@api.post("/refresh-champions")
+@write_api.post("/refresh-champions")
 async def refresh_champions(force: bool = False):
     """Data Dragon - nazwy i klucze ikon. Bez klucza API, bez limitow."""
     vers = (await state["plain"].get(
@@ -112,7 +136,7 @@ async def refresh_champions(force: bool = False):
     return {"patch": patch, "champions": len(champs)}
 
 
-@api.post("/snapshot")
+@write_api.post("/snapshot")
 async def snapshot():
     puuid = await my_puuid()
     data = await riot_get(
@@ -244,7 +268,7 @@ async def get_weights():
 
 # ---------------- lobby ----------------
 
-@api.post("/lobby")
+@write_api.post("/lobby")
 async def push_lobby(payload: dict):
     ids = [int(x) for x in payload.get("champion_ids", [])]
     ts = int(time.time())
@@ -368,7 +392,7 @@ async def sync_worker():
         sync["running"] = False
 
 
-@api.post("/history/sync")
+@write_api.post("/history/sync")
 async def history_sync(full: bool = False):
     sync = state["sync"]
     if sync["running"]:
@@ -378,7 +402,7 @@ async def history_sync(full: bool = False):
     return {"started": True}
 
 
-@api.post("/history/stop")
+@write_api.post("/history/stop")
 async def history_stop():
     state["sync"]["running"] = False
     return {"stopping": True}
@@ -389,7 +413,7 @@ async def history_status():
     return {**state["sync"], **db.history_stats()}
 
 
-@api.post("/history/lcu")
+@write_api.post("/history/lcu")
 async def history_lcu(payload: dict):
     """Agent wysyla tu surowe gry z historii LCU."""
     games = payload.get("games") or []
@@ -412,7 +436,7 @@ async def history_modes():
     return db.mode_breakdown()
 
 
-@api.post("/grade")
+@write_api.post("/grade")
 async def push_grade(payload: dict):
     """Agent wysyla tu ocene pomeczowa z LCU (champion-mastery-updates).
     Przyjmuje pojedynczy obiekt albo liste."""
@@ -438,7 +462,7 @@ async def push_grade(payload: dict):
     return {"received": len(raw), "new": new, "errors": errors[:5]}
 
 
-@api.post("/eog")
+@write_api.post("/eog")
 async def push_eog(payload: dict):
     """Agent wysyla tu caly blok ekranu koncowego z LCU."""
     block = payload.get("block")
@@ -510,7 +534,7 @@ async def stats_share(match_id: str, stat_key: str):
     return r
 
 
-@api.post("/grades/backfill")
+@write_api.post("/grades/backfill")
 async def grades_backfill(window: int = 7200):
     """Odzyskuje oceny z historii snapshotow. Bezpieczne do powtarzania."""
     return await asyncio.to_thread(db.backfill_grades_from_snapshots, window)
@@ -521,7 +545,7 @@ async def model_status(min_games: int = 40):
     return db.model_status(min_games)
 
 
-@api.post("/model/train")
+@write_api.post("/model/train")
 async def model_train(mode: str | None = None):
     return await asyncio.to_thread(model.train, mode or DEFAULT_MODE)
 
@@ -625,6 +649,11 @@ async def split_progress():
     }
 
 
+@api.get("/limits")
+async def limits():
+    return db.LIMITER.status()
+
+
 @api.get("/system/health")
 async def system_health():
     with db.connect() as c:
@@ -682,7 +711,7 @@ async def model_targets(champion_id: int, threshold: str = "S-",
     return r
 
 
-@api.post("/live")
+@write_api.post("/live")
 async def push_live(payload: dict):
     """Agent wysyla tu stan z Live Client Data (port 2999)."""
     if payload.get("ended"):
@@ -746,4 +775,5 @@ async def read_live():
 
 
 app.include_router(api)
+app.include_router(write_api)
 app.mount("/", StaticFiles(directory="app/static", html=True), name="static")

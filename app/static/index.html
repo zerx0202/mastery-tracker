@@ -387,88 +387,44 @@ async function renderNow() {
 
   const rest = targets.slice(1);
 
-  // ---- champ select: pelna lista z kolumnami, ktore realnie roznicuja ----
-  if (inSelect) {
-    $("cards-label").textContent = "Kolejność w tej puli";
-    $("cards").className = "";
-    const fmt = n => (n ?? 0).toLocaleString("pl-PL");
-    const days = ts => ts ? Math.round((Date.now() - ts) / 86400000) : null;
+  // Ten sam uklad w obu widokach. Karty rozjezdzaly sie na trzy rozmiary
+  // i powtarzaly te sama etykiete; tabela pokazuje wiecej w mniejszym miejscu.
+  $("cards-label").textContent = inSelect ? "Kolejność w tej puli" : "Ranking pozostałych";
+  $("cards").className = "";
 
-    $("cards").innerHTML = `<table class="pool-table">
-      <thead><tr>
-        <th style="width:44px"></th><th>Champion</th>
-        <th class="r" style="width:74px">Zostało</th>
-        <th style="width:72px">Trzeba</th>
-        <th class="r" style="width:88px">Twoje gry</th>
-        <th class="r" style="width:100px">Maestria</th>
-        <th class="r" style="width:92px">Ostatnio</th>
-      </tr></thead>
-      <tbody>${rest.map((t, i) => {
-        const own = t.model_own_games ?? 0;
-        const d = days(t.last_play);
-        return `
-        <tr>
-          <td class="rank-cell">${i + 2}</td>
-          <td><div class="champ-cell"><img src="${icon(t.key)}" alt="">
-            ${esc(t.name)}</div></td>
-          <td class="r num">${t.steps_remaining}</td>
-          <td><span class="chip ${t.next_grade === "S-" ? "gold" : ""}">${
-            esc(t.next_grade || "?")}</span></td>
-          <td class="r num" style="${own ? "" : "color:var(--faint)"}">${own || "—"}</td>
-          <td class="r num" style="color:var(--dim)">${fmt(t.points)}</td>
-          <td class="r num" style="color:var(--dim)">${
-            d == null ? "—" : (d === 0 ? "dziś" : d + " dni")}</td>
-        </tr>`;
-      }).join("")}</tbody></table>`;
-    return;
-  }
+  const shownRows = inSelect ? rest : rest.slice(0, 15);
+  const fmt = n => (n ?? 0).toLocaleString("pl-PL");
+  const days = ts => ts ? Math.round((Date.now() - ts) / 86400000) : null;
 
-  // ---- widok pelny: grupujemy tylko nieodroznialny ogon ----
-  $("cards-label").textContent = "Ranking pozostałych";
-  $("cards").className = "cards";
-
-  const key = t => `${t.milestone}|${t.next_grade}|${Math.round(t.expected_games)}`;
-  const shown = [], groups = new Map();
-  for (const t of rest) {
-    const k = key(t);
-    if (!groups.has(k)) { groups.set(k, []); shown.push(t); }
-    groups.get(k).push(t);
-  }
-
-  let rank = 2;
-  const cardsHtml = shown.slice(0, 8).map(t => {
-    const grp = groups.get(key(t));
-    const many = grp.length > 1;
-    const pos = rank;
-    rank += grp.length;
-    const heads = many ? grp.map(x =>
-      `<img src="${icon(x.key)}" alt="" title="${esc(x.name)}">`).join("") : "";
-
-    return `
-    <div class="card${many ? " group" : ""}">
-      <div class="card-top">
-        <span class="rank-badge">${many ? `${pos}–${pos + grp.length - 1}` : pos}</span>
-        ${many ? "" : `<img src="${icon(t.key)}" alt="">`}
-        <div class="card-name">${many
-          ? `${grp.length} championów`
-          : esc(t.name)}</div>
-        <div class="card-games">
-          <div class="n">${t.steps_remaining}</div>
-          <div class="u">${t.steps_remaining === 1 ? "szczebel" : "szczeble"}</div>
-        </div>
-      </div>
-      ${many ? `<div class="heads">${heads}</div>` : ""}
-      ${rail(t.milestone, GOAL, t.next_grade)}
-      <div class="tagline">${modelNote(t)}</div>
-    </div>`;
-  }).join("");
-
-  const hiddenCount = rest.length - shown.slice(0, 8)
-    .reduce((n, t) => n + groups.get(key(t)).length, 0);
-  $("cards").innerHTML = cardsHtml + (hiddenCount > 0
-    ? `<div class="card" style="display:flex;align-items:center;justify-content:center;
-        color:var(--dim);font-family:var(--mono);font-size:12.5px">
-        i ${hiddenCount} dalszych championów</div>` : "");
+  $("cards").innerHTML = `<table class="pool-table">
+    <thead><tr>
+      <th style="width:44px"></th><th>Champion</th>
+      <th class="r" style="width:74px">Zostało</th>
+      <th style="width:72px">Trzeba</th>
+      <th class="r" style="width:88px">Twoje gry</th>
+      <th class="r" style="width:100px">Maestria</th>
+      <th class="r" style="width:92px">Ostatnio</th>
+    </tr></thead>
+    <tbody>${shownRows.map((t, i) => {
+      const own = t.model_own_games ?? 0;
+      const d = days(t.last_play);
+      return `
+      <tr>
+        <td class="rank-cell">${i + 2}</td>
+        <td><div class="champ-cell"><img src="${icon(t.key)}" alt="">
+          ${esc(t.name)}</div></td>
+        <td class="r num">${t.steps_remaining}</td>
+        <td><span class="chip ${t.next_grade === "S-" ? "gold" : ""}">${
+          esc(t.next_grade || "?")}</span></td>
+        <td class="r num" style="${own ? "" : "color:var(--faint)"}">${own || "—"}</td>
+        <td class="r num" style="color:var(--dim)">${fmt(t.points)}</td>
+        <td class="r num" style="color:var(--dim)">${
+          d == null ? "—" : (d === 0 ? "dziś" : d + " dni")}</td>
+      </tr>`;
+    }).join("")}</tbody></table>
+    ${!inSelect && rest.length > shownRows.length
+      ? `<div class="msg" style="text-align:center">i ${
+          rest.length - shownRows.length} dalszych championów</div>` : ""}`;
 }
 
 /* Panel boczny: to, po co dzis trzeba wchodzic na podstrony.

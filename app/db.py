@@ -1300,3 +1300,58 @@ def reference_pace(threshold="A-", mode=None):
         "hit": {k: med(hit, k) for k in keys},
         "miss": {k: med(miss, k) for k in keys},
     }
+
+
+# ---------- limiter oparty na naglowkach Riota ----------
+
+class RiotLimiter:
+    """Riot podaje w naglowkach aktualne zuzycie limitow. Zamiast zgadywac
+    odstepy, czytamy X-App-Rate-Limit-Count i czekamy tylko wtedy, gdy
+    faktycznie zblizamy sie do sciany."""
+
+    def __init__(self):
+        self.retry_after = 0.0
+        self.last_counts = {}
+
+    def note(self, headers):
+        import time as _t
+        ra = headers.get("Retry-After")
+        if ra:
+            try:
+                self.retry_after = _t.time() + float(ra)
+            except ValueError:
+                pass
+
+        limit = headers.get("X-App-Rate-Limit") or ""
+        count = headers.get("X-App-Rate-Limit-Count") or ""
+        parsed = {}
+        for lpart, cpart in zip(limit.split(","), count.split(",")):
+            try:
+                cap, window = lpart.split(":")
+                used, w2 = cpart.split(":")
+                if window == w2:
+                    parsed[int(window)] = (int(used), int(cap))
+            except ValueError:
+                continue
+        if parsed:
+            self.last_counts = parsed
+
+    def delay(self):
+        """Ile sekund odczekac przed nastepnym zapytaniem."""
+        import time as _t
+        now = _t.time()
+        if self.retry_after > now:
+            return self.retry_after - now
+        for window, (used, cap) in self.last_counts.items():
+            if cap and used >= cap - 2:
+                # zostaly ostatnie sloty w oknie - przeczekaj reszte okna
+                return float(window) * 0.25
+        return 0.0
+
+    def status(self):
+        return {"windows": {str(w): {"used": u, "cap": c}
+                            for w, (u, c) in self.last_counts.items()},
+                "cooldown": round(max(0.0, self.retry_after - __import__("time").time()), 1)}
+
+
+LIMITER = RiotLimiter()
