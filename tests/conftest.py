@@ -2,7 +2,6 @@
 tymczasowym. Schematy zbieramy ze wszystkich stalych *SCHEMA* w db.py,
 zeby test nie rozjechal sie z produkcja przy dodaniu tabeli."""
 import os
-import sqlite3
 
 import pytest
 
@@ -15,7 +14,7 @@ os.environ.setdefault("MY_RIOT_NAME", "Test")
 os.environ.setdefault("MY_RIOT_TAG", "EUW")
 os.environ.setdefault("API_TOKEN", "")
 
-from app import db  # noqa: E402
+from app import db
 
 
 @pytest.fixture()
@@ -43,7 +42,7 @@ def insert_row(con, table, **cols):
     pk_cols = [r for r in info if r[5]]
     auto_pk = (len(pk_cols) == 1 and "INT" in (pk_cols[0][2] or "").upper())
     row = {}
-    for cid, name, ctype, notnull, default, pk in info:
+    for _cid, name, ctype, notnull, default, pk in info:
         if name in cols:
             row[name] = cols[name]
         elif pk and auto_pk:

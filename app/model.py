@@ -16,13 +16,18 @@ liczona wzgledem innych grajacych ta postacia, wiec surowa wartosc jest
 mylaca. gold/min jest za to monotoniczne i nie wymaga normalizacji.
 """
 
-import json
 import math
 import statistics
 import time
 
-from .db import (GRADE_RANK, connect, get_json_setting, log_event, norm_z,
-                 set_json_setting)
+from .db import (
+    GRADE_RANK,
+    connect,
+    get_json_setting,
+    log_event,
+    norm_z,
+    set_json_setting,
+)
 
 # Progi, dla ktorych trenujemy osobne modele
 THRESHOLDS = ["A-", "S-"]
@@ -173,7 +178,7 @@ def _fit(X, y):
     for _ in range(EPOCHS):
         gw = [0.0] * k
         gb = 0.0
-        for xi, yi in zip(X, y):
+        for xi, yi in zip(X, y, strict=False):
             p = _sigmoid(sum(w[j] * xi[j] for j in range(k)) + b)
             err = p - yi
             for j in range(k):
@@ -188,7 +193,7 @@ def _fit(X, y):
 def _metrics(X, y, w, b):
     correct = 0
     ll = 0.0
-    for xi, yi in zip(X, y):
+    for xi, yi in zip(X, y, strict=False):
         p = _sigmoid(sum(w[j] * xi[j] for j in range(len(w))) + b)
         correct += int((p >= 0.5) == bool(yi))
         ll += yi * math.log(max(p, 1e-13)) + (1 - yi) * math.log(max(1 - p, 1e-13))
@@ -243,7 +248,7 @@ def train(mode=None, save=True):
         info.update({
             "status": info.get("status") or
                       ("ok" if len(y) >= MIN_SAMPLES else "poglądowy"),
-            "weights": dict(zip(FEATURES, [round(x, 4) for x in w])),
+            "weights": dict(zip(FEATURES, [round(x, 4) for x in w], strict=False)),
             "bias": round(b, 4),
             "means": means, "stds": stds,
             "metrics": _metrics(X, y, w, b),

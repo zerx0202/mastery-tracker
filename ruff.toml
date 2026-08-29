@@ -1,0 +1,8 @@
+# Ostre reguly to te, ktore lapia dzisiejsza klase bledow: niezdefiniowane
+# nazwy (F821 wlasnie znalazl zla nazwe zmiennej w riot_get), nieuzywane
+# zmienne, pulapki bugbear. Wylaczone: styl (BLE - celowe blind excepty
+# w petlach odpornosciowych agenta, DTZ - czasy lokalne sa tu zamierzone).
+line-length = 100
+
+[lint]
+select = ["E4", "E7", "E9", "F", "B"]

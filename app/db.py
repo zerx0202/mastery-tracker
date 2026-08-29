@@ -1225,6 +1225,7 @@ def model_status(min_games=40):
         "grades_total": total,
         "grades_exact": exact,
         "grades_censored": total - exact,
+        "grades_with_stats": joined,
         "grades_with_match_stats": with_match,
         "grades_with_full_stats": with_rich,
         "by_source": by_src,
@@ -1350,7 +1351,7 @@ class RiotLimiter:
         limit = headers.get("X-App-Rate-Limit") or ""
         count = headers.get("X-App-Rate-Limit-Count") or ""
         parsed = {}
-        for lpart, cpart in zip(limit.split(","), count.split(",")):
+        for lpart, cpart in zip(limit.split(","), count.split(","), strict=False):
             try:
                 cap, window = lpart.split(":")
                 used, w2 = cpart.split(":")
@@ -1462,13 +1463,21 @@ def champion_norms(stat_key="totalDamageDealtToChampions", mode=None, min_obs=1)
     }
 
 
-def norm_z(champion_id, stat_key, value_per_min, mode=None, cache={}):
+_NORM_CACHE = {}
+_NORM_TTL = 300  # sekund; po nowej grze normy maja sie przeliczyc, nie zamarzac
+
+
+def norm_z(champion_id, stat_key, value_per_min, mode=None, cache=None):
     """Ile odchylen powyzej typowego wyniku na tym championie.
     To jest miara, ktora Riot faktycznie stosuje przy ocenie."""
+    import time as _t
+    store = _NORM_CACHE if cache is None else cache
     key = (stat_key, mode)
-    if key not in cache:
-        cache[key] = champion_norms(stat_key, mode)
-    d = cache[key]
+    hit = store.get(key)
+    if hit is None or (cache is None and _t.time() - hit[0] > _NORM_TTL):
+        hit = (_t.time(), champion_norms(stat_key, mode))
+        store[key] = hit
+    d = hit[1]
     if not d["global"]:
         return None
     c = d["champions"].get(champion_id)

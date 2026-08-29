@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, FastAPI, HTTPException, Header, Depends
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 
 from . import db, model, scoring
@@ -83,7 +83,7 @@ async def riot_get(url, params=None, attempts=4):
     async with httpx.AsyncClient() as client:
         for attempt in range(attempts):
             r = await client.get(url, params=params,
-                                 headers={"X-Riot-Token": RIOT_API_KEY}, timeout=20)
+                                 headers={"X-Riot-Token": API_KEY}, timeout=20)
             db.LIMITER.note(r.headers)
 
             if r.status_code == 200:
