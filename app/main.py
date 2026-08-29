@@ -55,11 +55,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Mastery Tracker", lifespan=lifespan)
+API_TOKEN = os.getenv("API_TOKEN", "").strip()
+
+
+def require_token(x_api_token: str | None = Header(default=None)):
+    """Pusty token = brak ochrony (tryb domowy). Ustawiony w .env wymusza
+    naglowek X-API-Token na endpointach zapisujacych."""
+    if not API_TOKEN:
+        return
+    if x_api_token != API_TOKEN:
+        raise HTTPException(401, "zly lub brakujacy token")
+
+
 api = APIRouter(prefix="/api")
 write_api = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 
 
-async def riot_get(client, url, params=None, attempts=4):
+async def riot_get(url, params=None, attempts=4):
     """Limiter czyta naglowki Riota, wiec czekamy tylko gdy naprawde trzeba.
     Przy 429 i bledach 5xx wycofujemy sie wykladniczo zamiast bic w sciane."""
     delay = db.LIMITER.delay()
@@ -68,29 +80,33 @@ async def riot_get(client, url, params=None, attempts=4):
 
     backoff = 1.0
     last = None
-    for attempt in range(attempts):
-        r = await client.get(url, params=params,
-                             headers={"X-Riot-Token": RIOT_API_KEY}, timeout=20)
-        db.LIMITER.note(r.headers)
+    async with httpx.AsyncClient() as client:
+        for attempt in range(attempts):
+            r = await client.get(url, params=params,
+                                 headers={"X-Riot-Token": RIOT_API_KEY}, timeout=20)
+            db.LIMITER.note(r.headers)
 
-        if r.status_code == 200:
-            return r.json()
-        if r.status_code == 404:
-            return None
-        if r.status_code in (429, 500, 502, 503, 504):
-            wait = backoff
-            ra = r.headers.get("Retry-After")
-            if ra:
-                try:
-                    wait = max(wait, float(ra))
-                except ValueError:
-                    pass
-            last = f"HTTP {r.status_code}"
-            if attempt < attempts - 1:
-                await asyncio.sleep(min(wait, 30))
-                backoff *= 2
-                continue
-        raise HTTPException(r.status_code, f"Riot API: {r.text[:200]}")
+            if r.status_code == 200:
+                return r.json()
+            if r.status_code == 404:
+                return None
+
+            if r.status_code in (429, 500, 502, 503, 504):
+                last = f"HTTP {r.status_code}"
+                if attempt < attempts - 1:
+                    wait = backoff
+                    ra = r.headers.get("Retry-After")
+                    if ra:
+                        try:
+                            wait = max(wait, float(ra))
+                        except ValueError:
+                            pass
+                    await asyncio.sleep(min(wait, 30))
+                    backoff *= 2
+                    continue
+
+            raise HTTPException(r.status_code, f"Riot API: {r.text[:200]}")
+
     raise HTTPException(503, f"Riot API nie odpowiada ({last})")
 
 
