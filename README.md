@@ -78,9 +78,6 @@ tą samą postacią, więc wartość bezwzględna wprowadza w błąd.
 `gold/min` zachowuje się odwrotnie — rośnie monotonicznie wraz z oceną
 (837 → 869 → 892 → 908 → 964 → 1040) i nie wymaga normalizacji.
 
-Normalizator to własna mediana na championie, a docelowo średnia z serwisu
-zewnętrznego (`external_dpm` w tabeli `settings`), która ma pierwszeństwo.
-
 ### Skąd normalizator, skoro nie ma go w sieci
 
 Serwisy ze statystykami ARAM-a (np. aramstats.lol) nie mają Mayhema — Riot nie
@@ -102,9 +99,9 @@ ich dość, by stroić model. Poniżej progu model działa, ale jest poglądowy.
 
 ## Stack
 
-- Backend: Python 3.12, FastAPI, SQLite (WAL)
+- Backend: Python 3.12, FastAPI, SQLite (domyślny journal — WAL nie działa na bind moncie virtiofs)
 - Frontend: jeden plik HTML, bez frameworka i bez builda
-- Agent: PowerShell (docelowo Python z WebSocketem LCU)
+- Agent: Python 3.11+ (aiohttp), polling LCU z kolejką dyskową na wypadek niedostępności serwera
 - Dostęp: Tailscale z certyfikatami HTTPS, bez wystawiania czegokolwiek publicznie
 - Uruchomienie: Docker Compose
 
@@ -146,15 +143,14 @@ stronie przed wysłaniem zapytania.
 
 ## Status
 
-W rozwoju. Działa: snapshoty maestrii, nauka drabinki milestone'ów, ranking
-championów, wykrywanie champ selecta, historia meczów z LCU, backup.
-
-Działa też: zapis ocen pomeczowych i pełnych statystyk końcowych, historia pul
-z champ selecta, warstwa splitów odporna na reset, log zdarzeń, backup przez
-Tailscale z testem odtworzenia, model prawdopodobieństwa oceny.
-
-W planach: przebudowany interfejs z podstronami, widok live w trakcie gry przez
-Live Client Data API, integracja danych zewnętrznych jako normalizatora progu.
+Działa w codziennym użyciu: snapshoty przed i po każdej grze, oceny pomeczowe
+i pełne statystyki dziesięciu graczy, historia pul z champ selecta z zapisem
+predykcji **przed** grą (scorecard Briera w `/api/predictions/scorecard`),
+warstwa splitów odporna na reset, model progowy z walidacją leave-one-out
+i normalizatorem per champion z własnych danych Mayhema, interfejs
+z podstronami, panel live w trakcie meczu (Live Client Data, port 2999),
+kolejka dyskowa w agencie na wypadek niedostępności serwera, backup restic
+przez Tailscale z retencją i cotygodniowym `restic check`, testy i CI.
 
 ## Disclaimer
 
@@ -163,36 +159,6 @@ opinions of Riot Games or anyone officially involved in producing or managing
 Riot Games properties. Riot Games and all associated properties are trademarks
 or registered trademarks of Riot Games, Inc.
 
-Projekt niekomercyjny, do użytku własnego.
-
-## Uruchomienie
-
-Backend (Mac/Linux z Dockerem):
-
-cp .env.example .env # uzupełnij RIOT_API_KEY i RIOT_ID
-docker compose up -d --build
-curl localhost:8000/api/health
-
-
-Agent (Windows, przy kliencie gry):
-
-git clone git@github.com:zerx0202/mastery-tracker.git C:\repos\mastery-tracker
-cd C:\repos\mastery-tracker\agent
-copy agent.config.example.json agent.config.json # uzupełnij api_base
-start-agent.cmd
-
-
-Agent wymaga Pythona 3.11+ (`winget install Python.Python.3.12`). Środowisko
-wirtualne i zależności stawia sam przy pierwszym starcie. Dostęp do backendu
-spoza localhosta najprościej przez Tailscale (`tailscale serve`).
-
-## Zastrzeżenie
-
-Mastery Tracker isn't endorsed by Riot Games and doesn't reflect the views or
-opinions of Riot Games or anyone officially involved in producing or managing
-Riot Games properties. Riot Games, and all associated properties are trademarks
-or registered trademarks of Riot Games, Inc.
-
-Projekt prywatny i niekomercyjny. Korzysta z Riot API, lokalnego API klienta
-(LCU) oraz Live Client Data API zgodnie z polityką Riot Games dla aplikacji
-third-party.
+Projekt niekomercyjny, do użytku własnego. Korzysta z Riot API, lokalnego
+API klienta (LCU) oraz Live Client Data API zgodnie z polityką Riot Games
+dla aplikacji third-party.
