@@ -37,9 +37,11 @@ PHASES_AFTER_GAME = {"WaitingForStats", "PreEndOfGame", "EndOfGame",
                      "TerminatedInError", "None", "Lobby"}
 
 # Kandydaci na ocene pomeczowa - zrzucamy surowe odpowiedzi do analizy.
+MASTERY_UPDATES = "/lol-end-of-game/v1/champion-mastery-updates"
+
 DIAG_ENDPOINTS = [
     "/lol-end-of-game/v1/eog-stats-block",
-    "/lol-end-of-game/v1/champion-mastery-updates",
+    MASTERY_UPDATES,
     "/lol-champion-mastery/v1/local-player/champion-mastery",
     "/lol-collections/v1/inventories/champion-mastery",
     "/lol-career-stats/v1/champion-averages",
@@ -212,6 +214,24 @@ class Agent:
         if r is not None:
             log("backup wyzwolony", "ok")
 
+    async def capture_grade(self):
+        """Ocena pomeczowa. Endpoint zyje tylko na ekranie koncowym,
+        wiec czytamy go zanim klient wyczysci stan."""
+        data = await self.lcu.get(MASTERY_UPDATES)
+        if not data:
+            log("brak danych o ocenie (za pozno albo tryb bez maestrii)", "dim")
+            return
+        r = await self.server.post("/grade", {"updates": data})
+        if not r:
+            return
+        entries = data if isinstance(data, list) else [data]
+        for e in entries:
+            if e.get("grade"):
+                log(f"ocena: {e['grade']} (champion {e.get('championId')}, "
+                    f"score {e.get('score')}, +{e.get('pointsGained')} pkt)", "ok")
+        if r.get("errors"):
+            log(f"blad zapisu oceny: {r['errors'][0]}", "warn")
+
     async def dump_diagnostics(self):
         """Zrzuca surowe odpowiedzi endpointow, ktore moga zawierac ocene."""
         if not self.cfg.get("enable_dumps", True):
@@ -294,7 +314,8 @@ class Agent:
             self.in_game = False
             self.pre_snapshot_done = False
             log(f"koniec gry (faza {phase})", "ok")
-            await self.dump_diagnostics()          # zanim klient wyczysci stan
+            await self.capture_grade()             # zanim klient wyczysci stan
+            await self.dump_diagnostics()
             await asyncio.sleep(self.cfg["post_game_delay_seconds"])
             await self.snapshot("po grze")
             await self.sync_history(self.cfg["history_pages_after_game"])

@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
     db.init_lobby()
     db.init_matches()
     db.upgrade_match_player()
+    db.init_grades()
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["weights"] = dict(scoring.DEFAULT_WEIGHTS)
@@ -372,6 +373,37 @@ async def history_lcu(payload: dict):
 @api.get("/history/modes")
 async def history_modes():
     return db.mode_breakdown()
+
+
+@api.post("/grade")
+async def push_grade(payload: dict):
+    """Agent wysyla tu ocene pomeczowa z LCU (champion-mastery-updates).
+    Przyjmuje pojedynczy obiekt albo liste."""
+    raw = payload.get("updates")
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return {"received": 0, "new": 0, "errors": ["brak pola updates"]}
+
+    ts = int(time.time())
+    new, errors = 0, []
+    for entry in raw:
+        try:
+            if await asyncio.to_thread(db.save_grade, entry, PLATFORM, ts):
+                new += 1
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {e}")
+    return {"received": len(raw), "new": new, "errors": errors[:5]}
+
+
+@api.get("/grades")
+async def grades():
+    return db.grade_stats()
+
+
+@api.get("/grades/dataset")
+async def grades_dataset(mode: str | None = None):
+    return db.grades_with_stats(mode or DEFAULT_MODE)
 
 
 app.include_router(api)

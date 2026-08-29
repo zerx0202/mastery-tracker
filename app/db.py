@@ -517,3 +517,105 @@ def latest_game_creation():
     with connect() as con:
         row = con.execute("SELECT MAX(game_creation) m FROM match_player").fetchone()
     return row["m"] if row and row["m"] else None
+
+
+GRADE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS grade_observation (
+    match_id        TEXT PRIMARY KEY,
+    game_id         INTEGER NOT NULL,
+    champion_id     INTEGER NOT NULL,
+    grade           TEXT NOT NULL,
+    score           REAL,
+    points_gained   INTEGER,
+    points_contrib  INTEGER,
+    points_before   INTEGER,
+    level_after     INTEGER,
+    leveled_up      INTEGER,
+    tokens_earned   INTEGER,
+    token_after     INTEGER,
+    observed_at     INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_grade_champ ON grade_observation(champion_id);
+CREATE INDEX IF NOT EXISTS idx_grade_grade ON grade_observation(grade);
+"""
+
+GRADE_COLS = [
+    "match_id", "game_id", "champion_id", "grade", "score",
+    "points_gained", "points_contrib", "points_before", "level_after",
+    "leveled_up", "tokens_earned", "token_after", "observed_at",
+]
+
+
+def init_grades():
+    with connect() as con:
+        con.executescript(GRADE_SCHEMA)
+
+
+def save_grade(entry, platform, ts):
+    """Zapisuje ocene pomeczowa z /lol-end-of-game/v1/champion-mastery-updates.
+    Zwraca True jesli wpis byl nowy."""
+    gid = entry.get("gameId")
+    grade = entry.get("grade")
+    if not gid or not grade:
+        return False
+
+    row = {
+        "match_id": f"{platform.upper()}_{gid}",
+        "game_id": gid,
+        "champion_id": normalize_champion_id(entry.get("championId", 0)),
+        "grade": grade,
+        "score": entry.get("score"),
+        "points_gained": entry.get("pointsGained"),
+        "points_contrib": entry.get("pointsGainedIndividualContribution"),
+        "points_before": entry.get("pointsBeforeGame"),
+        "level_after": entry.get("level"),
+        "leveled_up": int(bool(entry.get("hasLeveledUp"))),
+        "tokens_earned": entry.get("tokensEarned"),
+        "token_after": int(bool(entry.get("tokenEarnedAfterGame"))),
+        "observed_at": ts,
+    }
+    sql = ("INSERT OR REPLACE INTO grade_observation (" + ", ".join(GRADE_COLS) +
+           ") VALUES (" + ", ".join(f":{c}" for c in GRADE_COLS) + ")")
+    with connect() as con:
+        existed = con.execute(
+            "SELECT 1 FROM grade_observation WHERE match_id=?", (row["match_id"],)
+        ).fetchone() is not None
+        con.execute(sql, row)
+    return not existed
+
+
+def grade_stats():
+    """Rozklad ocen i pokrycie meczami - podstawa pod model p_A / p_S."""
+    with connect() as con:
+        total = con.execute("SELECT COUNT(*) c FROM grade_observation").fetchone()["c"]
+        by_grade = [dict(r) for r in con.execute(
+            "SELECT grade, COUNT(*) n FROM grade_observation GROUP BY grade")]
+        joined = con.execute("""
+            SELECT COUNT(*) c FROM grade_observation g
+            JOIN match_player m ON m.match_id = g.match_id""").fetchone()["c"]
+        by_mode = [dict(r) for r in con.execute("""
+            SELECT m.game_mode, g.grade, COUNT(*) n
+            FROM grade_observation g
+            JOIN match_player m ON m.match_id = g.match_id
+            GROUP BY m.game_mode, g.grade
+            ORDER BY m.game_mode, n DESC""")]
+    return {"total": total, "with_match_data": joined,
+            "by_grade": by_grade, "by_mode": by_mode}
+
+
+def grades_with_stats(mode=None):
+    """Oceny sklejone ze statystykami meczu - dane treningowe modelu."""
+    clause = "AND m.game_mode = ?" if mode else ""
+    args = (mode,) if mode else ()
+    with connect() as con:
+        return [dict(r) for r in con.execute(f"""
+            SELECT g.grade, g.score, g.champion_id, c.name,
+                   m.game_mode, m.queue_id, m.win, m.kills, m.deaths, m.assists,
+                   m.dmg_champ, m.dmg_obj, m.dmg_taken, m.heal, m.cs, m.vision,
+                   m.gold, m.duration, m.game_creation
+            FROM grade_observation g
+            JOIN match_player m ON m.match_id = g.match_id
+            LEFT JOIN champion c ON c.id = g.champion_id
+            WHERE 1=1 {clause}
+            ORDER BY m.game_creation DESC""", args)]
