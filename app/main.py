@@ -301,7 +301,7 @@ async def sync_worker():
             page = await match_ids_page(puuid, start, after=after)
             if not page:
                 break
-            added = db.add_match_ids(page, ts)
+            added = await asyncio.to_thread(db.add_match_ids, page, ts)
             new_total += added
             start += len(page)
             sync["msg"] = f"zebrano {start} ID ({new_total} nowych)"
@@ -320,9 +320,9 @@ async def sync_worker():
             try:
                 data = await riot_get(
                     f"https://{REGION}.api.riotgames.com/lol/match/v5/matches/{mid}")
-                db.save_match(mid, data["info"], puuid)
+                await asyncio.to_thread(db.save_match, mid, data["info"], puuid)
             except Exception:
-                db.mark_failed(mid)
+                await asyncio.to_thread(db.mark_failed, mid)
             sync["done"] += 1
             sync["msg"] = f"pobrano {sync['done']}/{sync['total']}"
 
@@ -359,13 +359,14 @@ async def history_lcu(payload: dict):
     """Agent wysyla tu surowe gry z historii LCU."""
     games = payload.get("games") or []
     new = 0
+    errors = []
     for g in games:
         try:
-            if db.save_lcu_game(g):
+            if await asyncio.to_thread(db.save_lcu_game, g):
                 new += 1
-        except Exception:
-            pass
-    return {"received": len(games), "new": new}
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {e}")
+    return {"received": len(games), "new": new, "errors": errors[:5]}
 
 
 @api.get("/history/modes")
