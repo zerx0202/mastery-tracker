@@ -1426,7 +1426,7 @@ def champion_norms(stat_key="totalDamageDealtToChampions", mode=None, min_obs=1)
         rows = [dict(r) for r in con.execute(f"""
             SELECT p.champion_id, p.stat_value, m.duration
             FROM player_stat p
-            JOIN match_player m ON m.match_id = p.match_id
+            JOIN norm_source m ON m.match_id = p.match_id
             WHERE p.stat_key = ? AND m.duration > 300 {clause}""", args)]
 
     per = {}
@@ -1634,3 +1634,74 @@ def snowball_mark(puuid, kiwi_games, new_rows):
         con.execute("UPDATE snowball_seen SET checked_at=?, kiwi_games=?, "
                     "new_rows=new_rows+? WHERE puuid=?",
                     (int(time.time()), kiwi_games, new_rows, puuid))
+
+
+SNOWBALL_MATCH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS snowball_match (
+    game_id   INTEGER PRIMARY KEY,
+    duration  INTEGER NOT NULL,
+    game_mode TEXT,
+    queue_id  INTEGER,
+    game_ts   INTEGER,
+    from_puuid TEXT
+);
+CREATE VIEW IF NOT EXISTS norm_source AS
+    SELECT match_id, duration, game_mode FROM match_player
+    UNION ALL
+    SELECT 'SB_' || game_id, duration, game_mode FROM snowball_match;
+"""
+
+
+def init_snowball_match():
+    with connect() as con:
+        con.executescript(SNOWBALL_MATCH_SCHEMA)
+
+
+def snowball_ingest(puuid, games):
+    """Gry KIWI obcego gracza z historii LCU -> snowball_match + player_stat.
+    Historia LCU per gracz ma JEDNEGO uczestnika, wiec kazda gra to jedna
+    obserwacja (champion, statystyki, czas). Dedup po game_id; gry, w ktorych
+    sam gralem (pelne 10 obserwacji z wlasnego eog), sa pomijane."""
+    kiwi = new_rows = 0
+    with connect() as con:
+        for g in games or []:
+            gid = g.get("gameId")
+            mode = g.get("gameMode")
+            qid = g.get("queueId")
+            if not gid or (qid != 2400 and mode != "KIWI"):
+                continue
+            kiwi += 1
+            dur = int(g.get("gameDuration") or 0)
+            if dur > 10000:          # niektore zrodla daja milisekundy
+                dur //= 1000
+            if dur <= 300:
+                continue
+            own = con.execute(
+                "SELECT 1 FROM match_player WHERE match_id LIKE ?",
+                (f"%{gid}",)).fetchone()
+            if own:
+                continue
+            cur = con.execute(
+                "INSERT OR IGNORE INTO snowball_match "
+                "(game_id, duration, game_mode, queue_id, game_ts, from_puuid) "
+                "VALUES (?,?,?,?,?,?)",
+                (gid, dur, mode, qid, int((g.get("gameCreation") or 0) / 1000),
+                 puuid))
+            if cur.rowcount == 0:    # juz znana z wczesniejszego snowballa
+                continue
+            part = (g.get("participants") or [{}])[0]
+            cid = normalize_champion_id(part.get("championId"), mode)
+            stats = part.get("stats") or {}
+            mid = f"SB_{gid}"
+            for k, v in stats.items():
+                if isinstance(v, bool):
+                    v = int(v)
+                if not isinstance(v, (int, float)):
+                    continue
+                con.execute(
+                    "INSERT OR IGNORE INTO player_stat "
+                    "(match_id, participant_no, champion_id, team_id, is_local, "
+                    "stat_key, stat_value) VALUES (?,?,?,?,0,?,?)",
+                    (mid, 1, cid, part.get("teamId") or 0, k, v))
+                new_rows += 1
+    return kiwi, new_rows

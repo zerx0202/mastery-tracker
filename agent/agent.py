@@ -336,6 +336,38 @@ class Agent:
         if r:
             log(f"snowball: {r['received']} kandydatow, w rejestrze {r['known_total']}", "dim")
 
+    async def snowball_loop(self):
+        """Co ~60 s bierze jednego gracza z rejestru serwera i dosyla jego
+        gry KIWI. Chodzi tylko przy bezczynnym kliencie (nie w champ selekcie,
+        nie w grze) - LCU ma byc responsywne dla Ciebie, nie dla snowballa."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if (self.cfg.get("snowball") != "on" or not self.lcu.port
+                        or self.in_game or self.last_pool_key):
+                    continue
+                r = await self.server.post("/snowball/next-claim") \
+                    if False else None
+                nxt = await self.session.get(
+                    self.cfg["api_base"] + "/snowball/next",
+                    timeout=aiohttp.ClientTimeout(total=15))
+                data = await nxt.json()
+                puuids = data.get("puuids") or []
+                if not puuids:
+                    continue
+                pu = puuids[0]
+                h = await self.lcu.get(
+                    f"/lol-match-history/v1/products/lol/{pu}/matches"
+                    f"?begIndex=0&endIndex=19", timeout=20)
+                games = (h or {}).get("games", {}).get("games") or []
+                r = await self.server.post("/snowball/ingest",
+                                           {"puuid": pu, "games": games})
+                if r and (r.get("kiwi") or r.get("new_rows")):
+                    log(f"snowball: gracz {pu[:8]}… — {r['kiwi']} gier KIWI, "
+                        f"+{r['new_rows']} wierszy statystyk", "ok")
+            except Exception as e:
+                log(f"snowball: {type(e).__name__}: {e}", "dim")
+
     async def snowball_probe(self):
         """Jednorazowa sonda pod snowball: czy /lol-match-history dziala dla
         OBCYCH puuid. Wlacza sie tylko przy "snowball": "probe" w configu.
@@ -602,14 +634,30 @@ class Agent:
         """Glowny kanal - zdarzenia z LCU po WebSocket.
         LCU mowi protokolem WAMP 1.0, wiec podprotokol musi byc zadeklarowany,
         inaczej serwer odrzuca handshake."""
-        url = f"wss://127.0.0.1:{self.lcu.port}/"
-        async with self.session.ws_connect(
-            url,
-            headers=self.lcu.headers,
-            protocols=("wamp",),
-            ssl=self.lcu.ssl,
-            heartbeat=30,
-        ) as ws:
+        # dwa warianty handshake'u: auth w naglowku i auth w URL
+        # (league-connect uzywa drugiego); przy odmowie logujemy naglowki
+        variants = [
+            dict(url=f"wss://127.0.0.1:{self.lcu.port}/",
+                 headers=self.lcu.headers),
+            dict(url=f"wss://riot:{self.lcu.password}@127.0.0.1:{self.lcu.port}/",
+                 headers=None),
+        ]
+        ws_ctx = None
+        last_err = None
+        for v in variants:
+            try:
+                ws_ctx = await self.session.ws_connect(
+                    v["url"], headers=v["headers"], protocols=("wamp",),
+                    ssl=self.lcu.ssl, heartbeat=30)
+                break
+            except aiohttp.WSServerHandshakeError as e:
+                last_err = e
+                log(f"WS handshake {e.status} (wariant "
+                    f"{'URL-auth' if v['headers'] is None else 'naglowek'}); "
+                    f"naglowki: {dict(e.headers or {})}", "dim")
+        if ws_ctx is None:
+            raise last_err
+        async with ws_ctx as ws:
             # opcode 5 = subscribe
             await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase"]))
             await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-champ-select_v1_session"]))
@@ -648,6 +696,7 @@ class Agent:
 
             await self.load_champ_ids()
             asyncio.create_task(self.poll_loop())
+            asyncio.create_task(self.snowball_loop())
             asyncio.create_task(self.live_loop())
 
             while True:

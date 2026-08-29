@@ -780,6 +780,19 @@ async def snowball_candidates(payload: dict):
     return {"received": len(puuids), "known_total": total}
 
 
+@write_api.post("/snowball/ingest")
+async def snowball_ingest(payload: dict):
+    puuid = payload.get("puuid") or ""
+    games = payload.get("games") or []
+    kiwi, new_rows = await asyncio.to_thread(db.snowball_ingest, puuid, games)
+    await asyncio.to_thread(db.snowball_mark, puuid, kiwi, new_rows)
+    if new_rows:
+        await asyncio.to_thread(db.log_event, "snowball_ingest",
+                                {"puuid": puuid[:8], "kiwi": kiwi,
+                                 "rows": new_rows}, int(time.time()))
+    return {"kiwi": kiwi, "new_rows": new_rows}
+
+
 @api.get("/snowball/next")
 async def snowball_next(limit: int = 1):
     return {"puuids": await asyncio.to_thread(db.snowball_next, min(limit, 5))}
