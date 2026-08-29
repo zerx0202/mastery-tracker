@@ -208,6 +208,9 @@ async def targets(limit: int = 30, only: str | None = None,
     # "co mam zrobic", ktorej sama liczba gier nie daje
     md = db.get_json_setting("grade_model")
     ready = await asyncio.to_thread(model.readiness)
+    own_counts = await asyncio.to_thread(model.own_games_map, use_mode)
+    for r in out:
+        r["model_own_games"] = own_counts.get(r["champion_id"], 0)
     for r in out[:limit]:
         th = r.get("next_threshold")
         if not th:
@@ -554,37 +557,40 @@ async def model_explain(mode: str | None = None):
 
 @api.get("/grades/history")
 async def grades_history(limit: int = 60, mode: str | None = None):
-    """Oceny z predykcja modelu obok tego, co faktycznie wypadlo."""
-    rows = await asyncio.to_thread(model.training_rows, mode or DEFAULT_MODE)
-    names = {}
+    """Oceny z predykcja modelu obok tego, co faktycznie wypadlo.
+    Kolejnosc po czasie obserwacji - bez ORDER BY SQLite zwraca dowolna."""
+    use_mode = mode or DEFAULT_MODE
     with db.connect() as c:
+        rows = [dict(r) for r in c.execute("""
+            SELECT g.grade, g.champion_id, g.observed_at,
+                   m.kills, m.deaths, m.assists, m.dmg_champ, m.gold,
+                   m.cs, m.vision, m.heal, m.duration
+            FROM grade_observation g
+            JOIN match_player m ON m.match_id = g.match_id
+            WHERE m.duration > 300 AND m.game_mode = ?
+            ORDER BY g.observed_at DESC""", (use_mode,))]
         names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM champion")}
-        extra = {r["match_id"]: dict(r) for r in c.execute(
-            "SELECT match_id, grade, censored, observed_at, source FROM grade_observation")}
-        by_match = {r["match_id"]: dict(r) for r in c.execute(
-            "SELECT match_id, champion_id, game_creation FROM match_player")}
-
-    lookup = {}
-    for mid, m in by_match.items():
-        lookup.setdefault((m["champion_id"], m["game_creation"]), mid)
+        keys = {r["id"]: r["key"] for r in c.execute("SELECT id, key FROM champion")}
 
     out = []
-    for r in rows:
+    for r in rows[:limit]:
         pa = model.predict(r, "A-") or {}
         ps = model.predict(r, "S-") or {}
+        mins = max((r["duration"] or 0) / 60, 1)
         out.append({
             "grade": r["grade"],
             "champion_id": r["champion_id"],
             "name": names.get(r["champion_id"], str(r["champion_id"])),
+            "key": keys.get(r["champion_id"]),
+            "observed_at": r["observed_at"],
             "kills": r["kills"], "deaths": r["deaths"], "assists": r["assists"],
             "dmg": r["dmg_champ"], "gold": r["gold"], "duration": r["duration"],
-            "gpm": round((r["gold"] or 0) / max(r["duration"] / 60, 1)),
-            "dpm": round((r["dmg_champ"] or 0) / max(r["duration"] / 60, 1)),
+            "gpm": round((r["gold"] or 0) / mins),
+            "dpm": round((r["dmg_champ"] or 0) / mins),
             "p_A": pa.get("p"), "p_S": ps.get("p"),
             "censored": r["grade"].startswith(">="),
         })
-    out.reverse()
-    return {"count": len(out), "grades": out[:limit]}
+    return {"count": len(rows), "grades": out}
 
 
 @api.get("/split/progress")

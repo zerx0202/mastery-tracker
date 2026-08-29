@@ -585,3 +585,15 @@ def targets_for(champion_id, threshold, mode=None, model_data=None):
         "targets": usable,
         "rejected": [t["label"] for t in out if not t["reachable"]],
     }
+
+
+def own_games_map(mode=None):
+    """Liczba wlasnych gier per champion. To jest realny roznicownik miedzy
+    championami stojacymi na tym samym szczeblu - byl w sortowaniu, ale nie
+    byl pokazywany."""
+    where = "WHERE duration > 300" + (" AND game_mode = ?" if mode else "")
+    args = (mode,) if mode else ()
+    with connect() as con:
+        return {r["champion_id"]: r["n"] for r in con.execute(
+            f"SELECT champion_id, COUNT(*) n FROM match_player {where} "
+            f"GROUP BY champion_id", args)}

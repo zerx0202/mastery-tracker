@@ -321,26 +321,26 @@ async function renderNow() {
     lobby = await api("/lobby");
     if (lobby.detail) throw new Error(lobby.detail);
   } catch (e) {
-    // cichy blad tu oznaczal, ze champ select nie dzialal i nikt tego nie widzial
     $("live-bar").innerHTML = `<div class="live" style="border-color:#6B4E28;
       background:rgba(224,164,88,.07)"><span style="color:var(--warn)">⚠</span>
       <div>Nie udało się odczytać champ selecta: ${esc(e.message)}</div></div>`;
   }
 
-  const inSelect = lobby.active && lobby.targets && lobby.targets.length;
-  let data, targets;
+  const inSelect = !!(lobby.active && lobby.targets && lobby.targets.length);
+  let targets;
 
   if (inSelect) {
     targets = lobby.targets;
-    data = {goal: GOAL};
     $("live-bar").innerHTML = `<div class="live"><span class="dot"></span>
       <div><b>${esc(lobby.queue || "Champ select")}</b> —
       ${lobby.champion_ids.length} w puli, odczyt sprzed ${lobby.age}s</div></div>`;
   } else {
     $("live-bar").innerHTML = "";
+    let data;
     try { data = await api("/targets?limit=12"); } catch (e) {
-      $("hero").innerHTML = `<div class="empty-state"><h3>Backend nie odpowiada</h3>
-        <div>Sprawdź, czy kontener działa.</div></div>`;
+      $("hero").innerHTML = `<div class="hero empty"><div class="empty-state">
+        <h3>Backend nie odpowiada</h3><div>${esc(e.message)}</div></div></div>`;
+      $("cards").innerHTML = "";
       return;
     }
     if (data.detail) {
@@ -362,36 +362,71 @@ async function renderNow() {
     return;
   }
 
+  // ---- hero ----
   const b = targets[0];
   const cons = b.expected_games_conservative;
-  const steps = b.steps_remaining;
-  const gamesLine = cons && Math.abs(cons - b.expected_games) > 1
+  const gamesLine = (cons && Math.abs(cons - b.expected_games) > 1)
     ? `${Math.round(b.expected_games)}–${Math.round(cons)} gier`
     : `około ${Math.round(b.expected_games)} gier`;
 
   $("hero").innerHTML = `
     <div class="hero">
       <div>
-        <div class="big">${steps}<small>${steps === 1 ? "szczebel" : "szczeble"} do celu</small></div>
+        <div class="big">${b.steps_remaining}<small>${
+          b.steps_remaining === 1 ? "szczebel" : "szczeble"} do celu</small></div>
       </div>
       <div class="hero-side">
         <div class="who"><span class="rank-badge lead">1</span><img src="${icon(b.key)}"
           alt="">${esc(b.name)}</div>
         ${rail(b.milestone, GOAL, b.next_grade)}
-        <div class="range">${gamesLine} przy Twoim tempie${
-          b.own_games_on_champ < 8
-            ? ` <span class="dim">— oszacowanie, ${b.own_games_on_champ} gier tym championem</span>`
-            : ""}</div>
-        <div class="range" style="margin-top:6px">${modelNote(b)}</div>
+        <div class="range" style="margin-top:8px">${modelNote(b)}</div>
+        <div class="range dim" style="margin-top:4px;font-size:11.5px">
+          orientacyjnie ${gamesLine}</div>
       </div>
     </div>`;
 
-  $("cards-label").textContent = inSelect
-    ? "Kolejność w tej puli" : "Ranking pozostałych";
-
-  // Grupujemy identyczne wiersze - jedenascie kart z ta sama liczba
-  // to powtorka, nie informacja.
   const rest = targets.slice(1);
+
+  // ---- champ select: pelna lista z kolumnami, ktore realnie roznicuja ----
+  if (inSelect) {
+    $("cards-label").textContent = "Kolejność w tej puli";
+    $("cards").className = "";
+    const fmt = n => (n ?? 0).toLocaleString("pl-PL");
+    const days = ts => ts ? Math.round((Date.now() - ts) / 86400000) : null;
+
+    $("cards").innerHTML = `<table class="pool-table">
+      <thead><tr>
+        <th style="width:44px"></th><th>Champion</th>
+        <th class="r" style="width:74px">Zostało</th>
+        <th style="width:72px">Trzeba</th>
+        <th class="r" style="width:88px">Twoje gry</th>
+        <th class="r" style="width:100px">Maestria</th>
+        <th class="r" style="width:92px">Ostatnio</th>
+      </tr></thead>
+      <tbody>${rest.map((t, i) => {
+        const own = t.model_own_games ?? 0;
+        const d = days(t.last_play);
+        return `
+        <tr>
+          <td class="rank-cell">${i + 2}</td>
+          <td><div class="champ-cell"><img src="${icon(t.key)}" alt="">
+            ${esc(t.name)}</div></td>
+          <td class="r num">${t.steps_remaining}</td>
+          <td><span class="chip ${t.next_grade === "S-" ? "gold" : ""}">${
+            esc(t.next_grade || "?")}</span></td>
+          <td class="r num" style="${own ? "" : "color:var(--faint)"}">${own || "—"}</td>
+          <td class="r num" style="color:var(--dim)">${fmt(t.points)}</td>
+          <td class="r num" style="color:var(--dim)">${
+            d == null ? "—" : (d === 0 ? "dziś" : d + " dni")}</td>
+        </tr>`;
+      }).join("")}</tbody></table>`;
+    return;
+  }
+
+  // ---- widok pelny: grupujemy tylko nieodroznialny ogon ----
+  $("cards-label").textContent = "Ranking pozostałych";
+  $("cards").className = "cards";
+
   const key = t => `${t.milestone}|${t.next_grade}|${Math.round(t.expected_games)}`;
   const shown = [], groups = new Map();
   for (const t of rest) {
@@ -400,9 +435,7 @@ async function renderNow() {
     groups.get(k).push(t);
   }
 
-  // Ranking musi byc widoczny jako ranking. Grupujemy tylko ogon -
-  // championow nieodroznialnych od siebie - a nie cala liste.
-  let rank = 1;
+  let rank = 2;
   const cardsHtml = shown.slice(0, 8).map(t => {
     const grp = groups.get(key(t));
     const many = grp.length > 1;
@@ -416,7 +449,9 @@ async function renderNow() {
       <div class="card-top">
         <span class="rank-badge">${many ? `${pos}–${pos + grp.length - 1}` : pos}</span>
         ${many ? "" : `<img src="${icon(t.key)}" alt="">`}
-        <div class="card-name">${many ? `${grp.length} championów` : esc(t.name)}</div>
+        <div class="card-name">${many
+          ? `${grp.length} championów`
+          : esc(t.name)}</div>
         <div class="card-games">
           <div class="n">${t.steps_remaining}</div>
           <div class="u">${t.steps_remaining === 1 ? "szczebel" : "szczeble"}</div>
@@ -424,7 +459,7 @@ async function renderNow() {
       </div>
       ${many ? `<div class="heads">${heads}</div>` : ""}
       ${rail(t.milestone, GOAL, t.next_grade)}
-      <div class="tagline">około ${Math.round(t.expected_games)} gier · ${modelNote(t)}</div>
+      <div class="tagline">${modelNote(t)}</div>
     </div>`;
   }).join("");
 
@@ -457,7 +492,7 @@ async function renderSide() {
 
     const last = (gr.grades || []).map(g => `
       <div class="mini">
-        <img src="${icon((g.name || "").replace(/[^A-Za-z]/g, ""))}" alt="">
+        <img src="${icon(g.key)}" alt="">
         <span>${esc(g.name)}</span>
         <span class="chip ${g.grade.startsWith(">=") ? "gold" : ""}"
           style="margin-left:auto">${esc(g.grade)}</span>
@@ -533,7 +568,7 @@ async function renderGrades() {
     const ps = (ok("S-") && g.p_S != null) ? (100 * g.p_S).toFixed(0) + "%" : "—";
     return `<tr>
       <td><span class="chip ${cls}">${esc(g.grade)}</span></td>
-      <td><div class="champ-cell"><img src="${icon(g.name.replace(/[^A-Za-z]/g,''))}" alt="">
+      <td><div class="champ-cell"><img src="${icon(g.key)}" alt="">
         ${esc(g.name)}</div></td>
       <td class="num">${g.kills}/${g.deaths}/${g.assists}</td>
       <td class="r num">${g.gpm}</td>
