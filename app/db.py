@@ -194,10 +194,15 @@ def learn_ladder(entries, ts):
             "observed_at": ts,
         }
     with connect() as con:
+        split_id = current_split_id()
+        for r in rows.values():
+            r["split_id"] = split_id
+        # progi moga sie zmienic miedzy splitami - nadpisujemy w obrebie splitu
         con.executemany(
-            "INSERT OR IGNORE INTO milestone_ladder "
-            "(from_milestone, require_grades, games, reward_marks, bonus, observed_at) "
-            "VALUES (:from_milestone, :require_grades, :games, :reward_marks, :bonus, :observed_at)",
+            "INSERT OR REPLACE INTO milestone_ladder "
+            "(from_milestone, require_grades, games, reward_marks, bonus, observed_at, split_id) "
+            "VALUES (:from_milestone, :require_grades, :games, :reward_marks, :bonus, "
+            ":observed_at, :split_id)",
             list(rows.values()))
 
 
@@ -233,8 +238,10 @@ def save_snapshot(ts, entries):
             "next_marks": nxt.get("rewardMarks"),
             "grades_earned": json.dumps(e.get("milestoneGrades") or []),
         })
+    split_id = current_split_id()
     with connect() as con:
-        sid = con.execute("INSERT INTO snapshot (taken_at) VALUES (?)", (ts,)).lastrowid
+        sid = con.execute("INSERT INTO snapshot (taken_at, split_id) VALUES (?,?)",
+                          (ts, split_id)).lastrowid
         for r in rows:
             r["snapshot_id"] = sid
         con.executemany("""
@@ -320,6 +327,7 @@ MATCH_COLS = [
     "champion_id", "win", "kills", "deaths", "assists", "kill_part",
     "dmg_champ", "dmg_obj", "dmg_taken", "heal", "shield",
     "cs", "vision", "gold", "position", "source", "champion_id_raw",
+    "game_version", "patch",
 ]
 
 _MATCH_INSERT = (
@@ -407,8 +415,18 @@ def save_match(mid, info, puuid):
         "position": me.get("teamPosition") or None,
         "source": "api",
         "champion_id_raw": me["championId"],
+        "game_version": info.get("gameVersion"),
+        "patch": short_patch(info.get("gameVersion")),
     }
     return _write_match(row)
+
+
+def short_patch(version):
+    """16.16.804.9184 -> 16.16"""
+    if not version:
+        return None
+    parts = str(version).split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else str(version)
 
 
 def normalize_champion_id(cid):
@@ -455,6 +473,8 @@ def save_lcu_game(g):
         "position": tl.get("role") or tl.get("lane") or None,
         "source": "lcu",
         "champion_id_raw": raw_cid,
+        "game_version": g.get("gameVersion"),
+        "patch": short_patch(g.get("gameVersion")),
     }
     return _write_match(row)
 
@@ -546,7 +566,7 @@ CREATE INDEX IF NOT EXISTS idx_grade_grade ON grade_observation(grade);
 GRADE_COLS = [
     "match_id", "game_id", "champion_id", "grade", "score",
     "points_gained", "points_contrib", "points_before", "level_after",
-    "leveled_up", "tokens_earned", "token_after", "observed_at",
+    "leveled_up", "tokens_earned", "token_after", "observed_at", "split_id",
 ]
 
 
@@ -577,6 +597,7 @@ def save_grade(entry, platform, ts):
         "tokens_earned": entry.get("tokensEarned"),
         "token_after": int(bool(entry.get("tokenEarnedAfterGame"))),
         "observed_at": ts,
+        "split_id": current_split_id(),
     }
     sql = ("INSERT OR REPLACE INTO grade_observation (" + ", ".join(GRADE_COLS) +
            ") VALUES (" + ", ".join(f":{c}" for c in GRADE_COLS) + ")")
@@ -713,3 +734,166 @@ def eog_stats():
             JOIN grade_observation g ON g.match_id = e.match_id""").fetchone()["c"]
     return {"games": total, "with_grade": with_grade,
             "compressed_bytes": size}
+
+
+# ============================================================
+#  Splity, ustawienia, log zdarzen
+# ============================================================
+
+EXTRA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS split (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at   INTEGER NOT NULL,
+    detected_at  INTEGER NOT NULL,
+    note         TEXT
+);
+
+CREATE TABLE IF NOT EXISTS event_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        INTEGER NOT NULL,
+    kind      TEXT NOT NULL,
+    detail    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_ts   ON event_log(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_event_kind ON event_log(kind);
+"""
+
+
+def init_extra():
+    with connect() as con:
+        con.executescript(EXTRA_SCHEMA)
+        # kolumny dokladane po pierwszym wydaniu
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(match_player)")}
+        if "game_version" not in cols:
+            con.execute("ALTER TABLE match_player ADD COLUMN game_version TEXT")
+        if "patch" not in cols:
+            con.execute("ALTER TABLE match_player ADD COLUMN patch TEXT")
+
+        scols = {r["name"] for r in con.execute("PRAGMA table_info(snapshot)")}
+        if "split_id" not in scols:
+            con.execute("ALTER TABLE snapshot ADD COLUMN split_id INTEGER")
+
+        lcols = {r["name"] for r in con.execute("PRAGMA table_info(milestone_ladder)")}
+        if "split_id" not in lcols:
+            # drabinka moze sie zmienic miedzy splitami - klucz musi to uwzgledniac
+            con.execute("ALTER TABLE milestone_ladder ADD COLUMN split_id INTEGER DEFAULT 1")
+
+        gcols = {r["name"] for r in con.execute("PRAGMA table_info(grade_observation)")}
+        if "split_id" not in gcols:
+            con.execute("ALTER TABLE grade_observation ADD COLUMN split_id INTEGER")
+
+
+# ---------- ustawienia ----------
+
+def get_setting(key, default=None):
+    with connect() as con:
+        row = con.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key, value):
+    with connect() as con:
+        con.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                    (key, str(value)))
+
+
+def get_json_setting(key, default=None):
+    raw = get_setting(key)
+    if raw is None:
+        return default
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return default
+
+
+def set_json_setting(key, value):
+    set_setting(key, json.dumps(value))
+
+
+# ---------- log zdarzen ----------
+
+def log_event(kind, detail=None, ts=None):
+    import time as _t
+    with connect() as con:
+        con.execute("INSERT INTO event_log (ts, kind, detail) VALUES (?,?,?)",
+                    (ts or int(_t.time()), kind,
+                     detail if isinstance(detail, str) else json.dumps(detail) if detail else None))
+
+
+def recent_events(limit=50, kind=None):
+    q = "SELECT * FROM event_log"
+    args = []
+    if kind:
+        q += " WHERE kind=?"
+        args.append(kind)
+    q += " ORDER BY ts DESC LIMIT ?"
+    args.append(int(limit))
+    with connect() as con:
+        return [dict(r) for r in con.execute(q, args)]
+
+
+# ---------- splity ----------
+
+def current_split_id():
+    with connect() as con:
+        row = con.execute("SELECT id FROM split ORDER BY started_at DESC LIMIT 1").fetchone()
+        if row:
+            return row["id"]
+        # pierwszy split - zakotwiczamy na najstarszym snapshocie
+        first = con.execute("SELECT MIN(taken_at) t FROM snapshot").fetchone()["t"]
+        import time as _t
+        ts = first or int(_t.time())
+        sid = con.execute(
+            "INSERT INTO split (started_at, detected_at, note) VALUES (?,?,?)",
+            (ts, int(_t.time()), "split poczatkowy")).lastrowid
+        con.execute("UPDATE snapshot SET split_id=? WHERE split_id IS NULL", (sid,))
+    return sid
+
+
+def detect_split_reset(prev_sid, new_sid, ts):
+    """Reset splitu: milestone'y masowo spadaja, a punkty maestrii nie.
+    Zwraca id nowego splitu albo None."""
+    if prev_sid is None:
+        return None
+    with connect() as con:
+        row = con.execute("""
+            SELECT
+              SUM(CASE WHEN b.milestone < a.milestone THEN 1 ELSE 0 END) AS dropped,
+              SUM(CASE WHEN a.milestone > 0 THEN 1 ELSE 0 END)           AS had,
+              SUM(CASE WHEN b.points < a.points THEN 1 ELSE 0 END)       AS points_lost
+            FROM mastery a
+            JOIN mastery b ON b.champion_id = a.champion_id AND b.snapshot_id = ?
+            WHERE a.snapshot_id = ?
+        """, (new_sid, prev_sid)).fetchone()
+
+    dropped = row["dropped"] or 0
+    had = row["had"] or 0
+    points_lost = row["points_lost"] or 0
+
+    # reset = wiekszosc championow z milestone > 0 spadla, a punkty nie zniknely
+    if had < 3 or dropped < max(3, int(0.7 * had)) or points_lost > 0:
+        return None
+
+    with connect() as con:
+        sid = con.execute(
+            "INSERT INTO split (started_at, detected_at, note) VALUES (?,?,?)",
+            (ts, ts, f"reset wykryty: {dropped}/{had} championow cofnietych")).lastrowid
+        con.execute("UPDATE snapshot SET split_id=? WHERE id=?", (sid, new_sid))
+    log_event("split_reset", {"split_id": sid, "dropped": dropped, "had": had}, ts)
+    return sid
+
+
+def list_splits():
+    with connect() as con:
+        return [dict(r) for r in con.execute("""
+            SELECT s.*, COUNT(sn.id) snapshots,
+                   MIN(sn.taken_at) first_snapshot, MAX(sn.taken_at) last_snapshot
+            FROM split s LEFT JOIN snapshot sn ON sn.split_id = s.id
+            GROUP BY s.id ORDER BY s.started_at DESC""")]

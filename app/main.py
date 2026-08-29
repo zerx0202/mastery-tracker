@@ -41,6 +41,7 @@ async def lifespan(app: FastAPI):
     db.upgrade_match_player()
     db.init_grades()
     db.init_eog()
+    db.init_extra()
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["weights"] = dict(scoring.DEFAULT_WEIGHTS)
@@ -93,15 +94,19 @@ async def health():
 
 
 @api.post("/refresh-champions")
-async def refresh_champions():
+async def refresh_champions(force: bool = False):
     """Data Dragon - nazwy i klucze ikon. Bez klucza API, bez limitow."""
     vers = (await state["plain"].get(
         "https://ddragon.leagueoflegends.com/api/versions.json")).json()
     patch = vers[0]
+    if not force and db.get_setting("ddragon_patch") == patch and db.champion_count() > 0:
+        return {"patch": patch, "champions": db.champion_count(), "skipped": True}
     data = (await state["plain"].get(
         f"https://ddragon.leagueoflegends.com/cdn/{patch}/data/en_US/champion.json")).json()
     champs = [(int(v["key"]), v["name"], v["id"]) for v in data["data"].values()]
     db.save_champions(champs)
+    db.set_setting("ddragon_patch", patch)
+    db.log_event("ddragon", {"patch": patch, "champions": len(champs)})
     return {"patch": patch, "champions": len(champs)}
 
 
@@ -112,9 +117,16 @@ async def snapshot():
         f"https://{PLATFORM}.api.riotgames.com"
         f"/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}")
     ts = int(time.time())
-    db.learn_ladder(data, ts)
-    sid = db.save_snapshot(ts, data)
-    return {"snapshot_id": sid, "taken_at": ts, "champions": len(data)}
+    prev = db.latest_snapshot_id()
+    sid = await asyncio.to_thread(db.save_snapshot, ts, data)
+    new_split = await asyncio.to_thread(db.detect_split_reset, prev, sid, ts)
+    await asyncio.to_thread(db.learn_ladder, data, ts)
+    await asyncio.to_thread(db.log_event, "snapshot",
+                            {"snapshot_id": sid, "champions": len(data)}, ts)
+    out = {"snapshot_id": sid, "taken_at": ts, "champions": len(data)}
+    if new_split:
+        out["split_reset"] = new_split
+    return out
 
 
 @api.get("/ladder")
@@ -368,6 +380,9 @@ async def history_lcu(payload: dict):
                 new += 1
         except Exception as e:
             errors.append(f"{type(e).__name__}: {e}")
+    if games:
+        await asyncio.to_thread(db.log_event, "history_lcu",
+                                {"received": len(games), "new": new})
     return {"received": len(games), "new": new, "errors": errors[:5]}
 
 
@@ -392,6 +407,11 @@ async def push_grade(payload: dict):
         try:
             if await asyncio.to_thread(db.save_grade, entry, PLATFORM, ts):
                 new += 1
+                await asyncio.to_thread(db.log_event, "grade", {
+                    "grade": entry.get("grade"),
+                    "champion_id": entry.get("championId"),
+                    "game_id": entry.get("gameId"),
+                }, ts)
         except Exception as e:
             errors.append(f"{type(e).__name__}: {e}")
     return {"received": len(raw), "new": new, "errors": errors[:5]}
@@ -404,7 +424,9 @@ async def push_eog(payload: dict):
     if not isinstance(block, dict):
         return {"stored": False, "errors": ["brak pola block"]}
     try:
-        new = await asyncio.to_thread(db.save_eog, block, PLATFORM, int(time.time()))
+        ts = int(time.time())
+        new = await asyncio.to_thread(db.save_eog, block, PLATFORM, ts)
+        await asyncio.to_thread(db.log_event, "eog", {"new": new}, ts)
         return {"stored": True, "new": new}
     except Exception as e:
         return {"stored": False, "errors": [f"{type(e).__name__}: {e}"]}
@@ -423,6 +445,16 @@ async def grades():
 @api.get("/grades/dataset")
 async def grades_dataset(mode: str | None = None):
     return db.grades_with_stats(mode or DEFAULT_MODE)
+
+
+@api.get("/splits")
+async def splits():
+    return {"current": db.current_split_id(), "splits": db.list_splits()}
+
+
+@api.get("/events")
+async def events(limit: int = 50, kind: str | None = None):
+    return db.recent_events(limit, kind)
 
 
 app.include_router(api)
