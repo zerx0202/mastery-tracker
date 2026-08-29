@@ -401,16 +401,31 @@ class Agent:
         # kupno to spadek, niezaleznie od tego, czy cos zostalo w ekwipunku.
         if gt < self.live_state.get("game_time", 0) - 5 or \
            me.get("championName") != self.live_state.get("champion"):
-            self.live_state = {"spent": 0.0, "champion": me.get("championName")}
+            self.live_state = {"spent": 0.0, "earned": 0.0,
+                               "champion": me.get("championName")}
 
         prev = self.live_state.get("gold")
-        if prev is not None and gold_now < prev:
-            self.live_state["spent"] = self.live_state.get("spent", 0.0) + (prev - gold_now)
+        if prev is not None:
+            delta = gold_now - prev
+            if delta > 0:
+                # przyrost stanu = zarobek (minony, zabojstwa, dochod pasywny)
+                # albo zwrot ze sprzedazy - obu nie da sie rozroznic, ale
+                # sumowanie przyrostow jest odporne na cykle kup/sprzedaj,
+                # ktore zawyzaly licznik oparty wylacznie na wydatkach
+                self.live_state["earned"] = self.live_state.get("earned", 0.0) + delta
+            else:
+                self.live_state["spent"] = self.live_state.get("spent", 0.0) - delta
         self.live_state["gold"] = gold_now
         self.live_state["game_time"] = gt
 
         spent = self.live_state.get("spent", 0.0)
-        gold_est = int(gold_now + spent)
+        earned = self.live_state.get("earned", 0.0)
+
+        # Zloto startowe rozni sie miedzy trybami; bierzemy pierwszy
+        # zaobserwowany stan jako punkt odniesienia.
+        if "start_gold" not in self.live_state:
+            self.live_state["start_gold"] = gold_now
+        gold_est = int(self.live_state["start_gold"] + earned)
         inventory = sum((it.get("price") or 0) * (it.get("count") or 1)
                         for it in (me.get("items") or []))
 
@@ -424,7 +439,9 @@ class Agent:
             "assists": sc.get("assists"), "cs": sc.get("creepScore"),
             "ward_score": sc.get("wardScore"),
             "gold_est": gold_est, "level": me.get("level"),
-            "raw": {"spent": round(spent), "current_gold": gold_now,
+            "raw": {"spent": round(spent), "earned": round(earned),
+                    "start_gold": round(self.live_state.get("start_gold", 0)),
+                    "current_gold": gold_now,
                     "inventory_value": inventory,
                     "consumed": round(spent - inventory),
                     "items": [i.get("displayName") for i in (me.get("items") or [])]},
