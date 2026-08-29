@@ -38,8 +38,16 @@ nav .spacer{flex:1}
 nav .pulse-wrap{font:500 11px/1 var(--mono);color:var(--dim);padding:20px 0}
 
 .deck{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:22px;align-items:start}
-aside .panel{margin-bottom:14px}
-aside .mini{display:flex;align-items:center;gap:9px;padding:6px 0;font-size:13px}
+aside{min-width:0}
+aside .panel{margin-bottom:14px;overflow:hidden}
+aside .kv{gap:12px}
+aside .kv span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;
+                           white-space:nowrap}
+aside .bar-row{min-width:0}
+aside .mini{display:flex;align-items:center;gap:9px;padding:6px 0;font-size:13px;
+            min-width:0}
+aside .mini > span:not(.chip){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+aside .mini .chip{flex:none}
 aside .mini img{width:22px;height:22px;border-radius:4px;background:var(--panel2)}
 aside .mini .sp{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--dim)}
 @media (max-width:1180px){.deck{grid-template-columns:1fr}}
@@ -397,8 +405,10 @@ async function renderSide() {
       if (d < 172800) return Math.round(d / 3600) + " godz. temu";
       return Math.round(d / 86400) + " dni temu";
     };
-    const lastGrade = sys.last_seen?.grade;
-    const stale = lastGrade && (sys.now - lastGrade) > 172800;
+    // najswiezsze zdarzenie swiadczace o rozegranej grze
+    const ls = sys.last_seen || {};
+    const lastGrade = Math.max(ls.grade || 0, ls.eog || 0, ls.snapshot || 0) || null;
+    const stale = !lastGrade || (sys.now - lastGrade) > 172800;
 
     box.innerHTML = `
       <div class="panel">
@@ -593,7 +603,7 @@ async function renderSystem() {
       ${r.positives} pozytywnych</span></span>
       <span style="color:${good ? "var(--ok)" : "var(--warn)"}">${esc(r.verdict)}</span></div>
       <div class="kv" style="border:none;padding-top:0"><span class="dim"
-        style="font-size:11.5px">${detail}</span><span></span></div>`;
+        style="font-size:11.5px">${detail}</span></div>`;
   }).join("");
   const events = d.events.slice(0, 20).map(e =>
     `<tr><td class="num" style="color:var(--dim)">${ago(e.ts)}</td>
@@ -616,7 +626,7 @@ async function renderSystem() {
       <div style="margin-top:14px">${modelRows}</div>
       <div class="kv" style="margin-top:10px"><span class="dim" style="font-size:11.5px">
         Miara to walidacja leave-one-out — każda obserwacja raz jako test.
-        Metryki liczone na danych treningowych zawsze wyglądają lepiej.</span><span></span></div>
+        Metryki liczone na danych treningowych zawsze wyglądają lepiej.</span></div>
     </div>
     <div class="panel" style="margin-top:16px">
       <div class="eyebrow">Dziennik zdarzeń</div>
