@@ -132,18 +132,41 @@ class Lcu:
 
 
 class Server:
-    """Klient backendu Mastery Tracker."""
+    """Klient backendu Mastery Tracker.
+
+    Nieudane wysylki na sciezki krytyczne laduja w agent/queue/ i sa
+    dosylane w tle. Ocena i ekran koncowy istnieja w LCU chwile - jesli
+    backend akurat lezy (rebuild, uspiony Mac, czknieta siec), bez bufora
+    przepadaja bezpowrotnie. Backend deduplikuje po match_id, wiec dosylka
+    jest bezpieczna nawet podwojna. Bledy 4xx NIE trafiaja do kolejki -
+    zle dane nie stana sie dobre od powtarzania.
+    """
+
+    DURABLE = ("/grade", "/eog", "/snapshot", "/history/lcu")
+    QUEUE_DIR = HERE / "queue"
 
     def __init__(self, cfg, session):
         self.cfg = cfg
         self.session = session
+        self._flush_task = None
 
-    async def post(self, path, payload=None, timeout=90):
+    def _headers(self):
+        tok = self.cfg.get("api_token")
+        return {"X-API-Token": tok} if tok else {}
+
+    async def post(self, path, payload=None, timeout=90, _from_queue=False):
+        if self._flush_task is None:
+            self._flush_task = asyncio.create_task(self._flush_loop())
         url = path if path.startswith("http") else self.cfg["api_base"] + path
         try:
-            async with self.session.post(url, json=payload,
+            async with self.session.post(url, json=payload, headers=self._headers(),
                                          timeout=aiohttp.ClientTimeout(total=timeout)) as r:
                 txt = await r.text()
+                if r.status >= 500:
+                    log(f"serwer {r.status} na {path}: {txt[:120]}", "warn")
+                    if not _from_queue:
+                        self._enqueue(path, payload, timeout)
+                    return None
                 if r.status >= 400:
                     log(f"serwer {r.status} na {path}: {txt[:120]}", "warn")
                     return None
@@ -153,8 +176,46 @@ class Server:
                     return {"raw": txt}
         except Exception as e:
             log(f"blad polaczenia z serwerem ({path}): {e}", "warn")
+            if not _from_queue:
+                self._enqueue(path, payload, timeout)
             return None
 
+    def _enqueue(self, path, payload, timeout):
+        if not any(path.startswith(d) for d in self.DURABLE):
+            return
+        try:
+            self.QUEUE_DIR.mkdir(exist_ok=True)
+            name = f"{int(time.time() * 1000)}.json"
+            (self.QUEUE_DIR / name).write_text(
+                json.dumps({"path": path, "payload": payload, "timeout": timeout},
+                           ensure_ascii=False), encoding="utf-8")
+            log(f"zapisano do kolejki: {path} - dosle, gdy serwer wroci", "warn")
+        except OSError as e:
+            log(f"NIE MOGE zapisac kolejki: {e}", "err")
+
+    async def _flush_loop(self):
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await self._flush_once()
+            except Exception as e:
+                log(f"blad dosylki: {type(e).__name__}: {e}", "warn")
+
+    async def _flush_once(self):
+        if not self.QUEUE_DIR.exists():
+            return
+        for f in sorted(self.QUEUE_DIR.glob("*.json")):
+            try:
+                item = json.loads(f.read_text(encoding="utf-8"))
+            except ValueError:
+                f.rename(f.with_suffix(".bad"))
+                continue
+            r = await self.post(item["path"], item.get("payload"),
+                                item.get("timeout", 90), _from_queue=True)
+            if r is None:
+                return  # serwer dalej lezy - kolejka czeka w spokoju
+            f.unlink(missing_ok=True)
+            log(f"dosylka z kolejki: {item['path']} ok", "ok")
 
 class Agent:
     def __init__(self, cfg):

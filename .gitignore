@@ -18,3 +18,4 @@ __pycache__/
 agent/.venv/
 agent/dumps/
 *.bak
+agent/queue/

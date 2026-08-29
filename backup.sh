@@ -21,4 +21,12 @@ restic backup "$SNAP" --tag mastery
 restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune
 
 rm -f "$SNAP"
+
+# raz na tydzien weryfikacja samego repozytorium - backup, ktorego nikt
+# nie sprawdza, to nadzieja, nie backup
+STAMP="$HOME/.restic-last-check"
+if [ ! -f "$STAMP" ] || [ $(( $(date +%s) - $(stat -f %m "$STAMP") )) -gt 604800 ]; then
+  restic check --read-data-subset=10% && touch "$STAMP"
+fi
+
 echo "$(date '+%Y-%m-%d %H:%M') backup ok"

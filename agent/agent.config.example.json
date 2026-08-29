@@ -1,6 +1,7 @@
 {
   "_comment": "Skopiuj ten plik jako agent.config.json i uzupelnij. agent.config.json jest w .gitignore.",
   "api_base": "https://TWOJ-NODE.tailnet.ts.net/api",
+  "api_token": "",
   "backup_url": "https://TWOJ-NODE.tailnet.ts.net:8443/backup",
   "fallback_poll_seconds": 10,
   "live_poll_seconds": 5,
@@ -12,5 +13,6 @@
     "C:\\Riot Games\\League of Legends\\lockfile",
     "D:\\Riot Games\\League of Legends\\lockfile",
     "C:\\Program Files\\Riot Games\\League of Legends\\lockfile"
-  ]
+  ],
+  "_api_token_info": "Wartosc API_TOKEN z .env na serwerze. Puste = serwer bez ochrony."
 }
