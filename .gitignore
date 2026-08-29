@@ -1,4 +1,17 @@
+# sekrety
 .env
+*.env
+!.env.example
+agent/agent.config.json
+
+# dane
+data/
+agent/lcu-game.json
+
+# python
 __pycache__/
 *.pyc
-data/
+
+# certyfikaty
+*.crt
+*.key

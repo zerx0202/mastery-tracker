@@ -1,0 +1,16 @@
+{
+  "_comment": "Skopiuj ten plik jako agent.config.json i uzupelnij. agent.config.json jest w .gitignore.",
+
+  "api_base": "https://TWOJ-NODE.tailnet.ts.net/api",
+
+  "poll_seconds": 2,
+  "post_game_delay_seconds": 25,
+  "history_pages_on_start": 10,
+  "history_pages_after_game": 2,
+
+  "lockfile_paths": [
+    "C:\\Riot Games\\League of Legends\\lockfile",
+    "D:\\Riot Games\\League of Legends\\lockfile",
+    "C:\\Program Files\\Riot Games\\League of Legends\\lockfile"
+  ]
+}
