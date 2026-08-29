@@ -227,6 +227,7 @@ class Agent:
         self.in_game = False
         self.pre_snapshot_done = False
         self.history_bootstrapped = False
+        self.ws_dead_port = None   # port, na ktorym WS juz odmowil - nie mecz
         self.ws_failures = 0
         self.champ_ids = {}
         self.live_state = {}
@@ -346,8 +347,6 @@ class Agent:
                 if (self.cfg.get("snowball") != "on" or not self.lcu.port
                         or self.in_game or self.last_pool_key):
                     continue
-                r = await self.server.post("/snowball/next-claim") \
-                    if False else None
                 nxt = await self.session.get(
                     self.cfg["api_base"] + "/snowball/next",
                     timeout=aiohttp.ClientTimeout(total=15))
@@ -655,9 +654,6 @@ class Agent:
                 break
             except aiohttp.WSServerHandshakeError as e:
                 last_err = e
-                log(f"WS handshake {e.status} (wariant "
-                    f"{'URL-auth' if v['headers'] is None else 'naglowek'}); "
-                    f"naglowki: {dict(e.headers or {})}", "dim")
         if ws_ctx is None:
             raise last_err
         async with ws_ctx as ws:
