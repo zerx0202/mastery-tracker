@@ -158,6 +158,7 @@ class Agent:
         self.in_game = False
         self.pre_snapshot_done = False
         self.history_bootstrapped = False
+        self.ws_failures = 0
 
     # ---------- akcje ----------
 
@@ -316,14 +317,22 @@ class Agent:
             await asyncio.sleep(self.cfg.get("fallback_poll_seconds", 10))
 
     async def ws_loop(self):
-        """Glowny kanal - zdarzenia z LCU po WebSocket (WAMP)."""
+        """Glowny kanal - zdarzenia z LCU po WebSocket.
+        LCU mowi protokolem WAMP 1.0, wiec podprotokol musi byc zadeklarowany,
+        inaczej serwer odrzuca handshake."""
         url = f"wss://127.0.0.1:{self.lcu.port}/"
-        async with self.session.ws_connect(url, headers=self.lcu.headers,
-                                           ssl=self.lcu.ssl, heartbeat=30) as ws:
+        async with self.session.ws_connect(
+            url,
+            headers=self.lcu.headers,
+            protocols=("wamp",),
+            ssl=self.lcu.ssl,
+            heartbeat=30,
+        ) as ws:
             # opcode 5 = subscribe
             await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase"]))
             await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-champ-select_v1_session"]))
             log("WebSocket podlaczony", "ok")
+            self.ws_failures = 0
 
             async for msg in ws:
                 if msg.type != aiohttp.WSMsgType.TEXT or not msg.data:
@@ -343,8 +352,7 @@ class Agent:
                     await self.handle_champ_select(data if isinstance(data, dict) else None)
 
     async def run(self):
-        conn = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(connector=conn) as session:
+        async with aiohttp.ClientSession() as session:
             self.session = session
             self.lcu.session = session
             self.server = Server(self.cfg, session)
@@ -373,9 +381,21 @@ class Agent:
 
                 try:
                     await self.ws_loop()
+                    self.ws_failures = 0
+                except aiohttp.WSServerHandshakeError as e:
+                    self.ws_failures += 1
+                    if self.ws_failures == 1:
+                        log(f"WebSocket odrzucil polaczenie: HTTP {e.status} {e.message}", "warn")
+                        log("dzialam na pollingu co "
+                            f"{self.cfg.get('fallback_poll_seconds', 10)}s - nic nie ginie", "dim")
                 except Exception as e:
-                    log(f"WebSocket rozlaczony: {type(e).__name__}", "dim")
-                await asyncio.sleep(3)
+                    self.ws_failures += 1
+                    if self.ws_failures == 1:
+                        log(f"WebSocket rozlaczony: {type(e).__name__}: {e}", "dim")
+
+                # rosnaca przerwa, zeby nie zasypywac logu
+                delay = min(5 * (2 ** min(self.ws_failures, 5)), 120)
+                await asyncio.sleep(delay if self.ws_failures else 3)
 
 
 def main():
