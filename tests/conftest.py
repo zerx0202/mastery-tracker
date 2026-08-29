@@ -24,12 +24,7 @@ def fresh_db(tmp_path, monkeypatch):
     # Ta sama sciezka inicjalizacji co w aplikacji - wszystkie funkcje init*
     # w kolejnosci definicji. Dzieki temu baza testowa = baza produkcyjna
     # z definicji, razem z ALTER-ami dokladajacymi kolumny.
-    inits = sorted(
-        (getattr(db, n) for n in dir(db)
-         if n.startswith("init") and callable(getattr(db, n))),
-        key=lambda f: f.__code__.co_firstlineno)
-    for fn in inits:
-        fn()
+    db.migrate()
     return path
 
 

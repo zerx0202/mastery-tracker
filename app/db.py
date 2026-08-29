@@ -1550,3 +1550,24 @@ def prediction_pairs():
               ON csp.id = pp.pool_id AND csp.match_id IS NOT NULL
             WHERE csp.id IS NULL""").fetchone()["c"]
     return resolved, pending
+
+
+def migrate():
+    """Jedyny punkt wejscia do schematu. Odpala wszystkie init_* i upgrade_*
+    w kolejnosci definicji w pliku - nowa funkcja migracyjna dopisana na koncu
+    zostanie wykonana automatycznie, bez pamietania o lifespanie.
+
+    Kazda funkcja musi byc idempotentna (CREATE IF NOT EXISTS / ALTER tylko
+    gdy kolumny brak) - pilnuje tego test podwojnego uruchomienia."""
+    import sys
+    mod = sys.modules[__name__]
+    fns = sorted(
+        (getattr(mod, n) for n in dir(mod)
+         if (n.startswith("init") or n.startswith("upgrade"))
+         and callable(getattr(mod, n))),
+        key=lambda f: f.__code__.co_firstlineno)
+    for fn in fns:
+        fn()
+    with connect() as con:
+        con.execute(f"PRAGMA user_version = {len(fns)}")
+    return [f.__name__ for f in fns]
