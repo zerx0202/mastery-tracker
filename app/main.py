@@ -46,7 +46,6 @@ async def lifespan(app: FastAPI):
     db.upgrade_grades()
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
-    state["weights"] = dict(scoring.DEFAULT_WEIGHTS)
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
     state["plain"] = httpx.AsyncClient(timeout=15.0)
     yield
@@ -167,6 +166,7 @@ async def targets(limit: int = 30, only: str | None = None,
         raise HTTPException(400, "Brak snapshotow - zrob POST /snapshot")
 
     ladder = db.get_ladder()
+    use_mode = mode or DEFAULT_MODE
 
     wanted_ids = None
     if ids:
@@ -175,9 +175,8 @@ async def targets(limit: int = 30, only: str | None = None,
     if only:
         wanted = {norm(s) for s in only.split(",") if s.strip()}
 
-    use_mode = mode or DEFAULT_MODE
-    stats = db.champion_stats_ex(use_mode, () if use_mode else EXCLUDED_MODES)
-    prior, prior_games = db.mode_prior(use_mode, () if use_mode else EXCLUDED_MODES)
+    rates_all = await asyncio.to_thread(model.champion_rates, use_mode)
+    rates, prior = rates_all["champions"], rates_all["prior"]
 
     out = []
     for r in db.snapshot_rows(sid):
@@ -189,51 +188,36 @@ async def targets(limit: int = 30, only: str | None = None,
         if r["milestone"] >= GOAL:
             continue
 
-        games, steps, marks = path_to_goal(r["milestone"], ladder)
-        next_req = json.loads(r["next_grades"] or "null")
-
         out.append({
             "champion_id": r["champion_id"],
             "name": name,
             "key": r["key"],
             "milestone": r["milestone"],
-            "next_grade": cheapest_grade(next_req),
             "next_games": r["next_games"],
             "grades_earned": json.loads(r["grades_earned"] or "[]"),
-            "games_to_goal": games,
-            "games_known": sum(st["games"] for st in steps),
-            "marks_known": marks,
-            "path": steps,
             "level": r["level"],
             "points": r["points"],
             "tokens": r["tokens"],
             "last_play": r["last_play"],
         })
 
-    scoring.score_rows(out, stats, prior, state.get("weights"), int(time.time()), GOAL)
+    scoring.score_rows(out, ladder, rates, prior, GOAL)
     return {
         "goal": GOAL,
         "snapshot_id": sid,
         "mode": use_mode,
-        "prior_winrate": round(prior, 3),
-        "prior_games": prior_games,
+        "prior": prior,
+        "summary": scoring.summarize(out, GOAL),
         "targets": out[:limit],
     }
 
 
 @api.get("/weights")
 async def get_weights():
-    return {"weights": state.get("weights"), "defaults": scoring.DEFAULT_WEIGHTS}
-
-
-@api.post("/weights")
-async def set_weights(payload: dict):
-    w = dict(scoring.DEFAULT_WEIGHTS)
-    for k, v in (payload or {}).items():
-        if k in w:
-            w[k] = float(v)
-    state["weights"] = w
-    return {"weights": w}
+    """Zachowane dla zgodnosci ze starym frontendem. Scoring nie uzywa juz
+    wag - liczy oczekiwana liczbe gier z modelu."""
+    return {"weights": {}, "defaults": {},
+            "note": "scoring liczy oczekiwana liczbe gier, wagi sa nieaktualne"}
 
 
 # ---------------- lobby ----------------

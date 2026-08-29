@@ -1,113 +1,134 @@
-"""Dwupoziomowy ranking championow.
+"""
+Ranking championow: oczekiwana liczba gier do ukonczenia misji.
 
-Poziom 1 (twardy): ile szczebli milestone zostalo do celu.
-Poziom 2 (wynik 0..100): jak prawdopodobne, ze dowieziesz NASTEPNY szczebel.
+Zamiast sumy wazonej arbitralnych podwynikow liczymy jedna wielkosc
+o jasnym znaczeniu: ile gier tym championem srednio zajmie dojscie
+do GOAL_MILESTONE.
 
-Brakujace dane sa POMIJANE, nie zastepowane wartoscia neutralna - inaczej
-wynik jest sredniá z polowek i wagi przestaja cokolwiek zmieniac. Zamiast
-tego kazdy wiersz dostaje `confidence`: jaka czesc lacznej wagi opiera sie
-na realnych danych.
+    E(c) = suma po szczeblach m od obecnego do celu z 1 / p(c, m)
+
+gdzie p(c, m) to prawdopodobienstwo przebicia szczebla m na championie c,
+brane z modelu (grade_observation -> regresja) i sciagane do sredniej
+globalnej proporcjonalnie do liczby gier.
+
+Dlaczego tak, a nie inaczej: symulacja Monte Carlo na prawdziwym stanie
+(175 championow, p_A=0.54, p_S=0.06, losowa pula 7 na gre) dala mediane
+84 gier dla strategii "najblizej celu" i "min. oczekiwanych gier", 632 dla
+"najwieksza szansa przebicia" i brak ukonczenia dla strategii szerokosci.
+Misja wymaga dwoch S- na TYM SAMYM championie, wiec kazda strategia
+unikajaca prob S- nigdy nie konczy.
 """
 
 import math
+import time
 
 from .db import GRADE_RANK
 
-MAX_RANK = GRADE_RANK["S+"]
+# Ponizej tylu gier na championie prawdopodobienstwo jest praktycznie
+# rowne sredniej globalnej - oznaczamy to jako niska pewnosc.
+LOW_CONFIDENCE_GAMES = 3
 
-DEFAULT_WEIGHTS = {
-    "grade_hist": 2.5,   # jak blisko progu byly Twoje oceny w tym milestonie
-    "winrate":    1.0,   # WR w trybie, sciagniety do sredniej
-    "recency":    1.2,   # swiezosc
-    "ppg":        1.0,   # punkty maestrii na gre
-    "experience": 1.0,   # obycie (log punktow)
-}
-
-SHRINK_K = 5.0
-RECENCY_HALFLIFE = 30.0
-
-# ile realnej wagi musi byc obecne, zeby wynik traktowac powaznie
-CONFIDENCE_OK = 0.6
+# Kara za nieznany szczebel drabinki (nie powinno sie zdarzac,
+# odkad learn_ladder zna komplet)
+UNKNOWN_STEP_COST = 20.0
 
 
-def _shrunk_winrate(wins, games, prior):
-    if not games:
-        return None
-    return (wins + SHRINK_K * prior) / (games + SHRINK_K)
-
-
-def _grade_hist(grades, required):
-    """Najlepsza zebrana ocena wzgledem wymaganej.
-    Brak ocen w tym milestonie = brak informacji, nie zero."""
-    if not grades or not required:
-        return None
-    req = GRADE_RANK.get(required)
+def cheapest_grade(req):
     if not req:
         return None
-    best = max((GRADE_RANK[g] for g in grades if g in GRADE_RANK), default=None)
-    if best is None:
+    return min(req.keys(), key=lambda g: GRADE_RANK.get(g, 99))
+
+
+def _threshold_for(step):
+    """Ktory z dwoch modeli progowych obsluguje ten szczebel."""
+    g = cheapest_grade((step or {}).get("require_grades"))
+    if not g:
         return None
-    return min(1.0, best / req)
+    return "S-" if GRADE_RANK.get(g, 0) >= GRADE_RANK["S-"] else "A-"
 
 
-def _recency(last_play_ms, now_s):
-    if not last_play_ms:
-        return None
-    days = max(0.0, (now_s - last_play_ms / 1000.0) / 86400.0)
-    return math.exp(-days / RECENCY_HALFLIFE)
+def _p_step(champion_id, step, rates, prior):
+    """Prawdopodobienstwo przebicia jednego szczebla."""
+    th = _threshold_for(step)
+    if th is None:
+        return None, None, 0
+    d = (rates.get(champion_id) or {}).get(th) or {}
+    games = d.get("games", 0)
+    if games:
+        return d.get("shrunk") or prior.get(th, 0.2), th, games
+    return prior.get(th, 0.2), th, 0
 
 
-def _normalizer(values):
-    """Min-max w obrebie puli. None zostaje None."""
-    vals = [v for v in values if v is not None]
-    if not vals:
-        return lambda x: None
-    lo, hi = min(vals), max(vals)
-    if hi - lo < 1e-9:
-        return lambda x: None if x is None else 0.5
-    return lambda x: None if x is None else (x - lo) / (hi - lo)
+def expected_games(champion_id, milestone, goal, ladder, rates, prior):
+    """Rozklada droge do celu na szczeble i sumuje 1/p dla kazdego."""
+    total = 0.0
+    steps = []
+    known = True
+    for m in range(milestone, goal):
+        step = ladder.get(m)
+        if step is None:
+            known = False
+            total += UNKNOWN_STEP_COST
+            steps.append({"from": m, "to": m + 1, "grade": None,
+                          "p": None, "games": UNKNOWN_STEP_COST, "known": False})
+            continue
+        p, th, n = _p_step(champion_id, step, rates, prior)
+        cost = 1.0 / max(p, 1e-6)
+        total += cost
+        steps.append({
+            "from": m, "to": m + 1,
+            "grade": cheapest_grade(step["require_grades"]),
+            "threshold": th,
+            "p": round(p, 4),
+            "games": round(cost, 1),
+            "own_games": n,
+            "known": True,
+        })
+    return total, steps, known
 
 
-def score_rows(rows, stats, prior, weights, now_s, goal):
-    w = {**DEFAULT_WEIGHTS, **(weights or {})}
-    w = {k: v for k, v in w.items() if k in DEFAULT_WEIGHTS}
-    total_w = sum(w.values()) or 1.0
+def score_rows(rows, ladder, rates, prior, goal, now_s=None):
+    """Modyfikuje rows w miejscu. Sortuje rosnaco po oczekiwanej liczbie gier."""
+    now_s = now_s or int(time.time())
 
     for r in rows:
-        st = stats.get(r["champion_id"]) or {}
-        games = st.get("games") or 0
-        req = r.get("next_grade")
+        cid = r["champion_id"]
+        exp, steps, known = expected_games(cid, r["milestone"], goal, ladder, rates, prior)
 
+        r["expected_games"] = round(exp, 1)
+        r["path"] = steps
+        r["path_known"] = known
         r["steps_remaining"] = max(0, goal - r["milestone"])
-        r["games_played"] = games
-        r["winrate_raw"] = (st["wins"] / games) if games else None
-        r["best_grade"] = max(
-            (g for g in (r.get("grades_earned") or []) if g in GRADE_RANK),
-            key=lambda g: GRADE_RANK[g], default=None)
 
-        r["_raw"] = {
-            "grade_hist": _grade_hist(r.get("grades_earned"), req),
-            "winrate": _shrunk_winrate(st.get("wins") or 0, games, prior),
-            "recency": _recency(r.get("last_play"), now_s),
-            "ppg": (r["points"] / games) if games else None,
-            "experience": math.log1p(r["points"]),
-        }
+        # najblizszy szczebel - to widzisz w champ selekcie
+        nxt = steps[0] if steps else None
+        r["next_grade"] = (nxt or {}).get("grade")
+        r["next_p"] = (nxt or {}).get("p")
+        r["next_threshold"] = (nxt or {}).get("threshold")
 
-    norms = {k: _normalizer([r["_raw"][k] for r in rows]) for k in DEFAULT_WEIGHTS}
+        own = sum(s.get("own_games", 0) for s in steps)
+        r["own_games_on_champ"] = own
+        r["confidence"] = "niska" if own < LOW_CONFIDENCE_GAMES else "ok"
 
-    for r in rows:
-        raw = r.pop("_raw")
-        parts = {k: norms[k](raw[k]) for k in DEFAULT_WEIGHTS}
-        present = {k: v for k, v in parts.items() if v is not None}
+        # wynik 0-100 wylacznie do paska w UI - sortuje expected_games
+        r["score"] = round(100.0 * math.exp(-exp / 40.0), 1)
 
-        den = sum(w[k] for k in present) or 1.0
-        num = sum(w[k] * v for k, v in present.items())
-
-        r["score"] = round(100.0 * num / den, 1) if present else 0.0
-        r["confidence"] = round(sum(w[k] for k in present) / total_w, 2)
-        r["thin"] = r["confidence"] < CONFIDENCE_OK
-        r["score_parts"] = {k: (round(v, 3) if v is not None else None) for k, v in parts.items()}
-        r["missing"] = [k for k, v in parts.items() if v is None]
-
-    rows.sort(key=lambda x: (x["steps_remaining"], -x["score"]))
+    rows.sort(key=lambda x: (x["expected_games"], -x["points"]))
     return rows
+
+
+def summarize(rows, goal):
+    """Krotkie podsumowanie: ile gier do misji przy obecnym stanie."""
+    if not rows:
+        return None
+    best = rows[0]
+    return {
+        "goal": goal,
+        "best_champion": best.get("name"),
+        "best_champion_id": best.get("champion_id"),
+        "expected_games": best.get("expected_games"),
+        "next_grade": best.get("next_grade"),
+        "confidence": best.get("confidence"),
+        "candidates_within_2x": sum(
+            1 for r in rows if r["expected_games"] <= 2 * best["expected_games"]),
+    }
