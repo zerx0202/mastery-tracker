@@ -15,3 +15,5 @@ __pycache__/
 # certyfikaty
 *.crt
 *.key
+agent/.venv/
+agent/dumps/
