@@ -61,8 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_time ON snapshot(taken_at DESC);
 """
 
 LOBBY_SCHEMA = """
-DROP TABLE IF EXISTS lobby;
-CREATE TABLE lobby (
+CREATE TABLE IF NOT EXISTS lobby (
     id           INTEGER PRIMARY KEY CHECK (id = 1),
     champion_ids TEXT NOT NULL,
     queue        TEXT,

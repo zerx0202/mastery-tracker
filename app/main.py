@@ -278,8 +278,8 @@ async def read_lobby(max_age: int = 900):
         "queue": lob["queue"],
         "pool_kind": lob["pool_kind"],
         "champion_ids": lob["champion_ids"],
-        "prior_winrate": t["prior_winrate"],
-        "prior_games": t["prior_games"],
+        "prior": t.get("prior"),
+        "summary": t.get("summary"),
         "targets": t["targets"],
     }
 

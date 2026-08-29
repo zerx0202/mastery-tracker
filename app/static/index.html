@@ -317,7 +317,15 @@ async function renderNow() {
   $("live-panel") && ($("live-panel").innerHTML = live.active ? livePanel(live) : "");
 
   let lobby = {active: false};
-  try { lobby = await api("/lobby"); } catch (e) {}
+  try {
+    lobby = await api("/lobby");
+    if (lobby.detail) throw new Error(lobby.detail);
+  } catch (e) {
+    // cichy blad tu oznaczal, ze champ select nie dzialal i nikt tego nie widzial
+    $("live-bar").innerHTML = `<div class="live" style="border-color:#6B4E28;
+      background:rgba(224,164,88,.07)"><span style="color:var(--warn)">⚠</span>
+      <div>Nie udało się odczytać champ selecta: ${esc(e.message)}</div></div>`;
+  }
 
   const inSelect = lobby.active && lobby.targets && lobby.targets.length;
   let data, targets;
