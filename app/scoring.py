@@ -26,7 +26,7 @@ from .db import GRADE_RANK
 
 # Ponizej tylu gier na championie prawdopodobienstwo jest praktycznie
 # rowne sredniej globalnej - oznaczamy to jako niska pewnosc.
-LOW_CONFIDENCE_GAMES = 3
+LOW_CONFIDENCE_GAMES = 8      # ponizej tego jedna gra przesadza o wyniku
 
 # Kara za nieznany szczebel drabinki (nie powinno sie zdarzac,
 # odkad learn_ladder zna komplet)
@@ -87,6 +87,20 @@ def expected_games(champion_id, milestone, goal, ladder, rates, prior):
     return total, steps, known
 
 
+def expected_games_prior_only(milestone, goal, ladder, prior):
+    """Wariant ostrozny: ignoruje wlasne wyniki na championie, liczy tylko
+    ze srednich. Pokazuje, ile bylby wart champion, gdyby nie ta garstka gier."""
+    total = 0.0
+    for m in range(milestone, goal):
+        step = ladder.get(m)
+        if step is None:
+            total += UNKNOWN_STEP_COST
+            continue
+        th = _threshold_for(step)
+        total += 1.0 / max(prior.get(th, 0.2), 1e-6)
+    return total
+
+
 def score_rows(rows, ladder, rates, prior, goal, now_s=None):
     """Modyfikuje rows w miejscu. Sortuje rosnaco po oczekiwanej liczbie gier."""
     now_s = now_s or int(time.time())
@@ -110,6 +124,12 @@ def score_rows(rows, ladder, rates, prior, goal, now_s=None):
         r["own_games_on_champ"] = own
         r["confidence"] = "niska" if own < LOW_CONFIDENCE_GAMES else "ok"
 
+        # ile wyszloby bez wlasnych wynikow - miara tego, jak bardzo
+        # optymistyczna ocena opiera sie na garstce gier
+        cons = expected_games_prior_only(r["milestone"], goal, ladder, prior)
+        r["expected_games_conservative"] = round(cons, 1)
+        r["optimism"] = round(cons / exp, 2) if exp > 0 else None
+
         # wynik 0-100 wylacznie do paska w UI - sortuje expected_games
         r["score"] = round(100.0 * math.exp(-exp / 40.0), 1)
 
@@ -129,6 +149,12 @@ def summarize(rows, goal):
         "expected_games": best.get("expected_games"),
         "next_grade": best.get("next_grade"),
         "confidence": best.get("confidence"),
+        "expected_games_conservative": best.get("expected_games_conservative"),
+        "own_games": best.get("own_games_on_champ"),
         "candidates_within_2x": sum(
             1 for r in rows if r["expected_games"] <= 2 * best["expected_games"]),
+        "warning": (
+            f"ocena opiera sie na {best.get('own_games_on_champ')} grach - "
+            f"bez nich wyszloby {best.get('expected_games_conservative')} gier"
+            if best.get("confidence") == "niska" else None),
     }
