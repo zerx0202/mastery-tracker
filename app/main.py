@@ -301,12 +301,23 @@ async def push_lobby(payload: dict):
             await asyncio.to_thread(db.log_event, "champ_select",
                                     {"pool_id": pool_id, "size": len(ids),
                                      "queue": payload.get("queue")}, ts)
+            # predykcje PRZED gra - jedyny test modelu, ktorego nie da sie
+            # oszukac; wynik doklei sie sam przez link_pool_to_match
+            try:
+                t = await targets(limit=200, ids=",".join(map(str, ids)),
+                                  mode=payload.get("queue"))
+                n = await asyncio.to_thread(
+                    db.save_pool_predictions, pool_id, t.get("targets", []), ts)
+                state["last_predictions"] = n
+            except Exception as e:
+                await asyncio.to_thread(db.log_event, "prediction_error",
+                                        {"err": str(e)[:200]}, ts)
     return {"ok": True, "count": len(ids), "pool_id": pool_id,
             "pool_kind": payload.get("pool_kind")}
 
 
 @api.get("/lobby")
-async def read_lobby(max_age: int = 900):
+async def read_lobby(max_age: int = 5400):
     lob = db.get_lobby()
     if not lob or not lob["champion_ids"]:
         return {"active": False, "targets": []}
@@ -665,6 +676,27 @@ async def split_progress():
         "tracking_since": first,
         "events": events,
     }
+
+
+@api.get("/predictions/scorecard")
+async def predictions_scorecard():
+    """Uczciwosc modelu na predykcjach sprzed gry. Brier: 0 idealnie,
+    0.25 to poziom rzucania moneta przy p=0.5."""
+    from . import model as _m
+    resolved, pending = await asyncio.to_thread(db.prediction_pairs)
+    pairs = []
+    for r in resolved:
+        y = _m.label_for(r["grade"], r["threshold"])
+        if y is None:
+            continue
+        pairs.append({"p": r["p"], "hit": y, "threshold": r["threshold"],
+                      "grade": r["grade"], "ts": r["ts"]})
+    out = {"resolved": len(pairs), "pending_pools": pending, "pairs": pairs[:50]}
+    if pairs:
+        out["brier"] = round(sum((x["p"] - x["hit"]) ** 2 for x in pairs) / len(pairs), 4)
+        out["hit_rate"] = round(sum(x["hit"] for x in pairs) / len(pairs), 3)
+        out["mean_p"] = round(sum(x["p"] for x in pairs) / len(pairs), 3)
+    return out
 
 
 @api.get("/limits")

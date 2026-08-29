@@ -1489,3 +1489,62 @@ def norm_z(champion_id, stat_key, value_per_min, mode=None, cache=None):
         "observations": (c or {}).get("n", 0),
         "confidence": (c or {}).get("confidence", 0.0),
     }
+
+
+# ============================================================
+#  Predykcje zapisywane PRZED gra
+# ============================================================
+#
+# Walidacja LOO patrzy wstecz i modelowi latwo w niej wygladac dobrze.
+# Predykcja zapisana w champ selekcie - zanim wynik istnieje - to jedyny
+# test, ktorego nie da sie oszukac. Po grze link_pool_to_match przypina
+# pule do meczu, ocena wpada do grade_observation i para
+# "przewidywanie -> wynik" sklada sie sama.
+
+PRED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS pool_prediction (
+    pool_id     INTEGER NOT NULL,
+    champion_id INTEGER NOT NULL,
+    threshold   TEXT,
+    p           REAL,
+    specific    INTEGER DEFAULT 0,
+    own_games   INTEGER,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (pool_id, champion_id)
+);
+"""
+
+
+def save_pool_predictions(pool_id, rows, ts):
+    with connect() as con:
+        con.executescript(PRED_SCHEMA)
+        for r in rows:
+            con.execute(
+                "INSERT OR REPLACE INTO pool_prediction "
+                "(pool_id, champion_id, threshold, p, specific, own_games, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (pool_id, r["champion_id"], r.get("next_grade"), r.get("model_p"),
+                 1 if r.get("model_specific") else 0, r.get("model_own_games"), ts))
+    return len(rows)
+
+
+def prediction_pairs():
+    """Predykcje sprzed gry sparowane z tym, co faktycznie wypadlo.
+    Tylko champion, ktorego naprawde wybrano - reszta puli nie ma wyniku."""
+    with connect() as con:
+        con.executescript(PRED_SCHEMA)
+        resolved = [dict(r) for r in con.execute("""
+            SELECT pp.p, pp.threshold, pp.specific, g.grade, csp.ts
+            FROM pool_prediction pp
+            JOIN champ_select_pool csp
+              ON csp.id = pp.pool_id AND csp.picked_id = pp.champion_id
+            JOIN grade_observation g ON g.match_id = csp.match_id
+            WHERE pp.p IS NOT NULL
+            ORDER BY csp.ts DESC""")]
+        pending = con.execute("""
+            SELECT COUNT(DISTINCT pp.pool_id) c
+            FROM pool_prediction pp
+            LEFT JOIN champ_select_pool csp
+              ON csp.id = pp.pool_id AND csp.match_id IS NOT NULL
+            WHERE csp.id IS NULL""").fetchone()["c"]
+    return resolved, pending
