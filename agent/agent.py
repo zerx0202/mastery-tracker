@@ -377,9 +377,13 @@ class Agent:
                     payload = json.loads(msg.data)
                 except ValueError:
                     continue
+                # WAMP: [opcode, nazwa_eventu, {uri, eventType, data}]
+                # Czesc wiadomosci ma inny ksztalt - ignorujemy je.
                 if not isinstance(payload, list) or len(payload) < 3:
                     continue
-                event = payload[2] or {}
+                event = payload[2]
+                if not isinstance(event, dict):
+                    continue
                 uri = event.get("uri", "")
                 data = event.get("data")
                 if uri.endswith("/gameflow-phase"):
