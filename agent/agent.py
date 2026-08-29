@@ -38,6 +38,7 @@ PHASES_AFTER_GAME = {"WaitingForStats", "PreEndOfGame", "EndOfGame",
 
 # Kandydaci na ocene pomeczowa - zrzucamy surowe odpowiedzi do analizy.
 MASTERY_UPDATES = "/lol-end-of-game/v1/champion-mastery-updates"
+EOG_STATS_BLOCK = "/lol-end-of-game/v1/eog-stats-block"
 
 DIAG_ENDPOINTS = [
     "/lol-end-of-game/v1/eog-stats-block",
@@ -232,6 +233,19 @@ class Agent:
         if r.get("errors"):
             log(f"blad zapisu oceny: {r['errors'][0]}", "warn")
 
+    async def capture_eog(self):
+        """Caly ekran koncowy: 183 pola statystyk, augmenty i wyniki
+        pozostalych graczy - material na percentyle."""
+        block = await self.lcu.get(EOG_STATS_BLOCK, timeout=20)
+        if not isinstance(block, dict):
+            log("brak danych z ekranu koncowego", "dim")
+            return
+        r = await self.server.post("/eog", {"block": block}, timeout=60)
+        if r and r.get("stored"):
+            log("statystyki koncowe zapisane" + (" (nowe)" if r.get("new") else " (aktualizacja)"), "ok")
+        elif r and r.get("errors"):
+            log(f"blad zapisu statystyk: {r['errors'][0]}", "warn")
+
     async def dump_diagnostics(self):
         """Zrzuca surowe odpowiedzi endpointow, ktore moga zawierac ocene."""
         if not self.cfg.get("enable_dumps", True):
@@ -315,6 +329,7 @@ class Agent:
             self.pre_snapshot_done = False
             log(f"koniec gry (faza {phase})", "ok")
             await self.capture_grade()             # zanim klient wyczysci stan
+            await self.capture_eog()
             await self.dump_diagnostics()
             await asyncio.sleep(self.cfg["post_game_delay_seconds"])
             await self.snapshot("po grze")

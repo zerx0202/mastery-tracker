@@ -619,3 +619,94 @@ def grades_with_stats(mode=None):
             LEFT JOIN champion c ON c.id = g.champion_id
             WHERE 1=1 {clause}
             ORDER BY m.game_creation DESC""", args)]
+
+
+EOG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS eog_raw (
+    match_id     TEXT PRIMARY KEY,
+    game_id      INTEGER NOT NULL,
+    champion_id  INTEGER,
+    augments     TEXT,
+    payload      BLOB NOT NULL,
+    captured_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_eog_champ ON eog_raw(champion_id);
+"""
+
+
+def init_eog():
+    with connect() as con:
+        con.executescript(EOG_SCHEMA)
+
+
+def _find_local_player(block):
+    """Ekran koncowy: localPlayer albo pierwszy gracz w druzynie."""
+    if isinstance(block.get("localPlayer"), dict):
+        return block["localPlayer"]
+    for team in block.get("teams") or []:
+        for p in team.get("players") or []:
+            if p.get("isLocalPlayer") or p.get("selfIndex"):
+                return p
+    for team in block.get("teams") or []:
+        players = team.get("players") or []
+        if players:
+            return players[0]
+    return {}
+
+
+def save_eog(block, platform, ts):
+    """Zapisuje caly blok ekranu koncowego (skompresowany) + wyciagniete augmenty.
+    Trzymamy surowiec, bo nie wiemy jeszcze, ktore z ~183 pol beda potrzebne."""
+    import zlib
+
+    gid = block.get("gameId") or block.get("gameID")
+    me = _find_local_player(block)
+    if not gid:
+        gid = me.get("gameId")
+    if not gid:
+        return False
+
+    st = me.get("stats") or {}
+    augments = [st.get(f"playerAugment{i}") or st.get(f"PLAYER_AUGMENT_{i}") or 0
+                for i in range(1, 7)]
+
+    row = {
+        "match_id": f"{platform.upper()}_{gid}",
+        "game_id": gid,
+        "champion_id": normalize_champion_id(me.get("championId") or 0),
+        "augments": json.dumps([a for a in augments if a]),
+        "payload": zlib.compress(json.dumps(block, separators=(",", ":")).encode()),
+        "captured_at": ts,
+    }
+    with connect() as con:
+        existed = con.execute(
+            "SELECT 1 FROM eog_raw WHERE match_id=?", (row["match_id"],)).fetchone() is not None
+        con.execute(
+            "INSERT OR REPLACE INTO eog_raw "
+            "(match_id, game_id, champion_id, augments, payload, captured_at) "
+            "VALUES (:match_id, :game_id, :champion_id, :augments, :payload, :captured_at)",
+            row)
+    return not existed
+
+
+def load_eog(match_id):
+    import zlib
+    with connect() as con:
+        row = con.execute("SELECT payload FROM eog_raw WHERE match_id=?",
+                          (match_id,)).fetchone()
+    if not row:
+        return None
+    return json.loads(zlib.decompress(row["payload"]))
+
+
+def eog_stats():
+    with connect() as con:
+        total = con.execute("SELECT COUNT(*) c FROM eog_raw").fetchone()["c"]
+        size = con.execute(
+            "SELECT COALESCE(SUM(LENGTH(payload)), 0) s FROM eog_raw").fetchone()["s"]
+        with_grade = con.execute("""
+            SELECT COUNT(*) c FROM eog_raw e
+            JOIN grade_observation g ON g.match_id = e.match_id""").fetchone()["c"]
+    return {"games": total, "with_grade": with_grade,
+            "compressed_bytes": size}

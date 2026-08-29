@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
     db.init_matches()
     db.upgrade_match_player()
     db.init_grades()
+    db.init_eog()
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["weights"] = dict(scoring.DEFAULT_WEIGHTS)
@@ -394,6 +395,24 @@ async def push_grade(payload: dict):
         except Exception as e:
             errors.append(f"{type(e).__name__}: {e}")
     return {"received": len(raw), "new": new, "errors": errors[:5]}
+
+
+@api.post("/eog")
+async def push_eog(payload: dict):
+    """Agent wysyla tu caly blok ekranu koncowego z LCU."""
+    block = payload.get("block")
+    if not isinstance(block, dict):
+        return {"stored": False, "errors": ["brak pola block"]}
+    try:
+        new = await asyncio.to_thread(db.save_eog, block, PLATFORM, int(time.time()))
+        return {"stored": True, "new": new}
+    except Exception as e:
+        return {"stored": False, "errors": [f"{type(e).__name__}: {e}"]}
+
+
+@api.get("/eog")
+async def eog_summary():
+    return db.eog_stats()
 
 
 @api.get("/grades")
