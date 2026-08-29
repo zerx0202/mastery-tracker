@@ -636,7 +636,10 @@ class Agent:
         inaczej serwer odrzuca handshake."""
         # dwa warianty handshake'u: auth w naglowku i auth w URL
         # (league-connect uzywa drugiego); przy odmowie logujemy naglowki
+        origin = {"Origin": f"https://127.0.0.1:{self.lcu.port}"}
         variants = [
+            dict(url=f"wss://127.0.0.1:{self.lcu.port}/",
+                 headers={**self.lcu.headers, **origin}),
             dict(url=f"wss://127.0.0.1:{self.lcu.port}/",
                  headers=self.lcu.headers),
             dict(url=f"wss://riot:{self.lcu.password}@127.0.0.1:{self.lcu.port}/",
