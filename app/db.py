@@ -107,10 +107,13 @@ def connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH, timeout=10.0)
     con.row_factory = sqlite3.Row
-    # WAL pozwala czytac w trakcie zapisu - bez tego sync w tle blokuje endpointy
-    con.execute("PRAGMA journal_mode = WAL")
-    con.execute("PRAGMA busy_timeout = 5000")
-    con.execute("PRAGMA synchronous = NORMAL")
+    # UWAGA: NIE wlaczac WAL. Baza lezy na bind moncie przez virtiofs (Colima),
+    # a WAL wymaga pliku -shm mapowanego w pamieci, czego virtiofs nie obsluguje
+    # poprawnie. Objawia sie to bledem "disk I/O error" z wnetrza kontenera,
+    # przy bazie calkowicie zdrowej widzianej z hosta. Zapalnikiem jest backup,
+    # ktory czyta ten sam plik z hosta.
+    # Przy jednym uzytkowniku domyslny journal + busy_timeout wystarcza.
+    con.execute("PRAGMA busy_timeout = 10000")
     con.execute("PRAGMA foreign_keys = ON")
     return con
 

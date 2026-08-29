@@ -7,11 +7,14 @@ export RESTIC_REPOSITORY="sftp:desktop:/C:/backup/mastery"
 export RESTIC_PASSWORD_FILE="$HOME/.restic-pass"
 export PATH="/opt/homebrew/bin:$PATH"
 
-DB="$HOME/stacks/riot/data/mastery.db"
 SNAP="/tmp/mastery-snap.db"
 
-# .backup robi spojna kopie zywej bazy - zwykle cp w trybie WAL potrafi dac plik uszkodzony
-sqlite3 "$DB" ".backup '$SNAP'"
+# Kopie robi kontener, a nie host: baza jest na bind moncie przez virtiofs
+# i dwa procesy z roznych stron montu potrafia sie o nia pobic.
+cd "$HOME/stacks/riot"
+/opt/homebrew/bin/docker compose exec -T backend \
+  python -c "import sqlite3; s=sqlite3.connect('/code/data/mastery.db'); d=sqlite3.connect('/code/data/_snap.db'); s.backup(d); d.close(); s.close()"
+mv "$HOME/stacks/riot/data/_snap.db" "$SNAP"
 sqlite3 "$SNAP" "PRAGMA integrity_check;" | grep -q '^ok$' || { echo "BAZA USZKODZONA - przerywam"; exit 1; }
 
 restic backup "$SNAP" --tag mastery
