@@ -573,7 +573,12 @@ CREATE TABLE IF NOT EXISTS grade_observation (
     leveled_up      INTEGER,
     tokens_earned   INTEGER,
     token_after     INTEGER,
-    observed_at     INTEGER NOT NULL
+    observed_at     INTEGER NOT NULL,
+    source          TEXT,
+    censored        INTEGER DEFAULT 0,
+    threshold       TEXT,
+    confidence      REAL,
+    split_id        INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_grade_champ ON grade_observation(champion_id);
