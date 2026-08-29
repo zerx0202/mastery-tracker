@@ -533,5 +533,114 @@ async def model_explain(mode: str | None = None):
     return out
 
 
+@api.get("/grades/history")
+async def grades_history(limit: int = 60, mode: str | None = None):
+    """Oceny z predykcja modelu obok tego, co faktycznie wypadlo."""
+    rows = await asyncio.to_thread(model.training_rows, mode or DEFAULT_MODE)
+    names = {}
+    with db.connect() as c:
+        names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM champion")}
+        extra = {r["match_id"]: dict(r) for r in c.execute(
+            "SELECT match_id, grade, censored, observed_at, source FROM grade_observation")}
+        by_match = {r["match_id"]: dict(r) for r in c.execute(
+            "SELECT match_id, champion_id, game_creation FROM match_player")}
+
+    lookup = {}
+    for mid, m in by_match.items():
+        lookup.setdefault((m["champion_id"], m["game_creation"]), mid)
+
+    out = []
+    for r in rows:
+        pa = model.predict(r, "A-") or {}
+        ps = model.predict(r, "S-") or {}
+        out.append({
+            "grade": r["grade"],
+            "champion_id": r["champion_id"],
+            "name": names.get(r["champion_id"], str(r["champion_id"])),
+            "kills": r["kills"], "deaths": r["deaths"], "assists": r["assists"],
+            "dmg": r["dmg_champ"], "gold": r["gold"], "duration": r["duration"],
+            "gpm": round((r["gold"] or 0) / max(r["duration"] / 60, 1)),
+            "dpm": round((r["dmg_champ"] or 0) / max(r["duration"] / 60, 1)),
+            "p_A": pa.get("p"), "p_S": ps.get("p"),
+            "censored": r["grade"].startswith(">="),
+        })
+    out.reverse()
+    return {"count": len(out), "grades": out[:limit]}
+
+
+@api.get("/split/progress")
+async def split_progress():
+    sid = db.latest_snapshot_id()
+    if sid is None:
+        raise HTTPException(400, "brak snapshotow")
+    rows = db.snapshot_rows(sid)
+    dist = {}
+    marks = 0
+    for r in rows:
+        dist[r["milestone"]] = dist.get(r["milestone"], 0) + 1
+        marks += r["tokens"] or 0
+
+    ladder = db.get_ladder()
+    with db.connect() as c:
+        events = [dict(r) for r in c.execute(
+            "SELECT ts, kind, detail FROM event_log WHERE kind IN "
+            "('grade','split_reset') ORDER BY ts DESC LIMIT 30")]
+        first = c.execute("SELECT MIN(taken_at) t FROM snapshot").fetchone()["t"]
+
+    return {
+        "goal": GOAL,
+        "distribution": dict(sorted(dist.items())),
+        "champions": len(rows),
+        "marks_total": marks,
+        "at_goal": dist.get(GOAL, 0),
+        "ladder": ladder,
+        "split": db.list_splits()[:1],
+        "tracking_since": first,
+        "events": events,
+    }
+
+
+@api.get("/system/health")
+async def system_health():
+    with db.connect() as c:
+        last = {r["kind"]: r["ts"] for r in c.execute(
+            "SELECT kind, MAX(ts) ts FROM event_log GROUP BY kind")}
+        counts = {}
+        for t in ("match_player", "grade_observation", "eog_raw",
+                  "champ_select_pool", "player_stat", "snapshot"):
+            counts[t] = c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
+        events = [dict(r) for r in c.execute(
+            "SELECT ts, kind, detail FROM event_log ORDER BY ts DESC LIMIT 40")]
+    return {
+        "now": int(time.time()),
+        "last_seen": last,
+        "counts": counts,
+        "model": db.model_status(),
+        "ddragon_patch": db.get_setting("ddragon_patch"),
+        "events": events,
+    }
+
+
+@api.get("/lab/distribution")
+async def lab_distribution(stat: str = "gpm", mode: str | None = None):
+    """Rozklad wybranej statystyki w podziale na oceny."""
+    rows = await asyncio.to_thread(model.training_rows, mode or DEFAULT_MODE)
+    buckets = {}
+    for r in rows:
+        mins = max((r["duration"] or 0) / 60, 1)
+        val = {
+            "gpm": (r["gold"] or 0) / mins,
+            "dpm": (r["dmg_champ"] or 0) / mins,
+            "kda": (r["kills"] + r["assists"]) / max(r["deaths"], 1),
+            "ka_per_min": (r["kills"] + r["assists"]) / mins,
+            "deaths_per_min": (r["deaths"] or 0) / mins,
+        }.get(stat)
+        if val is None:
+            raise HTTPException(400, f"nieznana statystyka: {stat}")
+        buckets.setdefault(r["grade"], []).append(round(val, 1))
+    return {"stat": stat,
+            "buckets": {k: sorted(v) for k, v in buckets.items()}}
+
+
 app.include_router(api)
 app.mount("/", StaticFiles(directory="app/static", html=True), name="static")
