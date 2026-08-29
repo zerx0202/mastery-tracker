@@ -678,6 +678,29 @@ async def split_progress():
     }
 
 
+@api.get("/export")
+async def export_all():
+    """Zrzut wszystkich tabel do JSON-a. Drugi kanal wyjscia obok restica -
+    dane sa nieodtwarzalne, wiec jedna sciezka ratunku to za malo.
+    Bloby (skompresowane eog) pomijamy: sa w backupie, a tu wazy najwiecej."""
+    def dump():
+        out = {}
+        with db.connect() as con:
+            tables = [r["name"] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%'")]
+            for t in tables:
+                cols = [r["name"] for r in con.execute(f"PRAGMA table_info({t})")
+                        if "payload" not in r["name"]]
+                sel = ", ".join(cols)
+                out[t] = [dict(r) for r in con.execute(f"SELECT {sel} FROM {t}")]
+        return out
+    data = await asyncio.to_thread(dump)
+    from fastapi.responses import JSONResponse
+    return JSONResponse(data, headers={
+        "Content-Disposition": f"attachment; filename=mastery-export-{int(time.time())}.json"})
+
+
 @api.get("/predictions/scorecard")
 async def predictions_scorecard():
     """Uczciwosc modelu na predykcjach sprzed gry. Brier: 0 idealnie,
