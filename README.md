@@ -19,16 +19,28 @@ spośród kilkunastu postaci, które akurat wypadły.
 
 ## Jak to działa
 
-Windows (klient LoL) Mac (serwer) Przeglądarka
-┌──────────────────┐ ┌──────────────────┐ ┌──────────┐
-│ agent LCU │─────────▶│ FastAPI + SQLite │◀───────│ frontend │
-│ (PowerShell) │ HTTPS │ │ │ │
-└──────────────────┘ └──────────────────┘ └──────────┘
-│ │
-lockfile + Riot API
-/lol-champ-select Data Dragon
-/lol-match-history
+```mermaid
+flowchart LR
+    subgraph W["Windows — stacja z klientem gry"]
+        LCU["Klient LoL<br/>(LCU, lockfile)"]
+        LIVE["Live Client Data<br/>port 2999"]
+        AG["agent.py<br/>polling + kolejka dyskowa"]
+        LCU --> AG
+        LIVE --> AG
+    end
 
+    subgraph M["Mac — serwer domowy"]
+        BE["FastAPI + SQLite"]
+        BK["backup-server<br/>restic → SFTP na desktop"]
+        BE -.po grze.-> BK
+    end
+
+    RIOT["Riot API<br/>+ Data Dragon"]
+
+    AG -- "HTTPS (Tailscale)<br/>pula / oceny / statystyki / live" --> BE
+    RIOT --> BE
+    BE --> FE["Przeglądarka<br/>ranking, panel live, scorecard"]
+```
 
 Agent na stacji roboczej czyta lokalne API klienta gry (LCU) i wysyła na serwer
 pulę championów z champ selecta oraz historię meczów. Serwer dokłada dane
