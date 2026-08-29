@@ -81,6 +81,20 @@ tą samą postacią, więc wartość bezwzględna wprowadza w błąd.
 Normalizator to własna mediana na championie, a docelowo średnia z serwisu
 zewnętrznego (`external_dpm` w tabeli `settings`), która ma pierwszeństwo.
 
+### Skąd normalizator, skoro nie ma go w sieci
+
+Serwisy ze statystykami ARAM-a (np. aramstats.lol) nie mają Mayhema — Riot nie
+wystawia tej kolejki w publicznym API. Zwykły ARAM nie jest przybliżeniem, bo
+augmenty nie skalują championów równo, więc ranking obrażeń jest przetasowany.
+
+Zamiast tego rozkład budowany jest z **własnych meczów**: ekran końcowy zawiera
+statystyki wszystkich dziesięciu graczy, więc każda gra to dziesięć obserwacji
+o Mayhemie — w tym o championach, którymi się nie grało. Wartości per champion
+są ściągane do średniej globalnej proporcjonalnie do liczby obserwacji, więc
+przy jednej grze wynik jest prawie równy globalnemu i nie udaje precyzji.
+
+Po wpięciu tego normalizatora waga obrażeń w modelu wzrosła z 0.15 do 0.60.
+
 ### Marker gotowości
 
 `GET /api/model/status` zwraca liczbę obserwacji i informację, czy zebrało się
