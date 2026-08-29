@@ -58,6 +58,34 @@ ignorowany (potwierdzone testem — `lcu-depth-test.ps1`). Starszych meczów nie
 się nadrobić z żadnego źródła, więc **agent musi być uruchomiony przy każdej
 sesji**, inaczej gry przepadają bezpowrotnie.
 
+## Model oceny
+
+Aplikacja zbiera oceny pomeczowe i uczy się na nich przewidywać, czy na danym
+championie przebijesz próg wymagany do kolejnego milestone'a.
+
+Dwa niezależne klasyfikatory progowe: `P(ocena ≥ A-)` i `P(ocena ≥ S-)`.
+Podział wynika z danych — część obserwacji jest **cenzurowana**: awans milestone'a
+mówi „było A- lub lepiej", ale nie mówi, czy było S-. Taka obserwacja liczy się
+do pierwszego modelu, a z drugiego musi wypaść.
+
+### Dlaczego obrażenia są normalizowane przez championa
+
+Z zebranych danych: oceny `B+` mają **niższe** obrażenia na minutę niż `C`,
+bo `B+` padały na postaciach utility (Lulu, Veigar, Aurelion Sol), a `C` na
+Viktorze z 48 tysiącami obrażeń. Ocena jest liczona względem innych grających
+tą samą postacią, więc wartość bezwzględna wprowadza w błąd.
+
+`gold/min` zachowuje się odwrotnie — rośnie monotonicznie wraz z oceną
+(837 → 869 → 892 → 908 → 964 → 1040) i nie wymaga normalizacji.
+
+Normalizator to własna mediana na championie, a docelowo średnia z serwisu
+zewnętrznego (`external_dpm` w tabeli `settings`), która ma pierwszeństwo.
+
+### Marker gotowości
+
+`GET /api/model/status` zwraca liczbę obserwacji i informację, czy zebrało się
+ich dość, by stroić model. Poniżej progu model działa, ale jest poglądowy.
+
 ## Stack
 
 - Backend: Python 3.12, FastAPI, SQLite (WAL)
@@ -77,6 +105,8 @@ sesji**, inaczej gry przepadają bezpowrotnie.
 | LCU `/lol-champ-select` | pula championów w champ selecie |
 | LCU `/lol-match-history` | historia meczów, w tym ARAM Mayhem |
 | Data Dragon | nazwy i ikony championów, bez klucza i bez limitów |
+| LCU `/lol-end-of-game/champion-mastery-updates` | **ocena pomeczowa**, punkty, wkład indywidualny |
+| LCU `/lol-end-of-game/eog-stats-block` | 110 pól statystyk wszystkich 10 graczy, augmenty |
 
 ## Uruchomienie
 
@@ -105,8 +135,12 @@ stronie przed wysłaniem zapytania.
 W rozwoju. Działa: snapshoty maestrii, nauka drabinki milestone'ów, ranking
 championów, wykrywanie champ selecta, historia meczów z LCU, backup.
 
-W planach: zapis ocen pomeczowych, model prawdopodobieństwa oceny oparty na
-własnych danych, przebudowany interfejs, widok live w trakcie gry.
+Działa też: zapis ocen pomeczowych i pełnych statystyk końcowych, historia pul
+z champ selecta, warstwa splitów odporna na reset, log zdarzeń, backup przez
+Tailscale z testem odtworzenia, model prawdopodobieństwa oceny.
+
+W planach: przebudowany interfejs z podstronami, widok live w trakcie gry przez
+Live Client Data API, integracja danych zewnętrznych jako normalizatora progu.
 
 ## Disclaimer
 

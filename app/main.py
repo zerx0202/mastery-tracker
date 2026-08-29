@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 
-from . import db, scoring
+from . import db, model, scoring
 from .db import GRADE_RANK
 from .limiter import RateLimiter
 
@@ -513,6 +513,40 @@ async def grades_backfill(window: int = 7200):
 @api.get("/model/status")
 async def model_status(min_games: int = 40):
     return db.model_status(min_games)
+
+
+@api.post("/model/train")
+async def model_train(mode: str | None = None):
+    return await asyncio.to_thread(model.train, mode or DEFAULT_MODE)
+
+
+@api.get("/model")
+async def model_get():
+    m = db.get_json_setting("grade_model")
+    if not m:
+        raise HTTPException(404, "model nie byl jeszcze trenowany")
+    return m
+
+
+@api.get("/model/rates")
+async def model_rates(mode: str | None = None):
+    return await asyncio.to_thread(model.champion_rates, mode or DEFAULT_MODE)
+
+
+@api.get("/model/explain")
+async def model_explain(mode: str | None = None):
+    """Ostatnie mecze z predykcja obok faktycznej oceny - do sprawdzenia,
+    czy model w ogole trafia."""
+    rows = model.training_rows(mode or DEFAULT_MODE)
+    out = []
+    for r in rows[-25:]:
+        out.append({
+            "grade": r["grade"],
+            "champion_id": r["champion_id"],
+            "p_A": (model.predict(r, "A-") or {}).get("p"),
+            "p_S": (model.predict(r, "S-") or {}).get("p"),
+        })
+    return out
 
 
 app.include_router(api)
