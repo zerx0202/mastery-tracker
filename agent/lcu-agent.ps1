@@ -79,13 +79,27 @@ function Send-Pool($ids, $mode, $poolKind, $queueId) {
 }
 
 function Sync-LcuHistory($port, $pass, $pages) {
-  $total = 0; $new = 0
+  $total = 0; $new = 0; $deep = 0
+  $seen = New-Object System.Collections.Generic.HashSet[string]
+
   for ($i = 0; $i -lt $pages; $i++) {
     $beg = $i * 20
     $end = $beg + 19
     $h = Get-Lcu $port $pass "/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=$beg&endIndex=$end"
     if (-not $h -or -not $h.games.games -or $h.games.games.Count -eq 0) { break }
-    $body = @{ games = $h.games.games } | ConvertTo-Json -Depth 12 -Compress
+
+    # LCU poza zakresem oddaje w kolko te sama strone - wykrywamy to po ID
+    $fresh = @()
+    foreach ($g in $h.games.games) {
+      if ($seen.Add([string]$g.gameId)) { $fresh += $g }
+    }
+    if ($fresh.Count -eq 0) {
+      Write-Host "koniec historii LCU na stronie $($i + 1) (glebokosc $deep gier)" -ForegroundColor DarkGray
+      break
+    }
+    $deep += $fresh.Count
+
+    $body = @{ games = $fresh } | ConvertTo-Json -Depth 12 -Compress
     try {
       $r = Invoke-RestMethod -Uri "$ApiBase/history/lcu" -Method Post `
         -ContentType "application/json" -Body $body -TimeoutSec 90
@@ -97,7 +111,7 @@ function Sync-LcuHistory($port, $pass, $pages) {
     }
     if ($h.games.games.Count -lt 20) { break }
   }
-  Write-Host "historia LCU: $total gier, $new nowych" -ForegroundColor Green
+  Write-Host "historia LCU: $total gier przeslanych, $new nowych" -ForegroundColor Green
 }
 
 function Refresh-Server($port, $pass) {
