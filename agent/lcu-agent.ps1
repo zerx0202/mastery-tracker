@@ -124,6 +124,15 @@ function Refresh-Server($port, $pass) {
     Write-Host "blad snapshotu: $($_.Exception.Message)" -ForegroundColor Yellow
   }
   Sync-LcuHistory $port $pass $PagesGame
+
+  if ($Cfg.backup_url) {
+    try {
+      Invoke-RestMethod -Uri $Cfg.backup_url -Method Post -TimeoutSec 15 | Out-Null
+      Write-Host "backup wyzwolony" -ForegroundColor Green
+    } catch {
+      Write-Host "backup: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+  }
 }
 
 # ---------- petla glowna ----------
