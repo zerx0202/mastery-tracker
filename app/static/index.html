@@ -23,9 +23,10 @@ body{background:var(--bg);color:var(--txt);font:15px/1.55 var(--body);
 a{color:inherit;text-decoration:none}
 
 /* ---- nawigacja ---- */
-nav{display:flex;align-items:baseline;gap:2px;padding:0 28px;
-    border-bottom:1px solid var(--line);background:var(--panel);
+nav{border-bottom:1px solid var(--line);background:var(--panel);
     position:sticky;top:0;z-index:20}
+nav .inner{display:flex;align-items:baseline;gap:2px;
+    max-width:1700px;margin:0 auto;padding:0 28px}
 nav .brand{font:600 15px/1 var(--display);letter-spacing:.14em;text-transform:uppercase;
            color:var(--gold);margin-right:32px;padding:20px 0}
 nav a.tab{font:600 12px/1 var(--display);letter-spacing:.1em;text-transform:uppercase;
@@ -36,7 +37,13 @@ nav a.tab.on{color:var(--gold);border-bottom-color:var(--gold)}
 nav .spacer{flex:1}
 nav .pulse-wrap{font:500 11px/1 var(--mono);color:var(--dim);padding:20px 0}
 
-main{max-width:1180px;margin:0 auto;padding:32px 28px 80px}
+.deck{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:22px;align-items:start}
+aside .panel{margin-bottom:14px}
+aside .mini{display:flex;align-items:center;gap:9px;padding:6px 0;font-size:13px}
+aside .mini img{width:22px;height:22px;border-radius:4px;background:var(--panel2)}
+aside .mini .sp{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--dim)}
+@media (max-width:1180px){.deck{grid-template-columns:1fr}}
+main{max-width:1700px;margin:0 auto;padding:32px 28px 80px}
 section[hidden]{display:none}
 
 /* ---- typografia wspolna ---- */
@@ -74,7 +81,7 @@ h2{font:700 22px/1.2 var(--display);letter-spacing:.01em;margin-bottom:4px}
 .rail-legend b{color:var(--gold);font-weight:600}
 
 /* ---- karty decyzji ---- */
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
       padding:18px 20px;transition:border-color .15s}
 .card:hover{border-color:var(--faint)}
@@ -87,6 +94,13 @@ h2{font:700 22px/1.2 var(--display);letter-spacing:.01em;margin-bottom:4px}
 .card-games .u{font:600 10px/1 var(--display);letter-spacing:.12em;
                 text-transform:uppercase;color:var(--dim)}
 .tagline{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:10px}
+.card.group{grid-column:1 / -1}
+.heads{display:flex;flex-wrap:wrap;gap:5px;margin-top:12px}
+.heads img{width:34px;height:34px;border-radius:5px;background:var(--panel2);
+           border:1px solid var(--line)}
+.heads .more{display:flex;align-items:center;padding:0 8px;border-radius:5px;
+             background:var(--panel2);border:1px solid var(--line);
+             font:600 12px var(--mono);color:var(--dim)}
 .tagline .g{color:var(--gold);font-weight:500}
 
 /* ---- tabela ---- */
@@ -134,7 +148,7 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
 @media (max-width:760px){
   .hero{grid-template-columns:1fr;gap:18px}
   .grid2{grid-template-columns:1fr}
-  nav{padding:0 16px;overflow-x:auto}
+  nav .inner{padding:0 16px;overflow-x:auto}
   main{padding:24px 16px 60px}
 }
 </style>
@@ -142,6 +156,7 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
 <body>
 
 <nav>
+ <div class="inner">
   <div class="brand">Mastery</div>
   <a class="tab" href="#/">Teraz</a>
   <a class="tab" href="#/oceny">Oceny</a>
@@ -150,6 +165,7 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
   <a class="tab" href="#/system">System</a>
   <div class="spacer"></div>
   <div class="pulse-wrap" id="clock"></div>
+ </div>
 </nav>
 
 <main>
@@ -157,16 +173,23 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
 <!-- ============ TERAZ ============ -->
 <section id="v-now">
   <div id="live-bar"></div>
-  <div id="hero"></div>
-  <div class="eyebrow" id="cards-label">Pozostali kandydaci</div>
-  <div class="cards" id="cards"></div>
+  <div class="deck">
+    <div>
+      <div id="hero"></div>
+      <div class="eyebrow" id="cards-label">Pozostali kandydaci</div>
+      <div class="cards" id="cards"></div>
+    </div>
+    <aside id="side"></aside>
+  </div>
 </section>
 
 <!-- ============ OCENY ============ -->
 <section id="v-grades" hidden>
   <h2>Historia ocen</h2>
   <div class="sub">Co przewidział model i co faktycznie wypadło. Oceny z „≥" pochodzą
-    z awansu milestone'a — wiadomo, że próg padł, nie wiadomo o ile.</div>
+    z awansu milestone'a — wiadomo, że próg padł, nie wiadomo o ile.<br>
+    <b style="color:var(--warn)">Uwaga:</b> model widział te gry podczas uczenia, więc
+    procenty są zawyżone. Uczciwą miarę pokazuje zakładka System.</div>
   <div id="grades-body" class="msg">wczytywanie…</div>
 </section>
 
@@ -271,43 +294,157 @@ async function renderNow() {
 
   const b = targets[0];
   const cons = b.expected_games_conservative;
-  const spread = (cons && Math.abs(cons - b.expected_games) > 1)
-    ? `<div class="range">ostrożnie <b>${Math.round(cons)}</b> gier —
-       optymizm opiera się na ${b.own_games_on_champ} grach tym championem</div>` : "";
+  const steps = b.steps_remaining;
+  const gamesLine = cons && Math.abs(cons - b.expected_games) > 1
+    ? `${Math.round(b.expected_games)}–${Math.round(cons)} gier`
+    : `około ${Math.round(b.expected_games)} gier`;
 
   $("hero").innerHTML = `
     <div class="hero">
       <div>
-        <div class="big">${Math.round(b.expected_games)}<small>gier do celu</small></div>
+        <div class="big">${steps}<small>${steps === 1 ? "szczebel" : "szczeble"} do celu</small></div>
       </div>
       <div class="hero-side">
         <div class="who"><img src="${icon(b.key)}" alt="">${esc(b.name)}</div>
         ${rail(b.milestone, GOAL, b.next_grade)}
-        ${spread}
+        <div class="range">${gamesLine} przy Twoim tempie${
+          b.own_games_on_champ < 8
+            ? ` <span class="dim">— oszacowanie, ${b.own_games_on_champ} gier tym championem</span>`
+            : ""}</div>
+        <div class="range" style="margin-top:6px">${modelNote(b)}</div>
       </div>
     </div>`;
 
   $("cards-label").textContent = inSelect ? "Reszta puli" : "Pozostali kandydaci";
-  $("cards").innerHTML = targets.slice(1).map((t, i) => `
-    <div class="card ${i === 0 ? "pick" : ""}">
+
+  // Grupujemy identyczne wiersze - jedenascie kart z ta sama liczba
+  // to powtorka, nie informacja.
+  const rest = targets.slice(1);
+  const key = t => `${t.milestone}|${t.next_grade}|${Math.round(t.expected_games)}`;
+  const shown = [], groups = new Map();
+  for (const t of rest) {
+    const k = key(t);
+    if (!groups.has(k)) { groups.set(k, []); shown.push(t); }
+    groups.get(k).push(t);
+  }
+
+  // Grupa to grupa - zaden z jej czlonkow nie jest wazniejszy,
+  // wiec pokazujemy je jako zestaw ikon, a nie jednego z przypisem.
+  const cardsHtml = shown.slice(0, 6).map(t => {
+    const grp = groups.get(key(t));
+    const many = grp.length > 1;
+    const heads = grp.map(x =>
+      `<img src="${icon(x.key)}" alt="" title="${esc(x.name)}">`).join("");
+
+    return `
+    <div class="card${many ? " group" : ""}">
       <div class="card-top">
-        <img src="${icon(t.key)}" alt="">
-        <div class="card-name">${esc(t.name)}</div>
+        ${many ? "" : `<img src="${icon(t.key)}" alt="">`}
+        <div class="card-name">${many
+          ? `${grp.length} championów`
+          : esc(t.name)}</div>
         <div class="card-games">
-          <div class="n">${Math.round(t.expected_games)}</div>
-          <div class="u">gier</div>
+          <div class="n">${t.steps_remaining}</div>
+          <div class="u">${t.steps_remaining === 1 ? "szczebel" : "szczeble"}</div>
         </div>
       </div>
+      ${many ? `<div class="heads">${heads}</div>` : ""}
       ${rail(t.milestone, GOAL, t.next_grade)}
-      <div class="tagline">szansa na <span class="g">${esc(t.next_grade || "?")}</span>:
-        ${t.next_p != null ? (100 * t.next_p).toFixed(1) + "%" : "—"}
-        ${t.confidence === "niska" ? " · mało własnych gier" : ""}</div>
-    </div>`).join("");
+      <div class="tagline">około ${Math.round(t.expected_games)} gier · ${modelNote(t)}</div>
+    </div>`;
+  }).join("");
+
+  const hiddenCount = rest.length - shown.slice(0, 6)
+    .reduce((n, t) => n + groups.get(key(t)).length, 0);
+  $("cards").innerHTML = cardsHtml + (hiddenCount > 0
+    ? `<div class="card" style="display:flex;align-items:center;justify-content:center;
+        color:var(--dim);font-family:var(--mono);font-size:12.5px">
+        i ${hiddenCount} dalszych championów</div>` : "");
+}
+
+/* Panel boczny: to, po co dzis trzeba wchodzic na podstrony.
+   Ekran glowny ma odpowiadac bez klikania. */
+async function renderSide() {
+  const box = $("side");
+  if (!box) return;
+  try {
+    const [sp, gr, sys] = await Promise.all([
+      api("/split/progress"), api("/grades/history?limit=3"), api("/system/health")]);
+
+    const dist = sp.distribution || {};
+    const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1;
+    const bars = Object.entries(dist).map(([ms, n]) => `
+      <div class="bar-row" style="grid-template-columns:88px 1fr 34px">
+        <span>${ms >= sp.goal ? "cel" : (+ms === 0 ? "brak" : ROMAN[ms - 1] + " ukończ.")}</span>
+        <div class="bar"><i class="${ms >= sp.goal ? "ok" : ""}"
+          style="width:${100 * n / total}%"></i></div>
+        <span style="text-align:right">${n}</span>
+      </div>`).join("");
+
+    const last = (gr.grades || []).map(g => `
+      <div class="mini">
+        <img src="${icon((g.name || "").replace(/[^A-Za-z]/g, ""))}" alt="">
+        <span>${esc(g.name)}</span>
+        <span class="chip ${g.grade.startsWith(">=") ? "gold" : ""}"
+          style="margin-left:auto">${esc(g.grade)}</span>
+      </div>`).join("") || '<div class="sub">brak ocen</div>';
+
+    const ago = ts => {
+      if (!ts) return "nigdy";
+      const d = sys.now - ts;
+      if (d < 90) return d + " s temu";
+      if (d < 5400) return Math.round(d / 60) + " min temu";
+      if (d < 172800) return Math.round(d / 3600) + " godz. temu";
+      return Math.round(d / 86400) + " dni temu";
+    };
+    const lastGrade = sys.last_seen?.grade;
+    const stale = lastGrade && (sys.now - lastGrade) > 172800;
+
+    box.innerHTML = `
+      <div class="panel">
+        <div class="eyebrow">Postęp splitu</div>
+        ${bars}
+        <div class="kv" style="margin-top:10px"><span>Marks zdobyte</span>
+          <span>${sp.marks_total}</span></div>
+      </div>
+      <div class="panel">
+        <div class="eyebrow">Ostatnie oceny</div>
+        ${last}
+        <div class="kv" style="margin-top:10px"><span>Ocen w bazie</span>
+          <span>${sys.counts.grade_observation}</span></div>
+      </div>
+      <div class="panel">
+        <div class="eyebrow">Agent</div>
+        <div class="kv"><span>Ostatnia gra</span>
+          <span style="color:${stale ? "var(--warn)" : "var(--ok)"}">${ago(lastGrade)}</span></div>
+        <div class="kv"><span>Mecze w bazie</span><span>${sys.counts.match_player}</span></div>
+        ${stale ? `<div class="tagline" style="color:var(--warn)">
+          LCU pamięta ~20 gier — bez agenta przepadają</div>` : ""}
+      </div>`;
+  } catch (e) {
+    box.innerHTML = '<div class="panel"><div class="sub">nie udało się wczytać</div></div>';
+  }
+}
+
+/* Model mowi cos sensownego tylko dla progow, ktore przeszly walidacje.
+   Przy S- nie przeszedl, wiec zamiast fikcyjnego procentu piszemy prawde. */
+function modelNote(t) {
+  if (t.model_p != null) {
+    const auc = t.model_auc ? ` · AUC ${t.model_auc}` : "";
+    const g = t.model_games ? ` z ${t.model_games} gier` : "";
+    return `<span class="g">${(100 * t.model_p).toFixed(0)}%</span> szans na
+            <span class="g">${esc(t.next_grade)}</span>${g}${auc}`;
+  }
+  return `<span class="g">${esc(t.next_grade || "?")}</span> —
+          model nie ma jeszcze danych dla tego progu`;
 }
 
 /* ---------- OCENY ---------- */
 async function renderGrades() {
   const d = await api("/grades/history?limit=60");
+  let ready = {};
+  try { ready = await api("/model/readiness"); } catch (e) {}
+  const ok = th => ((ready[th] || {}).validation || {}).useful;
   if (!d.grades || !d.grades.length) {
     $("grades-body").innerHTML = `<div class="empty-state"><h3>Jeszcze żadnych ocen</h3>
       <div>Zagraj mecz z uruchomionym agentem.</div></div>`;
@@ -316,8 +453,8 @@ async function renderGrades() {
   const rows = d.grades.map(g => {
     const cls = g.grade.startsWith(">=") ? "gold" : (
       /^[SA]/.test(g.grade) ? "ok" : "");
-    const pa = g.p_A != null ? (100 * g.p_A).toFixed(0) + "%" : "—";
-    const ps = g.p_S != null ? (100 * g.p_S).toFixed(0) + "%" : "—";
+    const pa = (ok("A-") && g.p_A != null) ? (100 * g.p_A).toFixed(0) + "%" : "—";
+    const ps = (ok("S-") && g.p_S != null) ? (100 * g.p_S).toFixed(0) + "%" : "—";
     return `<tr>
       <td><span class="chip ${cls}">${esc(g.grade)}</span></td>
       <td><div class="champ-cell"><img src="${icon(g.name.replace(/[^A-Za-z]/g,''))}" alt="">
@@ -343,14 +480,14 @@ async function renderSplit() {
   const max = Math.max(...Object.values(dist), 1);
   const bars = Object.entries(dist).map(([ms, n]) => `
     <div class="bar-row">
-      <span>${ms >= d.goal ? "cel" : "milestone " + ms}</span>
+      <span>${ms >= d.goal ? "cel" : (+ms === 0 ? "brak" : ROMAN[ms - 1] + " ukończony")}</span>
       <div class="bar"><i class="${ms >= d.goal ? "ok" : ""}"
         style="width:${100 * n / max}%"></i></div>
       <span style="text-align:right">${n}</span>
     </div>`).join("");
 
   const ladder = Object.entries(d.ladder || {}).map(([m, s]) => `
-    <div class="kv"><span>${ROMAN[m] || m} → ${ROMAN[+m + 1] || +m + 1}</span>
+    <div class="kv"><span>${+m === 0 ? "start" : ROMAN[m - 1]} → ${ROMAN[+m] || +m + 1}</span>
       <span>${Object.keys(s.require_grades)[0]} ×${s.games} · ${s.reward_marks} marks</span>
     </div>`).join("");
 
@@ -366,7 +503,7 @@ async function renderSplit() {
       <div class="panel">
         <div class="eyebrow">Drabinka wymagań</div>
         ${ladder || '<div class="sub">jeszcze nieznana</div>'}
-        <div class="kv" style="margin-top:14px"><span>Marks of Mastery łącznie</span>
+        <div class="kv" style="margin-top:14px"><span>Marks of Mastery zdobyte łącznie</span>
           <span>${d.marks_total}</span></div>
         <div class="kv"><span>Championów na celu</span><span>${d.at_goal}</span></div>
         <div class="kv"><span>Śledzone od</span><span>${since}</span></div>
@@ -393,22 +530,26 @@ async function renderLab() {
     const m = med(v);
     const pos = hi > lo ? 100 * (m - lo) / (hi - lo) : 50;
     const dots = v.map(x => {
-      const p = hi > lo ? 100 * (x - lo) / (hi - lo) : 50;
-      return `<i style="position:absolute;left:${p}%;top:0;width:3px;height:100%;
-              background:var(--faint);border-radius:0"></i>`;
+      const q = hi > lo ? 100 * (x - lo) / (hi - lo) : 50;
+      return `<i style="position:absolute;left:calc(${q}% - 3px);top:50%;
+              transform:translateY(-50%);width:6px;height:6px;border-radius:50%;
+              background:var(--dim);opacity:.75"></i>`;
     }).join("");
-    return `<div class="bar-row" style="grid-template-columns:74px 1fr 62px">
+    const dec = hi < 10 ? 2 : (hi < 100 ? 1 : 0);
+    return `<div class="bar-row" style="grid-template-columns:78px 1fr 70px">
       <span class="chip ${k.startsWith(">=") ? "gold" : ""}">${esc(k)}</span>
-      <div class="bar" style="height:16px;position:relative">${dots}
-        <i style="position:absolute;left:${pos}%;top:0;width:2px;height:100%;
-           background:var(--gold)"></i></div>
-      <span style="text-align:right">${m.toFixed(0)}</span>
+      <div class="bar" style="height:20px;position:relative;background:var(--panel2)">${dots}
+        <i style="position:absolute;left:calc(${pos}% - 1px);top:2px;width:2px;
+           height:calc(100% - 4px);background:var(--gold)"></i></div>
+      <span style="text-align:right">${m.toFixed(dec)}<span class="dim"
+        style="font-size:10px"> ×${v.length}</span></span>
     </div>`;
   }).join("");
 
   $("lab-body").innerHTML = `<div class="panel">
-    <div class="eyebrow">Zakres ${lo.toFixed(0)} – ${hi.toFixed(0)} ·
-      szare kreski to pojedyncze gry, złota to mediana</div>
+    <div class="eyebrow">${stat === "deaths_per_min" ? "Mniej znaczy lepiej · " : ""}Zakres
+      ${lo.toFixed(hi < 10 ? 2 : 0)} – ${hi.toFixed(hi < 10 ? 2 : 0)} ·
+      kropki to pojedyncze gry, złota kreska to mediana, ×n to liczba gier</div>
     ${rows}</div>`;
 }
 
@@ -438,6 +579,22 @@ async function renderSystem() {
     `<div class="kv"><span>${NAMES[k] || k}</span><span>${n}</span></div>`).join("");
 
   const m = d.model;
+  let ready = {};
+  try { ready = await api("/model/readiness"); } catch (e) {}
+  const modelRows = Object.entries(ready).map(([th, r]) => {
+    const v = r.validation;
+    const good = v && v.useful;
+    const detail = v
+      ? `${(100 * v.accuracy).toFixed(0)}% trafień vs ${(100 * v.baseline_accuracy).toFixed(0)}% przy zgadywaniu`
+        + (v.auc ? ` · AUC ${v.auc}` : "")
+      : "za mało danych";
+    return `<div class="kv"><span>próg ${esc(th)}
+      <span class="dim" style="font-size:11.5px">· ${r.samples} obserwacji,
+      ${r.positives} pozytywnych</span></span>
+      <span style="color:${good ? "var(--ok)" : "var(--warn)"}">${esc(r.verdict)}</span></div>
+      <div class="kv" style="border:none;padding-top:0"><span class="dim"
+        style="font-size:11.5px">${detail}</span><span></span></div>`;
+  }).join("");
   const events = d.events.slice(0, 20).map(e =>
     `<tr><td class="num" style="color:var(--dim)">${ago(e.ts)}</td>
      <td>${LABELS[e.kind] || e.kind}</td>
@@ -456,8 +613,10 @@ async function renderSystem() {
       <div class="kv"><span>Ocen łącznie</span><span>${m.grades_total}</span></div>
       <div class="kv"><span>W tym dokładnych</span><span>${m.grades_exact}</span></div>
       <div class="kv"><span>Progowych („≥")</span><span>${m.grades_censored}</span></div>
-      <div class="kv"><span>Do progu strojenia</span>
-        <span>${m.ready_for_tuning ? "gotowe" : "brakuje " + m.still_needed}</span></div>
+      <div style="margin-top:14px">${modelRows}</div>
+      <div class="kv" style="margin-top:10px"><span class="dim" style="font-size:11.5px">
+        Miara to walidacja leave-one-out — każda obserwacja raz jako test.
+        Metryki liczone na danych treningowych zawsze wyglądają lepiej.</span><span></span></div>
     </div>
     <div class="panel" style="margin-top:16px">
       <div class="eyebrow">Dziennik zdarzeń</div>
@@ -467,7 +626,7 @@ async function renderSystem() {
 
 /* ---------- routing ---------- */
 const VIEWS = {
-  "#/": ["v-now", renderNow],
+  "#/": ["v-now", async () => { await renderNow(); renderSide(); }],
   "#/oceny": ["v-grades", renderGrades],
   "#/split": ["v-split", renderSplit],
   "#/lab": ["v-lab", renderLab],
