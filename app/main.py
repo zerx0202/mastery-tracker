@@ -35,16 +35,9 @@ def norm(x: str) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db.init()
-    db.init_lobby()
-    db.init_matches()
-    db.upgrade_match_player()
-    db.init_grades()
-    db.init_eog()
-    db.init_extra()
-    db.init_pool()
-    db.upgrade_grades()
-    db.init_live()
+    # jeden punkt wejscia do schematu - nowa funkcja init_*/upgrade_* w db.py
+    # wykona sie sama, bez pamietania o tej liscie (to tu ginely nowe wpisy)
+    db.migrate()
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
