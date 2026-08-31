@@ -335,6 +335,14 @@ class Agent:
             log("statystyki koncowe zapisane" + (" (nowe)" if r.get("new") else " (aktualizacja)"), "ok")
         elif r and r.get("errors"):
             log(f"blad zapisu statystyk: {r['errors'][0]}", "warn")
+        # Kandydaci snowballa wprost z przechwyconego bloku - dotad byli
+        # zbierani tylko ze zrzutow dyskowych przy starcie agenta, wiec przy
+        # wylaczonych dumpach rejestr przestawal rosnac i petla glodowala
+        # (wszyscy znani = nikt do sprawdzenia przez okno rewizyty 7 dni).
+        try:
+            await self.snowball_harvest([json.dumps(block)])
+        except Exception as e:
+            log(f"snowball harvest: {type(e).__name__}: {e}", "dim")
         return True
 
     def _puuids_from_text(self, text, my_puuid=""):
