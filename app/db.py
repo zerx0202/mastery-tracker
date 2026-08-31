@@ -167,11 +167,28 @@ def cache_puuid(riot_id, puuid, ts):
 
 # ---------- championi ----------
 
+def upgrade_champion_tags():
+    """Klasy z Data Dragona (Tank, Mage, Support...) - posredni poziom
+    sciagania dla norm i referencji. CSV, pierwszy tag = klasa glowna."""
+    with connect() as con:
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(champion)")}
+        if "tags" not in cols:
+            con.execute("ALTER TABLE champion ADD COLUMN tags TEXT")
+
+
 def save_champions(champs):
+    """champs: krotki (id, name, key) lub (id, name, key, tags_csv)."""
     with connect() as con:
         con.executemany(
-            "INSERT OR REPLACE INTO champion (id, name, key) VALUES (?, ?, ?)",
-            champs)
+            "INSERT OR REPLACE INTO champion (id, name, key, tags) VALUES (?, ?, ?, ?)",
+            [c if len(c) == 4 else (*c, None) for c in champs])
+
+
+def champion_classes():
+    """champion_id -> klasa glowna (pierwszy tag DD) albo None."""
+    with connect() as con:
+        return {r["id"]: ((r["tags"] or "").split(",")[0] or None)
+                for r in con.execute("SELECT id, tags FROM champion")}
 
 
 def champion_count():
@@ -1292,15 +1309,21 @@ def clear_live():
         con.execute("DELETE FROM live_game WHERE id=1")
 
 
-def reference_pace(threshold="A-", mode=None):
-    """Tempo z gier, ktore skonczyly sie ocena >= progu. To jest punkt
-    odniesienia dla overlaya: 'tak wygladaly Twoje udane gry'."""
+def reference_pace(threshold="A-", mode=None, champion_id=None):
+    """Tempo z gier, ktore skonczyly sie ocena >= progu. Punkt odniesienia
+    dla overlaya: 'tak wygladaly Twoje udane gry'.
+
+    Drabinka zakresu: gry na TYM championie -> gry na jego klasie (tagi DD)
+    -> wszystkie gry. Wczesniej support byl porownywany do mediany
+    zdominowanej przez carry i zawsze wygladal na obiboka. Kazdy szczebel
+    wymaga REF_MIN_HITS trafien; bez champion_id dziala po staremu."""
     want = GRADE_RANK.get(threshold)
     clause = "AND m.game_mode = ?" if mode else ""
     args = (mode,) if mode else ()
     with connect() as con:
         rows = [dict(r) for r in con.execute(f"""
-            SELECT g.grade, m.kills, m.deaths, m.assists, m.cs, m.gold, m.duration
+            SELECT g.grade, g.champion_id, m.kills, m.deaths, m.assists,
+                   m.cs, m.gold, m.duration
             FROM grade_observation g JOIN match_player m ON m.match_id = g.match_id
             WHERE m.duration > 300 {clause}""", args)]
 
@@ -1318,7 +1341,23 @@ def reference_pace(threshold="A-", mode=None):
             "deaths_per_min": f["deaths_per_min"],
             "gold_per_min": f["gpm"],
         }
-        (hit if rank >= want else miss).append(vals)
+        (hit if rank >= want else miss).append((r["champion_id"], vals))
+
+    scope, label = "global", None
+    h_use = [v for _, v in hit]
+    m_use = [v for _, v in miss]
+    if champion_id:
+        classes = champion_classes()
+        own_h = [v for c, v in hit if c == champion_id]
+        if len(own_h) >= REF_MIN_HITS:
+            scope, h_use = "champion", own_h
+            m_use = [v for c, v in miss if c == champion_id]
+        else:
+            cls = classes.get(champion_id)
+            cls_h = [v for c, v in hit if cls and classes.get(c) == cls]
+            if len(cls_h) >= REF_MIN_HITS:
+                scope, label, h_use = "class", cls, cls_h
+                m_use = [v for c, v in miss if classes.get(c) == cls]
 
     def med(rows_, key):
         v = [x[key] for x in rows_]
@@ -1327,10 +1366,12 @@ def reference_pace(threshold="A-", mode=None):
     keys = ["ka_per_min", "cs_per_min", "deaths_per_min", "gold_per_min"]
     return {
         "threshold": threshold,
-        "hit_games": len(hit),
-        "miss_games": len(miss),
-        "hit": {k: med(hit, k) for k in keys},
-        "miss": {k: med(miss, k) for k in keys},
+        "scope": scope,
+        "scope_label": label,
+        "hit_games": len(h_use),
+        "miss_games": len(m_use),
+        "hit": {k: med(h_use, k) for k in keys},
+        "miss": {k: med(m_use, k) for k in keys},
     }
 
 
@@ -1409,6 +1450,8 @@ NORM_STATS = [
 
 # Ponizej tylu obserwacji na championie ufamy bardziej sredniej globalnej.
 NORM_SHRINK = 8.0
+CLASS_MIN_OBS = 5   # tyle obserwacji musi miec klasa, zeby byc kotwica
+REF_MIN_HITS = 3    # tyle trafien wymaga szczebel referencji (champion/klasa)
 
 
 def champion_norms(stat_key="totalDamageDealtToChampions", mode=None, min_obs=1):
@@ -1442,6 +1485,20 @@ def champion_norms(stat_key="totalDamageDealtToChampions", mode=None, min_obs=1)
     g_mean = statistics.mean(allv)
     g_sd = statistics.pstdev(allv) or 1.0
 
+    # Posredni poziom sciagania: klasa championa (tagi Data Dragona).
+    # Champion z 2 grami pozycza statystyki od podobnych postaci, nie od
+    # calej populacji - tank przestaje byc sciagany do sredniej carry.
+    # Bez tagow w bazie (przed refreshem DD) anchors sa puste i wszystko
+    # dziala jak dotychczas: sciaganie prosto do globalu.
+    classes = champion_classes()
+    by_class = {}
+    for cid, vals in per.items():
+        cls = classes.get(cid)
+        if cls:
+            by_class.setdefault(cls, []).extend(vals)
+    anchors = {cls: (statistics.mean(v), statistics.pstdev(v) or g_sd)
+               for cls, v in by_class.items() if len(v) >= CLASS_MIN_OBS}
+
     out = {}
     for cid, vals in per.items():
         n = len(vals)
@@ -1449,13 +1506,17 @@ def champion_norms(stat_key="totalDamageDealtToChampions", mode=None, min_obs=1)
             continue
         m = statistics.mean(vals)
         sd = statistics.pstdev(vals) if n > 1 else g_sd
+        cls = classes.get(cid)
+        a_mean, a_sd = anchors.get(cls, (g_mean, g_sd))
         w = n / (n + NORM_SHRINK)
         out[cid] = {
             "n": n,
             "mean_raw": round(m, 2),
-            "mean": round(w * m + (1 - w) * g_mean, 2),
-            "sd": round(max(w * sd + (1 - w) * g_sd, g_sd * 0.3), 2),
+            "mean": round(w * m + (1 - w) * a_mean, 2),
+            "sd": round(max(w * sd + (1 - w) * a_sd, g_sd * 0.3), 2),
             "confidence": round(w, 2),
+            "class": cls,
+            "anchor": "klasa" if cls in anchors else "global",
         }
 
     with connect() as con:

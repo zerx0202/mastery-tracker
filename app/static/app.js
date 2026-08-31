@@ -75,7 +75,9 @@ function livePanel(d) {
     <div class="tagline">Złoto liczone z ubytków stanu — obejmuje kowadła
       i mikstury, które znikają z ekwipunku.</div>
     <div class="tagline">Porównanie z medianą Twoich gier zakończonych ocenami
-      ${esc(d.reference.threshold)} lub lepszymi (${d.reference.hit_games} gier).
+      ${esc(d.reference.threshold)} lub lepszymi (${d.reference.hit_games} gier${
+        d.reference.scope === "champion" ? " na tym championie" :
+        d.reference.scope === "class" ? ` na klasie ${esc(d.reference.scope_label)}` : ""}).
       Obrażeń nie da się odczytać w trakcie gry — Riot ich nie udostępnia.</div>
   </div>`;
 }

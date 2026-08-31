@@ -171,7 +171,8 @@ async def refresh_champions(force: bool = False):
         return {"patch": patch, "champions": db.champion_count(), "skipped": True}
     data = (await state["plain"].get(
         f"https://ddragon.leagueoflegends.com/cdn/{patch}/data/en_US/champion.json")).json()
-    champs = [(int(v["key"]), v["name"], v["id"]) for v in data["data"].values()]
+    champs = [(int(v["key"]), v["name"], v["id"], ",".join(v.get("tags") or []))
+              for v in data["data"].values()]
     db.save_champions(champs)
     db.set_setting("ddragon_patch", patch)
     db.log_event("ddragon", {"patch": patch, "champions": len(champs)})
@@ -938,7 +939,8 @@ async def read_live():
                 break
 
     ref = await asyncio.to_thread(
-        db.reference_pace, need or "A-", live["game_mode"] or DEFAULT_MODE)
+        db.reference_pace, need or "A-", live["game_mode"] or DEFAULT_MODE,
+        live["champion_id"])
 
     # klucz DD do ikony - ten sam mechanizm co w /targets i historii ocen
     key = None
