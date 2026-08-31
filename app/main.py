@@ -917,9 +917,18 @@ async def read_live():
     ref = await asyncio.to_thread(
         db.reference_pace, need or "A-", live["game_mode"] or DEFAULT_MODE)
 
+    # klucz DD do ikony - ten sam mechanizm co w /targets i historii ocen
+    key = None
+    if live["champion_id"]:
+        with db.connect() as c:
+            r = c.execute("SELECT key FROM champion WHERE id = ?",
+                          (live["champion_id"],)).fetchone()
+            key = r["key"] if r else None
+
     return {
         "active": True, "age": live["age"],
         "champion": live["champion"], "champion_id": live["champion_id"],
+        "key": key,
         "milestone": milestone, "need": need,
         "game_time": live["game_time"], "minutes": round(mins, 1),
         "kills": live["kills"], "deaths": live["deaths"], "assists": live["assists"],

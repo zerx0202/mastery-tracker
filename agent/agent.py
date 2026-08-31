@@ -45,6 +45,11 @@ EOG_STATS_BLOCK = "/lol-end-of-game/v1/eog-stats-block"
 # wykrywania; nic nie trzeba uruchamiac recznie.
 LIVE_BASE = "https://127.0.0.1:2999/liveclientdata"
 
+# Prefix pola rawChampionName w Live Client Data - reszta to wewnetrzna
+# nazwa championa, niezalezna od jezyka klienta i zgodna z kluczem
+# Data Dragona (np. game_character_displayname_MonkeyKing -> MonkeyKing).
+RAW_CHAMP_PREFIX = "game_character_displayname_"
+
 DIAG_ENDPOINTS = [
     "/lol-end-of-game/v1/eog-stats-block",
     MASTERY_UPDATES,
@@ -230,7 +235,11 @@ class Agent:
         self.ws_dead_port = None   # port, na ktorym WS juz odmowil - nie mecz
         self.ws_failures = 0
         self.champ_ids = {}
+        self.champ_keys_ci = {}    # klucz DD malymi literami -> (klucz, id)
         self.live_state = {}
+        self._eog_task = None      # biezacy epizod lapania ekranu koncowego
+        self._grade_done = True    # False tylko w trakcie epizodu
+        self._eog_done = True
 
     # ---------- akcje ----------
 
@@ -284,36 +293,49 @@ class Agent:
         if r is not None:
             log("backup wyzwolony", "ok")
 
-    async def capture_grade(self):
-        """Ocena pomeczowa. Endpoint zyje tylko na ekranie koncowym,
-        wiec czytamy go zanim klient wyczysci stan."""
-        data = await self.lcu.get(MASTERY_UPDATES)
-        if not data:
-            log("brak danych o ocenie (za pozno albo tryb bez maestrii)", "dim")
-            return
+    async def submit_grade(self, data, source):
+        """Wysyla ocene na serwer, jesli w danych faktycznie jest grade.
+        Zwraca True po wyslaniu. Wolane z petli dopytujacej i z WebSocketu;
+        _grade_done gasi dalsze odpytywanie. Wpis bez grade to jeszcze nie
+        ocena - klient potrafi najpierw opublikowac szkielet, a grade
+        dolozyc chwile pozniej, wiec wtedy pytamy dalej. POST, ktory padnie
+        na 5xx/braku polaczenia, laduje w kolejce dyskowej - dane juz mamy,
+        wiec epizod i tak liczy sie jako zamkniety."""
+        entries = [e for e in (data if isinstance(data, list) else [data])
+                   if isinstance(e, dict)]
+        if not any(e.get("grade") for e in entries):
+            return False
+        self._grade_done = True
         r = await self.server.post("/grade", {"updates": data})
-        if not r:
-            return
-        entries = data if isinstance(data, list) else [data]
         for e in entries:
             if e.get("grade"):
-                log(f"ocena: {e['grade']} (champion {e.get('championId')}, "
-                    f"score {e.get('score')}, +{e.get('pointsGained')} pkt)", "ok")
-        if r.get("errors"):
+                log(f"ocena ({source}): {e['grade']} (champion {e.get('championId')}, "
+                    f"+{e.get('pointsGained')} pkt)", "ok")
+        if r and r.get("errors"):
             log(f"blad zapisu oceny: {r['errors'][0]}", "warn")
+        return True
+
+    async def capture_grade(self):
+        """Jedna proba odczytu oceny z LCU. Zwraca True, gdy zlapana."""
+        data = await self.lcu.get(MASTERY_UPDATES)
+        if not data:
+            return False
+        return await self.submit_grade(data, "poll")
 
     async def capture_eog(self):
-        """Caly ekran koncowy: 183 pola statystyk, augmenty i wyniki
-        pozostalych graczy - material na percentyle."""
+        """Jedna proba odczytu ekranu koncowego: 183 pola statystyk, augmenty
+        i wyniki pozostalych graczy - material na percentyle. Zwraca True,
+        gdy blok zlapany (POST z kolejka dyskowa jak przy ocenie)."""
         block = await self.lcu.get(EOG_STATS_BLOCK, timeout=20)
-        if not isinstance(block, dict):
-            log("brak danych z ekranu koncowego", "dim")
-            return
+        if not isinstance(block, dict) or not block:
+            return False
+        self._eog_done = True
         r = await self.server.post("/eog", {"block": block}, timeout=60)
         if r and r.get("stored"):
             log("statystyki koncowe zapisane" + (" (nowe)" if r.get("new") else " (aktualizacja)"), "ok")
         elif r and r.get("errors"):
             log(f"blad zapisu statystyk: {r['errors'][0]}", "warn")
+        return True
 
     def _puuids_from_text(self, text, my_puuid=""):
         import re
@@ -361,9 +383,17 @@ class Agent:
                 games = (h or {}).get("games", {}).get("games") or []
                 r = await self.server.post("/snowball/ingest",
                                            {"puuid": pu, "games": games})
-                if r and (r.get("kiwi") or r.get("new_rows")):
-                    log(f"snowball: gracz {pu[:8]}… — {r['kiwi']} gier KIWI, "
-                        f"+{r['new_rows']} wierszy statystyk", "ok")
+                if r is not None:
+                    kiwi, new = r.get("kiwi") or 0, r.get("new_rows") or 0
+                    if new:
+                        log(f"snowball: gracz {pu[:8]}… — {kiwi} gier KIWI, "
+                            f"+{new} wierszy statystyk", "ok")
+                    elif kiwi:
+                        # 0 nowych to dedup po game_id (kandydaci pochodza
+                        # z Twoich meczow, wiec historie mocno sie nakladaja),
+                        # nie awaria ingestu
+                        log(f"snowball: gracz {pu[:8]}… — {kiwi} gier KIWI, "
+                            "wszystkie juz w bazie (dedup)", "dim")
             except Exception as e:
                 log(f"snowball: {type(e).__name__}: {e}", "dim")
 
@@ -487,13 +517,64 @@ class Agent:
             self.in_game = False
             self.pre_snapshot_done = False
             log(f"koniec gry (faza {phase})", "ok")
-            await self.capture_grade()             # zanim klient wyczysci stan
-            await self.capture_eog()
-            await self.dump_diagnostics()
-            await asyncio.sleep(self.cfg["post_game_delay_seconds"])
-            await self.snapshot("po grze")
-            await self.sync_history(self.cfg["history_pages_after_game"])
-            await self.trigger_backup()
+            # Osobne zadanie, nie await: petla dopytujaca trwa do 2 min,
+            # a w tym czasie WebSocket i polling maja dalej obslugiwac
+            # zdarzenia (w tym event z ocena, ktory te petle wygasza).
+            if self._eog_task is None or self._eog_task.done():
+                self._eog_task = asyncio.create_task(self.post_game_capture(phase))
+
+    async def post_game_capture(self, first_phase):
+        """Ekran koncowy nie jest gotowy w chwili konca gry: WaitingForStats
+        znaczy doslownie "czekam na statystyki", a maestria potrafi przyjsc
+        jeszcze pozniej (kiedy dokladnie - rozstrzygna ponizsze logi).
+        Zamiast strzelac raz i sie poddawac, dopytujemy: co eog_retry_seconds
+        az oba endpointy oddadza dane, klient sprzatnie ekran koncowy albo
+        skonczy sie budzet eog_wait_seconds. Rownolegle ocena moze przyjsc
+        z WebSocketu - flagi _grade_done/_eog_done gasza wtedy petle."""
+        self._grade_done = False
+        self._eog_done = False
+        deadline = time.monotonic() + float(self.cfg.get("eog_wait_seconds", 120))
+        retry = float(self.cfg.get("eog_retry_seconds", 2))
+        attempt, gone, phase, logged = 0, 0, first_phase, ""
+        while time.monotonic() < deadline:
+            attempt += 1
+            if attempt > 1:
+                # pierwsza proba strzela od razu (endpointy sa ulotne),
+                # kazda kolejna najpierw czyta fazę - log ma pokazywac
+                # stan z chwili proby, nie sprzed cyklu
+                phase = await self.lcu.get("/lol-gameflow/v1/gameflow-phase") or phase
+            if not self._grade_done:
+                await self.capture_grade()
+            if not self._eog_done:
+                await self.capture_eog()
+            state = (f"faza {phase}, ocena: {'jest' if self._grade_done else 'brak'}, "
+                     f"statystyki: {'sa' if self._eog_done else 'brak'}")
+            # log przy kazdej zmianie (fazy albo zlapania) + puls co 10 prob
+            if state != logged or attempt % 10 == 0:
+                log(f"eog: proba {attempt}, {state}", "dim")
+                logged = state
+            if self._grade_done and self._eog_done:
+                break
+            # klient zszedl z ekranu koncowego - te dane juz nie wroca
+            if phase in ("None", "Lobby", "TerminatedInError"):
+                gone += 1
+                if gone >= 3:
+                    break
+            else:
+                gone = 0
+            await asyncio.sleep(retry)
+        if not self._grade_done:
+            log(f"ocena nie pojawila sie (prob {attempt}, ostatnia faza {phase}) - "
+                "tryb bez maestrii albo LCU jej nie oddal", "warn")
+        if not self._eog_done:
+            log(f"ekran koncowy nie oddal statystyk (ostatnia faza {phase})", "warn")
+        self._grade_done = True
+        self._eog_done = True
+        await self.dump_diagnostics()
+        await asyncio.sleep(self.cfg["post_game_delay_seconds"])
+        await self.snapshot("po grze")
+        await self.sync_history(self.cfg["history_pages_after_game"])
+        await self.trigger_backup()
 
     # ---------- petle ----------
 
@@ -528,6 +609,23 @@ class Agent:
                 log(f"blad odczytu na zywo: {type(e).__name__}: {e}", "warn")
 
             await asyncio.sleep(self.cfg.get("live_poll_seconds", 2))
+
+    def resolve_champion(self, player):
+        """(klucz_dd, champion_id) dla gracza z Live Client Data.
+        championName jest w locale klienta gry, wiec dopasowanie po nim
+        pekalo na przypadkach brzegowych (Wukong -> MonkeyKing,
+        FiddleSticks, kropki i apostrofy). rawChampionName niesie nazwe
+        wewnetrzna - po obcieciu prefixu dopasowujemy ja do kluczy DD
+        bez zgadywania. Stara heurystyka zostaje jako zapas."""
+        raw = (player.get("rawChampionName") or "").strip()
+        internal = (raw[len(RAW_CHAMP_PREFIX):]
+                    if raw.lower().startswith(RAW_CHAMP_PREFIX) else "")
+        hit = self.champ_keys_ci.get(internal.lower()) if internal else None
+        if hit:
+            return hit
+        name = ((player.get("championName") or "")
+                .replace(" ", "").replace("'", "").replace(".", ""))
+        return self.champ_keys_ci.get(name.lower()) or (None, None)
 
     async def send_live(self, data):
         ap = data.get("activePlayer") or {}
@@ -581,10 +679,10 @@ class Agent:
         inventory = sum((it.get("price") or 0) * (it.get("count") or 1)
                         for it in (me.get("items") or []))
 
+        champ_id = self.resolve_champion(me)[1]
         await self.server.post("/live", {
             "champion": me.get("championName"),
-            "champion_id": self.champ_ids.get(
-                (me.get("championName") or "").replace(" ", "").replace("'", "")),
+            "champion_id": champ_id,
             "game_mode": gd.get("gameMode"),
             "game_time": gt,
             "kills": sc.get("kills"), "deaths": sc.get("deaths"),
@@ -611,6 +709,8 @@ class Agent:
                 timeout=aiohttp.ClientTimeout(total=20)) as r:
                 data = await r.json()
             self.champ_ids = {v["id"]: int(v["key"]) for v in data["data"].values()}
+            self.champ_keys_ci = {k.lower(): (k, cid)
+                                  for k, cid in self.champ_ids.items()}
             log(f"mapa championow zaladowana ({len(self.champ_ids)})", "dim")
         except Exception as e:
             log(f"nie udalo sie zaladowac mapy championow: {e}", "warn")
@@ -660,6 +760,8 @@ class Agent:
             # opcode 5 = subscribe
             await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase"]))
             await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-champ-select_v1_session"]))
+            await ws.send_str(json.dumps(
+                [5, "OnJsonApiEvent_lol-end-of-game_v1_champion-mastery-updates"]))
             log("WebSocket podlaczony", "ok")
             self.ws_failures = 0
 
@@ -683,6 +785,12 @@ class Agent:
                     await self.handle_phase(data)
                 elif uri.endswith("/champ-select/v1/session"):
                     await self.handle_champ_select(data if isinstance(data, dict) else None)
+                elif uri.endswith("/champion-mastery-updates"):
+                    # Ocena wypchnieta przez klienta w momencie powstania -
+                    # zero zgadywania fazy. Dziala tez, gdy petla dopytujaca
+                    # akurat nie biegnie (backend deduplikuje po meczu).
+                    if data and await self.submit_grade(data, "ws"):
+                        log("ocena zlapana z WebSocketu", "ok")
 
     async def run(self):
         async with aiohttp.ClientSession() as session:

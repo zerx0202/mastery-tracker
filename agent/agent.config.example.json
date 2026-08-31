@@ -7,6 +7,9 @@
   "live_poll_seconds": 5,
   "enable_dumps": true,
   "post_game_delay_seconds": 25,
+  "eog_wait_seconds": 120,
+  "eog_retry_seconds": 2,
+  "_eog_info": "Po koncu gry agent dopytuje o ocene i ekran koncowy co eog_retry_seconds, maksymalnie przez eog_wait_seconds (ekran koncowy nie jest gotowy od razu).",
   "history_pages_on_start": 10,
   "history_pages_after_game": 2,
   "lockfile_paths": [

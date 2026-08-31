@@ -62,6 +62,8 @@ function livePanel(d) {
   return `<div class="panel" style="border-left:3px solid var(--ok);margin-bottom:22px">
     <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
       <span class="dot"></span>
+      <img onerror="this.src=BLANK" src="${icon(d.key, d.champion_id)}" alt=""
+           style="width:34px;height:34px;border-radius:5px;background:var(--panel2)">
       <div style="font:700 22px/1 var(--display)">${esc(d.champion || "?")}</div>
       <div class="dim num">${Math.floor(d.minutes)} min · ${d.kills}/${d.deaths}/${d.assists}
         · poziom ${d.level ?? "?"}</div>
