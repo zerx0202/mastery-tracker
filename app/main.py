@@ -512,6 +512,16 @@ async def push_grade(payload: dict):
                 }, ts)
         except Exception as e:
             errors.append(f"{type(e).__name__}: {e}")
+    if new:
+        # nowa obserwacja = trening od razu. Bez tego grade_model w settings
+        # stoi na stanie sprzed oceny, a predykcje/readiness/targets czytaja
+        # wlasnie jego. Trening na tej probce to ulamek sekundy; jego awaria
+        # nie moze zablokowac zapisu oceny, stad oslona.
+        try:
+            await asyncio.to_thread(model.train, DEFAULT_MODE)
+        except Exception as e:
+            await asyncio.to_thread(db.log_event, "model_train_fail",
+                                    {"error": f"{type(e).__name__}: {e}"}, ts)
     return {"received": len(raw), "new": new, "errors": errors[:5]}
 
 

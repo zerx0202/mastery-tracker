@@ -18,14 +18,15 @@ mv "$HOME/stacks/riot/data/_snap.db" "$SNAP"
 sqlite3 "$SNAP" "PRAGMA integrity_check;" | grep -q '^ok$' || { echo "BAZA USZKODZONA - przerywam"; exit 1; }
 
 restic backup "$SNAP" --tag mastery
-restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune
 
 rm -f "$SNAP"
 
-# raz na tydzien weryfikacja samego repozytorium - backup, ktorego nikt
-# nie sprawdza, to nadzieja, nie backup
+# raz na tydzien: retencja + weryfikacja pod wspolnym stampem. prune
+# przepisuje repozytorium (najdrozsza operacja restica), wiec po kazdej
+# grze robimy sam snapshot, a porzadki hurtowo
 STAMP="$HOME/.restic-last-check"
 if [ ! -f "$STAMP" ] || [ $(( $(date +%s) - $(stat -f %m "$STAMP") )) -gt 604800 ]; then
+  restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune
   restic check --read-data-subset=10% && touch "$STAMP"
 fi
 
