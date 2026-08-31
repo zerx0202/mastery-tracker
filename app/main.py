@@ -481,6 +481,18 @@ async def history_lcu(payload: dict):
     if games:
         await asyncio.to_thread(db.log_event, "history_lcu",
                                 {"received": len(games), "new": new})
+    if new:
+        # Trening po ocenie strzela ZA WCZESNIE w potoku: grade laduje
+        # ~30 s przed wierszem match_player (ten powstaje dopiero tutaj),
+        # a training_rows JOIN-uje oba - swieza ocena wchodzila do modelu
+        # dopiero przy nastepnej grze. Drugi trigger domyka potok; trening
+        # jest idempotentny, wiec podwojne odpalenie kosztuje tylko CPU w tle.
+        try:
+            await asyncio.to_thread(model.train, DEFAULT_MODE)
+        except Exception as e:
+            await asyncio.to_thread(db.log_event, "model_train_fail",
+                                    {"error": f"{type(e).__name__}: {e}"},
+                                    int(time.time()))
     return {"received": len(games), "new": new, "errors": errors[:5]}
 
 
