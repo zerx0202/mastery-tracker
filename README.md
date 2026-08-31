@@ -1,30 +1,27 @@
 # Mastery Tracker
 
-Osobiste, niekomercyjne narzędzie do śledzenia postępów w sezonowej maestrii
-championów w League of Legends. Odpowiada na jedno pytanie: **którym championem
-zagrać teraz, żeby najszybciej dowieźć milestone 4.**
+Osobiste narzędzie do śledzenia sezonowej maestrii championów w League of
+Legends. Odpowiada na jedno pytanie: którym championem zagrać teraz, żeby
+najszybciej dowieźć milestone 4.
 
-Działa dla jednego konta, w sieci prywatnej, bez reklam i bez monetyzacji.
+Jedno konto, sieć prywatna, bez monetyzacji.
 
 ## Problem
 
-Klient gry pokazuje bieżący stan maestrii, ale nie pokazuje, jak się zmienia
-między sesjami, i nie pozwala porównać championów pod kątem tego, ile pracy
-zostało do kolejnego milestone'a. Przy misjach z przepustki, które wymagają
-osiągnięcia konkretnego milestone'a, sprawdzanie tego ręcznie przez cały
-champion pool jest bez sensu.
-
-Do tego w trybie ARAM pula jest losowa — decyzję podejmujesz w kilka sekund
+Klient gry pokazuje bieżący stan maestrii, ale nie pokazuje zmian między
+sesjami i nie porównuje championów pod kątem pracy pozostałej do kolejnego
+milestone'a. Przy misjach z przepustki ręczne sprawdzanie całego poolu nie ma
+sensu. W ARAM-ie pula jest dodatkowo losowa — decyzja zapada w kilka sekund
 spośród kilkunastu postaci, które akurat wypadły.
 
-## Jak to działa
+## Architektura
 
 ```mermaid
 flowchart LR
     subgraph W["Windows — stacja z klientem gry"]
-        LCU["Klient LoL<br/>(LCU, lockfile)"]
+        LCU["Klient LoL<br/>(LCU: REST + WebSocket)"]
         LIVE["Live Client Data<br/>port 2999"]
-        AG["agent.py<br/>polling + kolejka dyskowa"]
+        AG["agent.py<br/>WS, polling jako fallback,<br/>kolejka dyskowa"]
         LCU --> AG
         LIVE --> AG
     end
@@ -35,22 +32,43 @@ flowchart LR
         BE -.po grze.-> BK
     end
 
-    RIOT["Riot API<br/>+ Data Dragon"]
+    DD["Data Dragon<br/>patch, championi, klasy"]
+    RIOT["Riot API<br/>konto→PUUID raz + sentinel"]
 
-    AG -- "HTTPS (Tailscale)<br/>pula / oceny / statystyki / live" --> BE
+    AG -- "HTTPS (Tailscale)<br/>pula / oceny / statystyki / live / snowball" --> BE
+    DD --> BE
     RIOT --> BE
-    BE --> FE["Przeglądarka<br/>ranking, panel live, scorecard"]
+    BE --> FE["Przeglądarka / PWA"]
 ```
 
-Agent na stacji roboczej czyta lokalne API klienta gry (LCU) i wysyła na serwer
-pulę championów z champ selecta oraz historię meczów. Serwer dokłada dane
-z publicznego Riot API, trzyma wszystko w SQLite i liczy ranking.
+Agent słucha zdarzeń klienta po WebSockecie (fazy gry, champ select, ocena
+pomeczowa), z pollingiem co 10 s jako siatką. Wysyła wszystko na serwer przez
+Tailscale. Serwer trzyma dane w SQLite i liczy ranking. Jedyna stała zależność
+zewnętrzna to Data Dragon; Riot API służy do jednorazowego mapowania konta na
+PUUID oraz do sentinela sprawdzającego raz dziennie, czy Riot otworzył Mayhema
+w match-v5.
 
-### Drabinka milestone'ów
+## Skąd dane o grach
 
-Sezonowa maestria dzieli się na cztery milestone'y plus powtarzalny bonusowy.
-Progi nie są udokumentowane w API — aplikacja **uczy się ich sama**, obserwując
-pole `nextSeasonMilestone` dla championów stojących na różnych szczeblach:
+Publiczne match-v5 nie zwraca gier ARAM Mayhem (kolejka 2400). To celowa,
+globalna polityka Riota dla tego trybu, nie właściwość konta — zwykły ARAM
+wraca normalnie. Jedynym źródłem Mayhema jest lokalne API klienta (LCU).
+
+Listing historii w LCU to kroczące okno 20 ostatnich gier. Parametry
+begIndex/endIndex są ignorowane na obu wariantach endpointu (sprawdzone sondą:
+alias current-summoner i wariant po PUUID, indeksy do 99). Starszych gier nie
+da się wylistować — ale pojedynczą grę można pobrać po ID w komplecie
+(`/lol-match-history/v1/games/{gameId}`), dowolnie starą. Statystyki są więc
+odzyskiwalne, o ile ID gry zostało kiedykolwiek zapisane.
+
+Bezpowrotnie ginie tylko ocena pomeczowa: `champion-mastery-updates` istnieje
+wyłącznie w trakcie ekranu końcowego. Dlatego agent musi działać przy każdej
+sesji grania.
+
+## Drabinka milestone'ów
+
+Progi nie są udokumentowane w API — aplikacja odczytuje je z pola
+`nextSeasonMilestone` championów stojących na różnych szczeblach.
 
 | Krok | Wymóg | Nagroda |
 |---|---|---|
@@ -59,77 +77,78 @@ pole `nextSeasonMilestone` dla championów stojących na różnych szczeblach:
 | 2 → 3 | S- ×1 | 2 Marks |
 | 3 → 4 | S- ×1 | 2 Marks + Crest Highlighting |
 
-### Dlaczego historia idzie z LCU, a nie z match-v5
+## Ocena pomeczowa
 
-Publiczne `MATCH-V5` **nie zwraca gier z rodziny ARAM** dla tego konta —
-sprawdzone: filtr po kolejce ARAM daje zero wyników w całej historii, mimo
-rozegranych meczów matchmade. LCU je ma, więc to on jest źródłem podstawowym.
+Dwa kanały: zdarzenie WebSocket `champion-mastery-updates` w momencie
+powstania oceny oraz pętla dopytująca (co 2 s, do 120 s) jako siatka
+bezpieczeństwa. Z logów produkcyjnych: okno otwiera się na fazie
+PreEndOfGame, 4–6 s po końcu gry — pojedynczy odczyt zawsze przegrywał
+ten wyścig.
 
-Ograniczenie: LCU pamięta około 20 ostatnich gier, a parametr `begIndex` jest
-ignorowany (potwierdzone testem — `lcu-depth-test.ps1`). Starszych meczów nie da
-się nadrobić z żadnego źródła, więc **agent musi być uruchomiony przy każdej
-sesji**, inaczej gry przepadają bezpowrotnie.
+## Model
 
-## Model oceny
+Regresja porządkowa (proportional odds) z cenzurowaniem, czysty Python:
 
-Aplikacja zbiera oceny pomeczowe i uczy się na nich przewidywać, czy na danym
-championie przebijesz próg wymagany do kolejnego milestone'a.
+    P(ocena ≥ k | x) = sigmoid(β·x − α_k),   α rosnące po drabince ocen
 
-Dwa niezależne klasyfikatory progowe: `P(ocena ≥ A-)` i `P(ocena ≥ S-)`.
-Podział wynika z danych — część obserwacji jest **cenzurowana**: awans milestone'a
-mówi „było A- lub lepiej", ale nie mówi, czy było S-. Taka obserwacja liczy się
-do pierwszego modelu, a z drugiego musi wypaść.
+Jeden wspólny wektor wag β, osobny próg α na szczebel. Ocena dokładna („B+")
+wnosi do wiarygodności swoją komórkę, cenzurowana („≥A-" z awansu milestone'a,
+przy którym tablica ocen się zeruje) — cały ogon. Dzięki temu próg S- uczy się
+na pełnej próbce, a P(≥A-) ≥ P(≥S-) zachodzi z konstrukcji.
+
+Cechy: gold/min, (K+A)/min, zgony/min, znormalizowane obrażenia, długość gry.
+λ regularyzacji wybierana przez leave-one-out; walidacja LOO per próg
+raportuje trafność i AUC z SE i CI95 (Hanley–McNeil). Próg z mniej niż
+5 obserwacjami którejś klasy jest oznaczany jako niewiarygodny, a jego
+predykcje nie wchodzą do scorecardu.
+
+Marker gotowości: `GET /api/model/readiness`.
 
 ### Dlaczego obrażenia są normalizowane przez championa
 
-Z zebranych danych: oceny `B+` mają **niższe** obrażenia na minutę niż `C`,
-bo `B+` padały na postaciach utility (Lulu, Veigar, Aurelion Sol), a `C` na
-Viktorze z 48 tysiącami obrażeń. Ocena jest liczona względem innych grających
-tą samą postacią, więc wartość bezwzględna wprowadza w błąd.
+Z danych: oceny B+ mają niższe obrażenia na minutę niż C, bo B+ padały na
+postaciach utility, a C na Viktorze z 48 tysiącami obrażeń. Ocena jest liczona
+względem innych grających tą samą postacią. gold/min rośnie monotonicznie
+z oceną (837 → 869 → 892 → 908 → 964 → 1040) i normalizacji nie wymaga.
 
-`gold/min` zachowuje się odwrotnie — rośnie monotonicznie wraz z oceną
-(837 → 869 → 892 → 908 → 964 → 1040) i nie wymaga normalizacji.
+## Normy: snowball
 
-### Skąd normalizator, skoro nie ma go w sieci
+Serwisy statystyczne jawnie nie mają Mayhema, więc normy per champion są
+budowane z dwóch własnych źródeł:
 
-Serwisy ze statystykami ARAM-a (np. aramstats.lol) nie mają Mayhema — Riot nie
-wystawia tej kolejki w publicznym API. Zwykły ARAM nie jest przybliżeniem, bo
-augmenty nie skalują championów równo, więc ranking obrażeń jest przetasowany.
+- ekran końcowy każdej gry: 183 pola statystyk × 10 graczy, czyli
+  10 obserwacji o Mayhemie na mecz — także o championach, którymi się nie gra,
+- snowball: z każdego meczu agent zna PUUID-y 9 pozostałych graczy;
+  przy bezczynnym kliencie dociąga ich historie przez LCU (1 gracz na minutę,
+  okno rewizyty 7 dni, dedup po game_id, własne gry odfiltrowane).
 
-Zamiast tego rozkład budowany jest z **własnych meczów**: ekran końcowy zawiera
-statystyki wszystkich dziesięciu graczy, więc każda gra to dziesięć obserwacji
-o Mayhemie — w tym o championach, którymi się nie grało. Wartości per champion
-są ściągane do średniej globalnej proporcjonalnie do liczby obserwacji, więc
-przy jednej grze wynik jest prawie równy globalnemu i nie udaje precyzji.
-
-Po wpięciu tego normalizatora waga obrażeń w modelu wzrosła z 0.15 do 0.60.
-
-### Marker gotowości
-
-`GET /api/model/status` zwraca liczbę obserwacji i informację, czy zebrało się
-ich dość, by stroić model. Poniżej progu model działa, ale jest poglądowy.
+`champion_norms` liczy μ i σ per champion ze ściąganiem champion → klasa
+(tagi Data Dragona) → global, proporcjonalnie do liczby obserwacji. Panel live
+porównuje bieżące tempo z medianą własnych gier ≥ progu, w drabince zakresu:
+ten champion (≥3 trafienia) → jego klasa (≥3) → wszystkie gry.
 
 ## Stack
 
 - Backend: Python 3.12, FastAPI, SQLite (domyślny journal — WAL nie działa na bind moncie virtiofs)
-- Frontend: jeden plik HTML, bez frameworka i bez builda
-- Agent: Python 3.11+ (aiohttp), polling LCU z kolejką dyskową na wypadek niedostępności serwera
-- Dostęp: Tailscale z certyfikatami HTTPS, bez wystawiania czegokolwiek publicznie
-- Uruchomienie: Docker Compose
+- Frontend: HTML + app.js + style.css, bez frameworka i bez builda
+- Agent: Python 3.11+ (aiohttp), WebSocket LCU z pollingiem jako fallbackiem, kolejka dyskowa
+- Dostęp: Tailscale (serve, tylko tailnet) z certyfikatami HTTPS
+- Uruchomienie: Docker Compose; kontener bez roota (cap_drop ALL, no-new-privileges)
+- Higiena: testy + CI (ruff, pytest), Dependabot
 
 ## Źródła danych
 
 | Źródło | Do czego |
 |---|---|
-| `ACCOUNT-V1` | Riot ID → PUUID, raz, potem cache |
-| `CHAMPION-MASTERY-V4` | snapshoty maestrii, milestone'y, zebrane oceny |
-| `SUMMONER-V4` | podstawowe dane profilu |
-| `MATCH-V5` | historia meczów spoza rodziny ARAM |
-| LCU `/lol-champ-select` | pula championów w champ selecie |
-| LCU `/lol-match-history` | historia meczów, w tym ARAM Mayhem |
-| Data Dragon | nazwy i ikony championów, bez klucza i bez limitów |
-| LCU `/lol-end-of-game/champion-mastery-updates` | **ocena pomeczowa**, punkty, wkład indywidualny |
-| LCU `/lol-end-of-game/eog-stats-block` | 110 pól statystyk wszystkich 10 graczy, augmenty |
+| LCU WebSocket | fazy gry, champ select na żywo, ocena pomeczowa zdarzeniem |
+| LCU `/lol-champ-select` | pula championów: ławka + drużyna (wymiana działa, cudzy pick to legalny cel) |
+| LCU `/lol-match-history` | historia meczów (okno 20), w tym Mayhem; pojedyncze gry po ID |
+| LCU `/lol-end-of-game/champion-mastery-updates` | ocena pomeczowa, punkty |
+| LCU `/lol-end-of-game/eog-stats-block` | 183 pola statystyk 10 graczy, augmenty |
+| Live Client Data (port 2999) | panel live; API nie oddaje obrażeń, złoto szacowane z ubytków stanu |
+| Data Dragon | patch, nazwy, ikony i klasy championów |
+| `ACCOUNT-V1` | Riot ID → PUUID, raz |
+| `MATCH-V5` | historia spoza Mayhema + sentinel (czy kolejka 2400 już otwarta) |
 
 ## Uruchomienie
 
@@ -137,7 +156,6 @@ ich dość, by stroić model. Poniżej progu model działa, ale jest poglądowy.
 
 ```bash
 cp .env.example .env      # uzupełnij klucz i Riot ID
-docker network create proxy
 docker compose up -d --build
 curl -s localhost:8000/api/health
 ```
@@ -146,23 +164,20 @@ curl -s localhost:8000/api/health
 
 Zobacz [`agent/README.md`](agent/README.md).
 
-## Ograniczenia i limity
+## Ograniczenia
 
-Personal API Key ma te same limity co deweloperski: 20 zapytań na sekundę
-i 100 na 2 minuty. Aplikacja cache'uje agresywnie — mecze są niezmienne, więc
-raz pobrane nigdy nie są odpytywane ponownie — i pilnuje limitów po swojej
-stronie przed wysłaniem zapytania.
+Personal API Key: 20 zapytań/s i 100 na 2 minuty — aplikacja cache'uje
+(mecze są niezmienne, raz pobrane nie są odpytywane ponownie) i pilnuje
+limitów po swojej stronie. LCU jest nieoficjalne i może się zmienić bez
+ostrzeżenia w dowolnym patchu.
 
 ## Status
 
-Działa w codziennym użyciu: snapshoty przed i po każdej grze, oceny pomeczowe
-i pełne statystyki dziesięciu graczy, historia pul z champ selecta z zapisem
-predykcji **przed** grą (scorecard Briera w `/api/predictions/scorecard`),
-warstwa splitów odporna na reset, model progowy z walidacją leave-one-out
-i normalizatorem per champion z własnych danych Mayhema, interfejs
-z podstronami, panel live w trakcie meczu (Live Client Data, port 2999),
-kolejka dyskowa w agencie na wypadek niedostępności serwera, backup restic
-przez Tailscale z retencją i cotygodniowym `restic check`, testy i CI.
+W codziennym użyciu. Snapshoty przed i po grze, oceny dwoma kanałami, pełny
+ekran końcowy, snowball, predykcje zapisywane przed grą (Brier
+w `/api/predictions/scorecard`), model porządkowy z walidacją LOO, panel live,
+kolejka dyskowa w agencie, backup restic z tygodniową retencją i weryfikacją,
+testy + CI + Dependabot.
 
 ## Disclaimer
 
