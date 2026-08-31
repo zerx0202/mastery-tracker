@@ -1,19 +1,31 @@
 """
 Model prawdopodobienstwa oceny pomeczowej.
 
-Dwa niezalezne klasyfikatory progowe:
-  P(ocena >= A-)  - potrzebne na milestone 0->1 i 1->2
-  P(ocena >= S-)  - potrzebne na milestone 2->3 i 3->4
+Regresja porzadkowa (proportional odds) z cenzurowaniem:
+    P(ocena >= k | x) = sigmoid(beta * x - alpha_k),  alpha rosnace po drabince
 
-Dlaczego progowe, a nie jedna skala: 19 z 35 obserwacji jest cenzurowanych.
-Awans milestone'a mowi ">= A-", ale nie mowi, czy bylo S-. Taka obserwacja
-jest pelnowartościowa dla modelu A-, a dla modelu S- musi zostac pominieta,
-inaczej zafalszuje wynik.
+Jeden wspolny wektor wag beta dla calej skali ocen + osobny prog alpha_k
+dla kazdego szczebla. Obserwacja dokladna (np. "B+") wnosi do wiarygodnosci
+P(>=B+) - P(>=nastepny); cenzurowana (">=A-" z awansu milestone'a) wnosi
+wprost P(>=A-). Dzieki temu:
+  - kazda z obserwacji karmi WSZYSTKIE progi naraz (model S- pozycza sile
+    od pelnej probki zamiast stac na garstce pozytywow),
+  - P(>=A-) >= P(>=S-) z konstrukcji - dwa niezalezne modele potrafily
+    te nierownosc zlamac i nic tego nie pilnowalo.
+Zalozenie proportional odds (ten sam kierunek wplywu cech na kazdym progu)
+jest mocne, ale przy tej probce to lepszy prior niz estymacja S- z 3
+pozytywow. Do rewizji przy ~100 obserwacjach.
 
 Dlaczego obrazenia sa normalizowane przez championa: w danych B+ ma
 NIZSZE obrazenia na minute niz C, bo B+ to postacie utility. Ocena jest
 liczona wzgledem innych grajacych ta postacia, wiec surowa wartosc jest
 mylaca. gold/min jest za to monotoniczne i nie wymaga normalizacji.
+
+UWAGA (nazwany, niewyeliminowany wyciek): norm_z liczy sie z pelnego
+player_stat, wiec w walidacji LOO fold widzi 1 wiersz statystyk wlasnej
+odlozonej gry. Przy normach zdominowanych przez snowball (10 obs/mecz,
+setki gier) to wplyw rzedu 1/n na jedna ceche - pomijalny, ale jesli
+metryki kiedys wygladaja podejrzanie dobrze, zaczac szukac tutaj.
 """
 
 import math
@@ -23,6 +35,7 @@ import time
 from . import features
 from .db import (
     GRADE_RANK,
+    GRADES,
     connect,
     get_json_setting,
     log_event,
@@ -43,10 +56,6 @@ FEATURES = [
 ]
 
 MIN_SAMPLES = 20        # ponizej tego model jest tylko poglądowy
-TUNING_TARGET = 40      # marker: od tylu obserwacji warto stroic
-L2 = 1.0
-EPOCHS = 3000
-LR = 0.08
 
 
 # ---------- cechy ----------
@@ -148,7 +157,17 @@ def training_rows(mode=None):
             WHERE m.duration > 300 {clause}""", args)]
 
 
-# ---------- regresja logistyczna ----------
+# ---------- regresja porzadkowa ----------
+
+# Progi mission-critical + stale strojenia. TUNE/VAL maja mniej epok niz
+# trening koncowy - to swiadomy kompromis czasu (train() chodzi po kazdej
+# ocenie w tle na Airze), a wybor lambdy i ranking foldow sa na to odporne.
+L2_GRID = [0.3, 1.0, 3.0]
+EPOCHS_FINAL = 2500
+EPOCHS_TUNE = 500
+EPOCHS_VAL = 900
+LR_ORD = 0.15
+
 
 def _standardize(matrix):
     n_feat = len(matrix[0])
@@ -171,40 +190,207 @@ def _sigmoid(z):
     return 1 / (1 + math.exp(-z))
 
 
-def _fit(X, y):
-    """Regresja logistyczna z L2, prosty gradient. Przy 35 probkach
-    i 5 cechach nie ma sensu ciagnac zaleznosci typu scikit-learn."""
+def _parse_grade(grade):
+    """("censored", rank) dla ">=X", ("exact", rank) dla "X", None gdy smiec."""
+    if not isinstance(grade, str):
+        return None
+    if grade.startswith(">="):
+        r = GRADE_RANK.get(grade[2:].strip())
+        return ("censored", r) if r is not None else None
+    r = GRADE_RANK.get(grade.strip())
+    return ("exact", r) if r is not None else None
+
+
+def _cutpoints(specs):
+    """Progi alpha: kazdy rank, dla ktorego wiarygodnosc potrzebuje P(>=r):
+    oceny dokladne (prog wlasny i nastepny w gore), progi cenzurowania,
+    zawsze progi misji. Najnizszy rank odpada - P(>=min) = 1 z definicji."""
+    ranks = {GRADE_RANK[t] for t in THRESHOLDS}
+    for _kind, r in specs:
+        ranks.add(r)
+    ranks = sorted(ranks)
+    return ranks[1:] if len(ranks) > 1 else ranks
+
+
+def _alpha_vector(a0, gaps):
+    """Progi rosnace z konstrukcji: alpha_k = a0 + suma exp(gap)."""
+    out = [a0]
+    for g in gaps:
+        out.append(out[-1] + math.exp(g))
+    return out
+
+
+def _fit_ordinal(X, specs, cuts, l2, epochs, lr):
+    """Proportional odds z cenzurowaniem, czysty Python, pelny gradient.
+    L2 tylko na beta - progi alpha to polozenia na skali, nie wagi cech."""
     n, k = len(X), len(X[0])
-    w = [0.0] * k
-    b = 0.0
-    for _ in range(EPOCHS):
-        gw = [0.0] * k
-        gb = 0.0
-        for xi, yi in zip(X, y, strict=False):
-            p = _sigmoid(sum(w[j] * xi[j] for j in range(k)) + b)
-            err = p - yi
+    ncut = len(cuts)
+    cut_ix = {r: i for i, r in enumerate(cuts)}
+    # nastepny prog W GORE od danego ranku (do komorek ocen dokladnych)
+    next_up = {}
+    for r in {r for _, r in specs}:
+        above = [c for c in cuts if c > r]
+        next_up[r] = above[0] if above else None
+
+    # start: progi z czestosci brzegowych (etykiety per prog), beta = 0
+    beta = [0.0] * k
+    a0, gaps = 0.0, [0.0] * (ncut - 1)
+    # start: alpha z czestosci brzegowych. "Na pewno >= c" to exact r>=c
+    # albo censored r>=c; exact r<c to pewne 0; censored r<c - niewiadoma.
+    marg = []
+    for c in cuts:
+        pos = sum(1 for kind, r in specs if r >= c)
+        neg = sum(1 for kind, r in specs if kind == "exact" and r < c)
+        tot = pos + neg
+        p = min(max(pos / tot if tot else 0.5, 0.02), 0.98)
+        marg.append(-math.log(p / (1 - p)))
+    # wymuszenie rosnacosci na starcie
+    for i in range(1, ncut):
+        marg[i] = max(marg[i], marg[i - 1] + 1e-3)
+    a0 = marg[0]
+    gaps = [math.log(max(marg[i] - marg[i - 1], 1e-3)) for i in range(1, ncut)]
+
+    for _ in range(epochs):
+        alphas = _alpha_vector(a0, gaps)
+        gb = [0.0] * k
+        ga0 = 0.0
+        ggaps = [0.0] * (ncut - 1)
+
+        for xi, (kind, r) in zip(X, specs, strict=False):
+            u = sum(beta[j] * xi[j] for j in range(k))
+            # gradient log-wiarygodnosci po u i po konkretnych alpha
+            if kind == "censored":
+                s = _sigmoid(u - alphas[cut_ix[r]])
+                du = 1 - s
+                dalpha = {cut_ix[r]: -(1 - s)}
+            else:
+                lo = cut_ix.get(r)          # None = najnizszy rank (P(>=r)=1)
+                hi_r = next_up[r]
+                hi = cut_ix.get(hi_r) if hi_r is not None else None
+                s_lo = _sigmoid(u - alphas[lo]) if lo is not None else 1.0
+                s_hi = _sigmoid(u - alphas[hi]) if hi is not None else 0.0
+                p = max(s_lo - s_hi, 1e-12)
+                d_lo = s_lo * (1 - s_lo) if lo is not None else 0.0
+                d_hi = s_hi * (1 - s_hi) if hi is not None else 0.0
+                du = (d_lo - d_hi) / p
+                dalpha = {}
+                if lo is not None:
+                    dalpha[lo] = -d_lo / p
+                if hi is not None:
+                    dalpha[hi] = dalpha.get(hi, 0.0) + d_hi / p
             for j in range(k):
-                gw[j] += err * xi[j]
-            gb += err
+                gb[j] += du * xi[j]
+            for ix, dv in dalpha.items():
+                ga0 += dv
+                for gi in range(ix):        # alpha_ix zalezy od gaps[0..ix-1]
+                    ggaps[gi] += dv * math.exp(gaps[gi])
+
         for j in range(k):
-            w[j] = w[j] - LR * (gw[j] / n + L2 * w[j] / n)
-        b -= LR * gb / n
-    return w, b
+            beta[j] += lr * (gb[j] / n - l2 * beta[j] / n)
+        a0 += lr * ga0 / n
+        for gi in range(ncut - 1):
+            gaps[gi] += lr * ggaps[gi] / n
+
+    return beta, {c: a for c, a in zip(cuts, _alpha_vector(a0, gaps), strict=False)}
 
 
-def _metrics(X, y, w, b):
-    correct = 0
-    ll = 0.0
-    for xi, yi in zip(X, y, strict=False):
-        p = _sigmoid(sum(w[j] * xi[j] for j in range(len(w))) + b)
-        correct += int((p >= 0.5) == bool(yi))
-        ll += yi * math.log(max(p, 1e-13)) + (1 - yi) * math.log(max(1 - p, 1e-13))
+def _p_ge(x_std, beta, alphas, rank):
+    u = sum(beta[j] * x_std[j] for j in range(len(beta)))
+    return _sigmoid(u - alphas[rank])
+
+
+def _auc_ci(auc, n_pos, n_neg):
+    """Hanley-McNeil: SE i 95% CI. Zeby ruchy AUC mniejsze niz szum
+    przestaly uchodzic za wynik."""
+    if auc is None or not n_pos or not n_neg:
+        return None, None
+    q1 = auc / (2 - auc)
+    q2 = 2 * auc * auc / (1 + auc)
+    var = (auc * (1 - auc) + (n_pos - 1) * (q1 - auc * auc)
+           + (n_neg - 1) * (q2 - auc * auc)) / (n_pos * n_neg)
+    se = math.sqrt(max(var, 0.0))
+    return round(se, 3), [round(max(0.0, auc - 1.96 * se), 3),
+                          round(min(1.0, auc + 1.96 * se), 3)]
+
+
+def _threshold_metrics(preds):
+    """Metryki dla listy (p, etykieta) jednego progu."""
+    if not preds:
+        return None
+    y = [t for _, t in preds]
+    if len(set(y)) < 2:
+        return None
+    correct = sum(1 for p, t in preds if (p >= 0.5) == bool(t))
+    ll = sum(t * math.log(max(p, 1e-13)) + (1 - t) * math.log(max(1 - p, 1e-13))
+             for p, t in preds)
     base = sum(y) / len(y)
+    base_acc = max(base, 1 - base)
+    pos = [p for p, t in preds if t == 1]
+    neg = [p for p, t in preds if t == 0]
+    auc = None
+    if pos and neg:
+        wins = sum(1 for a in pos for b_ in neg if a > b_)
+        ties = sum(1 for a in pos for b_ in neg if a == b_)
+        auc = (wins + 0.5 * ties) / (len(pos) * len(neg))
+    acc = correct / len(preds)
+    se, ci = _auc_ci(auc, len(pos), len(neg))
     return {
-        "accuracy": round(correct / len(y), 3),
-        "log_loss": round(-ll / len(y), 4),
+        "method": "leave-one-out (porzadkowa)",
+        "tested": len(preds),
+        "accuracy": round(acc, 3),
+        "baseline_accuracy": round(base_acc, 3),
+        "lift": round(acc - base_acc, 3),
+        "auc": round(auc, 3) if auc is not None else None,
+        "auc_se": se,
+        "auc_ci95": ci,
+        "log_loss": round(-ll / len(preds), 4),
         "base_rate": round(base, 3),
+        "useful": bool(auc is not None and auc >= 0.65 and acc > base_acc),
     }
+
+
+def _loo_predictions(X_raw, specs, l2, epochs):
+    """LOO: kazda obserwacja raz jako test, standaryzacja i fit per fold.
+    Zwraca {prog: [(p, etykieta), ...]} dla progow misji."""
+    n = len(X_raw)
+    out = {th: [] for th in THRESHOLDS}
+    for i in range(n):
+        Xtr = [X_raw[j] for j in range(n) if j != i]
+        str_ = [specs[j] for j in range(n) if j != i]
+        Xs, means, stds = _standardize(Xtr)
+        cuts = _cutpoints(str_)
+        if not cuts:
+            continue
+        beta, alphas = _fit_ordinal(Xs, str_, cuts, l2, epochs, LR_ORD)
+        xi = [(X_raw[i][j] - means[j]) / stds[j] for j in range(len(means))]
+        kind, r = specs[i]
+        grade_str = (">=" if kind == "censored" else "") + GRADES[r]
+        for th in THRESHOLDS:
+            lab = label_for(grade_str, th)
+            rk = GRADE_RANK[th]
+            if lab is None or rk not in alphas:
+                continue
+            out[th].append((_p_ge(xi, beta, alphas, rk), lab))
+    return out
+
+
+def _choose_l2(X_raw, specs):
+    """Lambda z LOO: minimalizacja sumy log-loss na progach misji.
+    Mniej epok niz final - ranking lambd jest na to odporny."""
+    best, best_ll, report = L2_GRID[0], None, {}
+    for l2 in L2_GRID:
+        preds = _loo_predictions(X_raw, specs, l2, EPOCHS_TUNE)
+        ll = 0.0
+        cnt = 0
+        for th in THRESHOLDS:
+            for p, t in preds[th]:
+                ll -= t * math.log(max(p, 1e-13)) + (1 - t) * math.log(max(1 - p, 1e-13))
+                cnt += 1
+        score = ll / cnt if cnt else float("inf")
+        report[str(l2)] = round(score, 4)
+        if best_ll is None or score < best_ll:
+            best, best_ll = l2, score
+    return best, report
 
 
 # ---------- trening ----------
@@ -214,46 +400,86 @@ def train(mode=None, save=True):
     baselines, global_median = champion_baselines(mode)
     external = get_json_setting("external_dpm") or None
 
+    X_raw, specs = [], []
+    for r in rows:
+        spec = _parse_grade(r["grade"])
+        if spec is None:
+            continue
+        f = extract_features(r, baselines, global_median, external, mode)
+        X_raw.append([f[k] for k in FEATURES])
+        specs.append(spec)
+
     out = {"trained_at": int(time.time()), "mode": mode,
-           "features": FEATURES, "models": {}, "external_used": bool(external)}
+           "features": FEATURES, "models": {}, "external_used": bool(external),
+           "kind": "ordinal"}
+
+    # etykiety per prog - do licznikow, statusow i metryk treningowych
+    def labels_for(th):
+        y = []
+        for kind, r in specs:
+            g = (">=" if kind == "censored" else "") + GRADES[r]
+            y.append(label_for(g, th))
+        return y
+
+    have_core = (len(X_raw) >= 10
+                 and len(set(v for v in labels_for(THRESHOLDS[0]) if v is not None)) == 2)
+    if not have_core:
+        for th in THRESHOLDS:
+            y = [v for v in labels_for(th) if v is not None]
+            out["models"][th] = {"samples": len(y), "positives": sum(y),
+                                 "status": "za malo danych albo brak obu klas"}
+        if save:
+            set_json_setting("grade_model", out)
+        return out
+
+    Xs, means, stds = _standardize(X_raw)
+    cuts = _cutpoints(specs)
+    l2, l2_report = _choose_l2(X_raw, specs)
+    beta, alphas = _fit_ordinal(Xs, specs, cuts, l2, EPOCHS_FINAL, LR_ORD)
+    loo = _loo_predictions(X_raw, specs, l2, EPOCHS_VAL)
+
+    out["ordinal"] = {
+        "l2": l2, "l2_search": l2_report,
+        "trained_on": len(X_raw),
+        "cutpoints": {GRADES[c]: round(a, 4) for c, a in alphas.items()},
+    }
 
     for th in THRESHOLDS:
-        X_raw, y = [], []
-        for r in rows:
-            lab = label_for(r["grade"], th)
-            if lab is None:
-                continue
-            f = extract_features(r, baselines, global_median, external, mode)
-            X_raw.append([f[k] for k in FEATURES])
-            y.append(lab)
-
+        y_all = labels_for(th)
+        y = [v for v in y_all if v is not None]
         pos = sum(y)
-        info = {"samples": len(y), "positives": pos}
+        info = {"samples": len(y), "positives": pos,
+                "trained_on": len(X_raw), "l2": l2}
         if len(y) < 8 or len(set(y)) < 2:
             info["status"] = "za malo danych albo brak obu klas"
             out["models"][th] = info
             continue
-        # przy garstce pozytywow model uczy sie mowic "nie" na wszystko
-        # i raportuje 100% trafnosci - to arytmetyka, nie umiejetnosc
+        # ponizej 5 obserwacji ktorejkolwiek klasy metryki tego progu to
+        # arytmetyka na garstce - wspolne beta pomaga, ale pewnosci nie daje
         if pos < 5 or (len(y) - pos) < 5:
             info["status"] = "niewiarygodny"
             info["reason"] = f"tylko {pos} pozytywow na {len(y)} obserwacji"
 
-        X, means, stds = _standardize(X_raw)
-        w, b = _fit(X, y)
-        cv = _cross_validate(X_raw, y)
+        cv = _threshold_metrics(loo[th])
         info["validation"] = cv
         if cv and not cv["useful"] and not info.get("status"):
             info["status"] = "bez wartosci predykcyjnej"
             info["reason"] = (f"na nowych grach trafia {100*cv['accuracy']:.0f}%, "
                               f"a zgadywanie wiekszosci daje {100*cv['baseline_accuracy']:.0f}%")
+
+        rk = GRADE_RANK[th]
+        train_preds = [(_p_ge(x, beta, alphas, rk), lab)
+                       for x, lab in zip(Xs, y_all, strict=False) if lab is not None]
+        tm = _threshold_metrics(train_preds) or {}
         info.update({
             "status": info.get("status") or
                       ("ok" if len(y) >= MIN_SAMPLES else "poglądowy"),
-            "weights": dict(zip(FEATURES, [round(x, 4) for x in w], strict=False)),
-            "bias": round(b, 4),
+            "weights": dict(zip(FEATURES, [round(x, 4) for x in beta], strict=False)),
+            "bias": round(-alphas[rk], 4),
             "means": means, "stds": stds,
-            "metrics": _metrics(X, y, w, b),
+            "metrics": {"accuracy": tm.get("accuracy"),
+                        "log_loss": tm.get("log_loss"),
+                        "base_rate": tm.get("base_rate")},
         })
         out["models"][th] = info
 
@@ -262,7 +488,7 @@ def train(mode=None, save=True):
         set_json_setting("champion_baselines",
                          {"per_champ": baselines, "global": global_median})
         log_event("model_train", {
-            "mode": mode,
+            "mode": mode, "l2": l2,
             "samples": {t: out["models"][t].get("samples") for t in THRESHOLDS},
         })
     return out
@@ -378,57 +604,6 @@ FEATURE_LABELS = {
     "duration_min": "długość gry",
 }
 
-
-def _cross_validate(X_raw, y, folds=None):
-    """Leave-one-out przy malej probce: kazda obserwacja raz jako test.
-    To jedyna uczciwa miara - metryki na danych treningowych zawsze
-    wygladaja lepiej, niz model faktycznie dziala."""
-    n = len(y)
-    if n < 10 or len(set(y)) < 2:
-        return None
-    folds = folds or n
-
-    preds = []
-    for i in range(n):
-        Xtr = [X_raw[j] for j in range(n) if j != i]
-        ytr = [y[j] for j in range(n) if j != i]
-        if len(set(ytr)) < 2:
-            continue
-        Xs, means, stds = _standardize(Xtr)
-        w, b = _fit(Xs, ytr)
-        xi = [(X_raw[i][k] - means[k]) / stds[k] for k in range(len(means))]
-        p = _sigmoid(sum(w[k] * xi[k] for k in range(len(w))) + b)
-        preds.append((p, y[i]))
-
-    if not preds:
-        return None
-
-    correct = sum(1 for p, t in preds if (p >= 0.5) == bool(t))
-    ll = sum(t * math.log(max(p, 1e-13)) + (1 - t) * math.log(max(1 - p, 1e-13))
-             for p, t in preds)
-    base = sum(y) / n
-    base_acc = max(base, 1 - base)
-
-    # AUC: udzial par (pozytyw, negatyw) uszeregowanych poprawnie
-    pos = [p for p, t in preds if t == 1]
-    neg = [p for p, t in preds if t == 0]
-    auc = None
-    if pos and neg:
-        wins = sum(1 for a in pos for b_ in neg if a > b_)
-        ties = sum(1 for a in pos for b_ in neg if a == b_)
-        auc = (wins + 0.5 * ties) / (len(pos) * len(neg))
-
-    acc = correct / len(preds)
-    return {
-        "method": "leave-one-out",
-        "tested": len(preds),
-        "accuracy": round(acc, 3),
-        "baseline_accuracy": round(base_acc, 3),
-        "lift": round(acc - base_acc, 3),
-        "auc": round(auc, 3) if auc is not None else None,
-        "log_loss": round(-ll / len(preds), 4),
-        "useful": bool(auc is not None and auc >= 0.65 and acc > base_acc),
-    }
 
 
 def champion_medians(champion_id, mode=None):
