@@ -4,6 +4,14 @@ services:
     container_name: riot-backend
     env_file: .env
     restart: unless-stopped
+    # proces w kontenerze chodzi jako zwykly uzytkownik hosta, nie root:
+    # przy bind moncie ./data root w kontenerze = zapis na dysku Maca.
+    # 501:20 to domyslny pierwszy uzytkownik macOS; nadpisywalne w .env.
+    user: "${APP_UID:-501}:${APP_GID:-20}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

@@ -31,3 +31,14 @@ def test_norms_see_snowball_data(fresh_db):
     db.snowball_ingest("p1", [G(10, cid=99), G(11, cid=99)])
     d = db.champion_norms("totalDamageDealtToChampions", mode="KIWI")
     assert d["global"] is not None and 99 in d["champions"]
+
+
+def test_ingest_suffix_is_not_own(fresh_db):
+    """gid bedacy sufiksem CUDZEGO id (777 vs EUW1_9777) nie moze byc
+    uznany za wlasna gre - filtr wymaga separatora _ przed gid."""
+    with db.connect() as con:
+        insert_row(con, "match_player", match_id="EUW1_9777", duration=900,
+                   game_mode="KIWI", champion_id=1)
+        con.commit()
+    kiwi, rows = db.snowball_ingest("p1", [G(777)])
+    assert kiwi == 1 and rows == 3           # zaingestowana, nie odfiltrowana

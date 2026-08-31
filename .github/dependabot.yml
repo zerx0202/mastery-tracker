@@ -1,0 +1,12 @@
+# Dependabot pilnuje zaleznosci: raz w tygodniu otwiera PR z aktualizacjami
+# pip (requirements.txt) i akcji CI. Merge dopiero po zielonym ruff+pytest.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

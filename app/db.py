@@ -1677,8 +1677,8 @@ def snowball_ingest(puuid, games):
             if dur <= 300:
                 continue
             own = con.execute(
-                "SELECT 1 FROM match_player WHERE match_id LIKE ?",
-                (f"%{gid}",)).fetchone()
+                "SELECT 1 FROM match_player WHERE match_id LIKE ? ESCAPE '\\'",
+                (f"%\\_{gid}",)).fetchone()
             if own:
                 continue
             cur = con.execute(

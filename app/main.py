@@ -736,11 +736,12 @@ async def split_timeline(split: int | None = None):
     return await asyncio.to_thread(build)
 
 
-@api.get("/export")
+@api.get("/export", dependencies=[Depends(require_token)])
 async def export_all():
     """Zrzut wszystkich tabel do JSON-a. Drugi kanal wyjscia obok restica -
     dane sa nieodtwarzalne, wiec jedna sciezka ratunku to za malo.
-    Bloby (skompresowane eog) pomijamy: sa w backupie, a tu wazy najwiecej."""
+    Bloby (skompresowane eog) pomijamy: sa w backupie, a tu wazy najwiecej.
+    Token jak na zapisach: pelny zrzut bazy to nie jest widok publiczny."""
     def dump():
         out = {}
         with db.connect() as con:
