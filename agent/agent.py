@@ -731,66 +731,55 @@ class Agent:
 
     async def ws_loop(self):
         """Glowny kanal - zdarzenia z LCU po WebSocket.
-        LCU mowi protokolem WAMP 1.0, wiec podprotokol musi byc zadeklarowany,
-        inaczej serwer odrzuca handshake."""
-        # dwa warianty handshake'u: auth w naglowku i auth w URL
-        # (league-connect uzywa drugiego); przy odmowie logujemy naglowki
-        origin = {"Origin": f"https://127.0.0.1:{self.lcu.port}"}
-        variants = [
-            dict(url=f"wss://127.0.0.1:{self.lcu.port}/",
-                 headers={**self.lcu.headers, **origin}),
-            dict(url=f"wss://127.0.0.1:{self.lcu.port}/",
-                 headers=self.lcu.headers),
-            dict(url=f"wss://riot:{self.lcu.password}@127.0.0.1:{self.lcu.port}/",
-                 headers=None),
-        ]
-        ws_ctx = None
-        last_err = None
-        for v in variants:
-            try:
-                ws_ctx = await self.session.ws_connect(
-                    v["url"], headers=v["headers"], protocols=("wamp",),
-                    ssl=self.lcu.ssl, heartbeat=30)
-                break
-            except aiohttp.WSServerHandshakeError as e:
-                last_err = e
-        if ws_ctx is None:
-            raise last_err
-        async with ws_ctx as ws:
-            # opcode 5 = subscribe
-            await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase"]))
-            await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-champ-select_v1_session"]))
-            await ws.send_str(json.dumps(
-                [5, "OnJsonApiEvent_lol-end-of-game_v1_champion-mastery-updates"]))
-            log("WebSocket podlaczony", "ok")
-            self.ws_failures = 0
 
-            async for msg in ws:
-                if msg.type != aiohttp.WSMsgType.TEXT or not msg.data:
-                    continue
-                try:
-                    payload = json.loads(msg.data)
-                except ValueError:
-                    continue
-                # WAMP: [opcode, nazwa_eventu, {uri, eventType, data}]
-                # Czesc wiadomosci ma inny ksztalt - ignorujemy je.
-                if not isinstance(payload, list) or len(payload) < 3:
-                    continue
-                event = payload[2]
-                if not isinstance(event, dict):
-                    continue
-                uri = event.get("uri", "")
-                data = event.get("data")
-                if uri.endswith("/gameflow-phase"):
-                    await self.handle_phase(data)
-                elif uri.endswith("/champ-select/v1/session"):
-                    await self.handle_champ_select(data if isinstance(data, dict) else None)
-                elif uri.endswith("/champion-mastery-updates"):
-                    # Ocena wypchnieta przez klienta w momencie powstania -
-                    # zero zgadywania fazy. Dziala tez, gdy petla dopytujaca
-                    # akurat nie biegnie (backend deduplikuje po meczu).
-                    if data and await self.submit_grade(data, "ws"):
-                        log("ocena zlapana z WebSocketu", "ok")
+        KLUCZOWE: osobna sesja aiohttp tylko dla WS. Wspolna sesja agenta
+        trzyma w puli ciepłe polaczenia keep-alive do LCU (polling REST
+        co 10 s), a ws_connect na takiej sesji dostawal polaczenie Z PULI -
+        serwer RiotRemoting odrzuca upgrade na uzytym polaczeniu i stad
+        byl wieczny 404. Sonda ws-probe (31.08): z czystej sesji przechodzi
+        KAZDY wariant naglowkow, w tym z podprotokolem wamp - wiec warianty
+        i Origin wylecialy, zostal najprostszy handshake jak w Willump
+        i league-connect. Wiadomosci to nadal format WAMP 1.0, ale samego
+        podprotokolu nie trzeba negocjowac."""
+        async with aiohttp.ClientSession() as ws_session:
+            ws_ctx = await ws_session.ws_connect(
+                f"wss://127.0.0.1:{self.lcu.port}/",
+                headers=self.lcu.headers, ssl=self.lcu.ssl, heartbeat=30)
+            async with ws_ctx as ws:
+                # opcode 5 = subscribe
+                await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase"]))
+                await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-champ-select_v1_session"]))
+                await ws.send_str(json.dumps(
+                    [5, "OnJsonApiEvent_lol-end-of-game_v1_champion-mastery-updates"]))
+                log("WebSocket podlaczony", "ok")
+                self.ws_failures = 0
+
+                async for msg in ws:
+                    if msg.type != aiohttp.WSMsgType.TEXT or not msg.data:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except ValueError:
+                        continue
+                    # WAMP: [opcode, nazwa_eventu, {uri, eventType, data}]
+                    # Czesc wiadomosci ma inny ksztalt - ignorujemy je.
+                    if not isinstance(payload, list) or len(payload) < 3:
+                        continue
+                    event = payload[2]
+                    if not isinstance(event, dict):
+                        continue
+                    uri = event.get("uri", "")
+                    data = event.get("data")
+                    if uri.endswith("/gameflow-phase"):
+                        await self.handle_phase(data)
+                    elif uri.endswith("/champ-select/v1/session"):
+                        await self.handle_champ_select(data if isinstance(data, dict) else None)
+                    elif uri.endswith("/champion-mastery-updates"):
+                        # Ocena wypchnieta przez klienta w momencie powstania -
+                        # zero zgadywania fazy. Dziala tez, gdy petla dopytujaca
+                        # akurat nie biegnie (backend deduplikuje po meczu).
+                        if data and await self.submit_grade(data, "ws"):
+                            log("ocena zlapana z WebSocketu", "ok")
 
     async def run(self):
         async with aiohttp.ClientSession() as session:
