@@ -590,6 +590,29 @@ async def push_grade(payload: dict):
     return {"received": len(raw), "new": new, "errors": errors[:5]}
 
 
+@write_api.post("/missions")
+async def receive_missions(payload: dict):
+    """(1) Misje maestrii z klienta - agent filtruje po slowach kluczowych
+    i przysyla surowe obiekty; trzymamy ostatni stan."""
+    missions = payload.get("missions") or []
+    if not missions:
+        return {"stored": False}
+    await asyncio.to_thread(db.set_json_setting, "missions_state",
+                            {"ts": int(time.time()), "missions": missions})
+    return {"stored": True, "missions": len(missions)}
+
+
+@api.get("/missions")
+async def read_missions():
+    return db.get_json_setting("missions_state") or {"missions": []}
+
+
+@api.get("/recap")
+async def recap(mode: str | None = None):
+    """(16) Podsumowanie splitu - liczby z biezacego zakresu."""
+    return await asyncio.to_thread(db.split_recap, mode or DEFAULT_MODE)
+
+
 @write_api.post("/pass")
 async def receive_pass(payload: dict):
     """Stan przepustki z event-hubu (karta 18) - agent przysyla po grze

@@ -229,9 +229,9 @@ async function renderSide() {
   const box = $("side");
   if (!box) return;
   try {
-    const [sp, gr, sys, pa] = await Promise.all([
+    const [sp, gr, sys, pa, mi] = await Promise.all([
       api("/split/progress"), api("/grades/history?limit=3"), api("/system/health"),
-      api("/pass").catch(() => ({}))]);
+      api("/pass").catch(() => ({})), api("/missions").catch(() => ({}))]);
 
     const dist = sp.distribution || {};
     const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1;
@@ -331,7 +331,31 @@ async function renderSide() {
       </div>`;
     }
 
-    box.innerHTML = passHtml + `
+    let missionsHtml = "";
+    const ms = (mi && mi.missions) || [];
+    if (ms.length) {
+      // pola misji bywaja rozne miedzy wersjami klienta - wyciagamy
+      // defensywnie i pokazujemy tylko to, co sie da odczytac
+      const rows = ms.slice(0, 5).map(m => {
+        const title = m.title || m.name || m.internalName || m.id || "misja";
+        const o = (m.objectives || [])[0] || {};
+        const pr = o.progress || m.progress || {};
+        const cur = pr.currentProgress ?? pr.current;
+        const tot = pr.totalProgress ?? pr.total;
+        const val = (cur != null && tot)
+          ? `${cur}/${tot}`
+          : (m.status === "COMPLETED" ? "✓" : (m.status || ""));
+        return `<div class="kv"><span>${esc(String(title))}</span>
+          <span>${esc(String(val))}</span></div>`;
+      }).join("");
+      missionsHtml = `
+      <div class="panel">
+        <div class="eyebrow">Misje maestrii</div>
+        ${rows}
+      </div>`;
+    }
+
+    box.innerHTML = passHtml + missionsHtml + `
       <div class="panel">
         <div class="eyebrow">Postęp splitu</div>
         ${bars}
@@ -465,6 +489,8 @@ function explainBox(ex) {
 /* ---------- SPLIT ---------- */
 async function renderSplit() {
   const d = await api("/split/progress");
+  let rc = null;
+  try { rc = await api("/recap"); } catch (e) {}
   const dist = d.distribution || {};
   const max = Math.max(...Object.values(dist), 1);
   const bars = Object.entries(dist).map(([ms, n]) => `
@@ -483,12 +509,35 @@ async function renderSplit() {
   const since = d.tracking_since
     ? new Date(d.tracking_since * 1000).toLocaleDateString("pl-PL") : "—";
 
+  let recapHtml = "";
+  if (rc && rc.games) {
+    const wr = rc.games ? Math.round(100 * rc.wins / rc.games) : 0;
+    const gradeChips = Object.entries(rc.grades || {})
+      .sort((a, b) => b[1] - a[1])
+      .map(([g, n]) => `<span class="chip ${/^[SA]/.test(g) ? "ok" : ""}"
+        style="margin:2px">${esc(g)} ×${n}</span>`).join(" ");
+    recapHtml = `
+      <div class="panel">
+        <div class="eyebrow">Podsumowanie splitu (od ${
+          new Date(rc.since * 1000).toLocaleDateString("pl-PL")})</div>
+        <div class="kv"><span>Gry / winrate</span>
+          <span>${rc.games} · ${wr}%</span></div>
+        <div class="kv"><span>Czas w grze</span><span>${rc.hours} h</span></div>
+        <div class="kv"><span>Różnych championów</span>
+          <span>${rc.unique_champions}</span></div>
+        <div class="kv"><span>Oceny S / A</span>
+          <span>${rc.s_count} / ${rc.a_count}</span></div>
+        <div style="margin-top:8px">${gradeChips}</div>
+      </div>`;
+  }
+
   $("split-body").innerHTML = `
     <div class="grid2" style="margin-top:20px">
       <div class="panel">
         <div class="eyebrow">Rozkład championów</div>
         ${bars}
       </div>
+      ${recapHtml}
       <div class="panel">
         <div class="eyebrow">Drabinka wymagań</div>
         ${ladder || '<div class="sub">jeszcze nieznana</div>'}

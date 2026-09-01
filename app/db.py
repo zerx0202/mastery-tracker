@@ -921,6 +921,50 @@ def current_split_id():
     return sid
 
 
+def split_recap(mode=None):
+    """(16) Podsumowanie biezacego splitu - z chwila resetu staje sie
+    "wrapped" poprzedniego (zakres: od started_at ostatniego splitu)."""
+    with connect() as con:
+        row = con.execute(
+            "SELECT started_at FROM split ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        since = row["started_at"] if row else 0
+        clause = "AND game_mode = :mode" if mode else ""
+        prm = {"since": since}
+        if mode:
+            prm["mode"] = mode
+        norm_ts = ("(CASE WHEN game_creation > 1000000000000 "
+                   "THEN game_creation / 1000 ELSE game_creation END)")
+        gp = con.execute(f"""
+            SELECT COUNT(*) games, SUM(win) wins, SUM(duration) secs,
+                   COUNT(DISTINCT champion_id) champs
+            FROM match_player
+            WHERE duration > 300 AND {norm_ts} >= :since {clause}""",
+            prm).fetchone()
+        grades = [r["grade"] for r in con.execute(
+            "SELECT grade FROM grade_observation WHERE observed_at >= :since",
+            {"since": since}) if not r["grade"].startswith(">=")]
+        top = con.execute(f"""
+            SELECT champion_id, COUNT(*) n FROM match_player
+            WHERE duration > 300 AND {norm_ts} >= :since {clause}
+            GROUP BY champion_id ORDER BY n DESC LIMIT 1""", prm).fetchone()
+    dist = {}
+    for g in grades:
+        dist[g] = dist.get(g, 0) + 1
+    return {
+        "since": since,
+        "games": gp["games"] or 0,
+        "wins": gp["wins"] or 0,
+        "hours": round((gp["secs"] or 0) / 3600, 1),
+        "unique_champions": gp["champs"] or 0,
+        "grades": dist,
+        "s_count": sum(v for g, v in dist.items() if g.startswith("S")),
+        "a_count": sum(v for g, v in dist.items() if g.startswith("A")),
+        "top_champion_id": top["champion_id"] if top else None,
+        "top_champion_games": top["n"] if top else 0,
+    }
+
+
 def detect_split_reset(prev_sid, new_sid, ts):
     """Reset splitu: milestone'y masowo spadaja, a punkty maestrii nie.
     Zwraca id nowego splitu albo None."""

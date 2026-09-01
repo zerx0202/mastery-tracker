@@ -328,6 +328,31 @@ class Agent:
                 log(f"przepustka: {len(out)} eventy, najblizszy deadline za "
                     f"{min(x['days_left'] for x in out):.0f} dni", "dim")
 
+    async def sync_missions(self):
+        """(1) Misje z klienta. Sonda 1.09: /player jest PUT-only, odczyt to
+        GET /missions. Ksztalt pol znamy czesciowo - filtrujemy po slowach
+        kluczowych w surowym JSON-ie i wysylamy cale obiekty; backend trzyma
+        raw, UI renderuje defensywnie. Patch jest wiec jednoczesnie sonda:
+        jesli pola sie roznia, obejrzymy je w bazie zamiast zgadywac."""
+        if not self.lcu.port:
+            return
+        data = await self.lcu.get("/lol-missions/v1/missions")
+        if not data:
+            return
+        missions = data if isinstance(data, list) else (data.get("missions") or [])
+        kw = ("mark", "mastery", "maest", "milestone", "crest", "mayhem")
+        hits = []
+        for m in missions:
+            blob = json.dumps(m, ensure_ascii=False).lower()
+            if any(k in blob for k in kw):
+                hits.append(m)
+            if len(hits) >= 12:
+                break
+        if hits:
+            r = await self.server.post("/missions", {"missions": hits}, timeout=30)
+            if r and r.get("stored"):
+                log(f"misje: {len(hits)} pasujacych z {len(missions)}", "dim")
+
     async def trigger_backup(self):
         url = self.cfg.get("backup_url")
         if not url:
@@ -634,6 +659,7 @@ class Agent:
         await self.snapshot("po grze")
         await self.sync_history(self.cfg["history_pages_after_game"])
         await self.sync_pass()
+        await self.sync_missions()
         await self.trigger_backup()
 
     # ---------- petle ----------
@@ -894,6 +920,7 @@ class Agent:
                         self.history_bootstrapped = True
                         await self.sync_history(self.cfg["history_pages_on_start"])
                     await self.sync_pass()
+                    await self.sync_missions()
 
                 try:
                     await self.ws_loop()
