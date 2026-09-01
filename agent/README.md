@@ -29,6 +29,15 @@ w `.gitignore` i nie trafia do repozytorium.
   a przy bezczynnym kliencie dociaga ich historie (1 gracz na minute) —
   z tego rosna normy per champion
 - snapshoty maestrii przed i po grze, historia meczow (okno 20 gier)
+- eventdata: ostatni stan `events` z allgamedata (kille/zgony/wieze
+  z timestampami) leci na serwer przy smierci portu 2999 — dane znikaja
+  razem z gra, wiec kazdy mecz bez zapisu to strata bezpowrotna
+- przepustki i misje: po starcie i po kazdej grze czyta event-hub
+  (eventy z realnym koncem, tor nagrod, nieodebrane, grace period)
+  oraz `GET /lol-missions/v1/missions` z filtrem slow kluczowych
+  (odczyt misji to /missions — /player jest PUT-only)
+- pula champ selecta niesie tez `trade_ids`: picki druzyny, ktore
+  wymagaja wymiany (pula celowo zawiera pick kolegow — wymiana dziala)
 - nieudane POST-y (5xx, brak polaczenia) laduja w kolejce dyskowej
   `agent/queue/` i sa dosylane co 30 s
 

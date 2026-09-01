@@ -43,10 +43,14 @@ flowchart LR
 
 Agent słucha zdarzeń klienta po WebSockecie (fazy gry, champ select, ocena
 pomeczowa), z pollingiem co 10 s jako siatką. Wysyła wszystko na serwer przez
-Tailscale. Serwer trzyma dane w SQLite i liczy ranking. Jedyna stała zależność
+Tailscale: pulę z oznaczeniem picków wymagających wymiany, oceny, ekran
+końcowy, log zdarzeń live (eventdata), stan przepustek z event-hubu i misje
+maestrii. Serwer trzyma dane w SQLite i liczy ranking. Jedyna stała zależność
 zewnętrzna to Data Dragon; Riot API służy do jednorazowego mapowania konta na
-PUUID oraz do sentinela sprawdzającego raz dziennie, czy Riot otworzył Mayhema
-w match-v5.
+PUUID, do sentinela sprawdzającego raz dziennie, czy Riot otworzył Mayhema
+w match-v5 — oraz do dobowej pętli snapshotów maestrii, dzięki której dni bez
+włączonego Windowsa nie są ślepe (publiczne champion-mastery-v4 wystarcza do
+milestone'ów, choć nie przypisze ocen do meczów).
 
 ## Skąd dane o grach
 
@@ -64,6 +68,14 @@ odzyskiwalne, o ile ID gry zostało kiedykolwiek zapisane.
 Bezpowrotnie ginie tylko ocena pomeczowa: `champion-mastery-updates` istnieje
 wyłącznie w trakcie ekranu końcowego. Dlatego agent musi działać przy każdej
 sesji grania.
+
+Drugą daną ulotną jest log zdarzeń Live Client (kille, zgony, wieże
+z timestampami): żyje razem z portem 2999 i znika z nim. Agent zapamiętuje
+ostatni stan `events` z allgamedata (które i tak odpytuje) i po grze odkłada
+go do `live_event_log` — surowiec pod przyszłe metryki timingu. Z ekranu
+końcowego trafiają do bazy także itemy (`item0..item6`) i augmenty
+(`playerAugment1..6`); snowball zbiera itemy od pierwszego dnia, bo historia
+LCU trzyma je płasko w statystykach.
 
 ## Drabinka milestone'ów
 
@@ -104,6 +116,23 @@ predykcje nie wchodzą do scorecardu.
 
 Marker gotowości: `GET /api/model/readiness`.
 
+Model porządkowy oddaje wyjaśnienia za darmo: klik w wiersz w Ocenach rozbija
+predykcję na wkłady cech (waga × z-score, znak = kierunek ciągnięcia) dla obu
+progów i dokłada percentyl obrażeń/min na tle wszystkich zaobserwowanych gier
+tym championem, z drabinką zakresu champion → klasa → global
+(`GET /api/grades/explain`).
+
+### Projekcja misji
+
+Kafelek przepustek nie pokazuje dolnej granicy (E gier lidera rankingu), tylko
+wynik symulacji: 300 przebiegów misji z losowaniem puli w każdej grze
+(rozmiar puli to mediana finalnych pul z własnej bazy, nie stała), wybór
+najlepszego z puli wg E(c), rzut na p szczebla. Wynik — mediana i kwartyle
+liczby gier — liczy się w tle po każdym treningu modelu. Zegarem misji jest
+event sezonowy z event-hubu („Season: Act"); przepustki trybu bywają
+przedłużane i nie kończą misji. Gdy tempo z 7 dni nie domyka deadline'u,
+kafelek przełącza się w reżim wariancji.
+
 ### Dlaczego obrażenia są normalizowane przez championa
 
 Z danych: oceny B+ mają niższe obrażenia na minutę niż C, bo B+ padały na
@@ -126,6 +155,15 @@ budowane z dwóch własnych źródeł:
 (tagi Data Dragona) → global, proporcjonalnie do liczby obserwacji. Panel live
 porównuje bieżące tempo z medianą własnych gier ≥ progu, w drabince zakresu:
 ten champion (≥3 trafienia) → jego klasa (≥3) → wszystkie gry.
+
+Snowball służy też jako proxy populacji: walidacja retrospektywna (ρ = −0.58
+między popularnością championa a resztami modelu) potwierdziła, że rzadko
+grane championy mają realnie łagodniejszy próg oceny — pula w champ selekcie
+oznacza je plakietką „słaba populacja". Obok: „wymiana" przy pickach kolegów
+i „ZBADAJ" przy championach z mniej niż trzema własnymi grami (gra ma też
+wartość informacyjną dla modelu). Nad rankingiem świeci baner patchowy, dopóki
+model liczy się głównie na poprzednim patchu — w Mayhemie patch zmienia także
+mnożniki balansu trybu, odrębne od zwykłego ARAM-a.
 
 ## Stack
 
@@ -173,11 +211,18 @@ ostrzeżenia w dowolnym patchu.
 
 ## Status
 
-W codziennym użyciu. Snapshoty przed i po grze, oceny dwoma kanałami, pełny
-ekran końcowy, snowball, predykcje zapisywane przed grą (Brier
-w `/api/predictions/scorecard`), model porządkowy z walidacją LOO, panel live,
-kolejka dyskowa w agencie, backup restic z tygodniową retencją i weryfikacją,
-testy + CI + Dependabot.
+W codziennym użyciu. Snapshoty przed i po grze plus dobowy cron bez klienta,
+oceny dwoma kanałami, pełny ekran końcowy z itemami i augmentami, log zdarzeń
+live, snowball, predykcje zapisywane przed grą (Brier
+w `/api/predictions/scorecard`), model porządkowy z walidacją LOO i kartą
+wyjaśnień, projekcja misji z symulacji, kafelek przepustek i misji
+z event-hubu, podsumowanie splitu, panel live, kolejka dyskowa w agencie,
+backup restic z tygodniową retencją i weryfikacją, testy + CI + Dependabot.
+
+## Credits
+
+specjalne pozdrowienia dla bezrobotnego menczennika co utknął w dev hellu
+swojej gierki, trzymaj się w tym starym obozie
 
 ## Disclaimer
 
