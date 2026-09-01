@@ -538,6 +538,17 @@ async def push_grade(payload: dict):
     return {"received": len(raw), "new": new, "errors": errors[:5]}
 
 
+@write_api.post("/eventdata")
+async def receive_eventdata(payload: dict):
+    """Log zdarzen Live Client z konca gry - dane ulotne, przyjmujemy
+    zawsze; link do meczu robi pozniejsza analiza po saved_at."""
+    events = payload.get("events") or []
+    if not events:
+        return {"stored": False, "events": 0}
+    await asyncio.to_thread(db.save_live_events, payload.get("champion_id"), events)
+    return {"stored": True, "events": len(events)}
+
+
 @write_api.post("/eog")
 async def push_eog(payload: dict):
     """Agent wysyla tu caly blok ekranu koncowego z LCU."""

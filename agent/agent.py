@@ -605,8 +605,24 @@ class Agent:
                     was_live = False
                     log("koniec danych na zywo", "dim")
                     await self.server.post("/live", {"ended": True}, timeout=15)
+                    # eventdata znika razem z portem 2999 - wysylamy ostatni
+                    # zlapany stan (kolejka dyskowa dosle przy braku sieci)
+                    if getattr(self, "_live_events", None):
+                        r = await self.server.post("/eventdata", {
+                            "events": self._live_events,
+                            "champion_id": getattr(self, "_live_champion_id", None),
+                        }, timeout=30)
+                        if r and r.get("stored"):
+                            log(f"eventdata: {r['events']} zdarzen zapisanych", "dim")
+                        self._live_events = None
                 await asyncio.sleep(self.cfg.get("live_poll_seconds", 2))
                 continue
+
+            ev = ((data.get("events") or {}).get("Events")) or []
+            if ev:
+                # allgamedata niesie caly eventdata - zapamietujemy ostatni
+                # stan, POST idzie raz, przy smierci portu
+                self._live_events = ev
 
             try:
                 await self.send_live(data)
@@ -688,6 +704,7 @@ class Agent:
                         for it in (me.get("items") or []))
 
         champ_id = self.resolve_champion(me)[1]
+        self._live_champion_id = champ_id
         await self.server.post("/live", {
             "champion": me.get("championName"),
             "champion_id": champ_id,

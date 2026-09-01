@@ -1070,6 +1070,22 @@ def flatten_eog_stats(block, match_id):
                     "stat_key": k,
                     "stat_value": float(v),
                 })
+            # Itemy koncowe: w bloku eog leza jako LISTA na graczu, nie jako
+            # skalar w stats - petla wyzej je pomijala i buildy wlasnych gier
+            # przepadaly. Snowball itemy lapie od zawsze (historia LCU trzyma
+            # item0..item6 w stats i tam nie ma whitelisty).
+            for i, it in enumerate((p.get("items") or [])[:7]):
+                iid = it.get("itemId") if isinstance(it, dict) else it
+                if isinstance(iid, (int, float)) and iid:
+                    rows.append({
+                        "match_id": match_id,
+                        "participant_no": n,
+                        "champion_id": p.get("championId"),
+                        "team_id": team_id,
+                        "is_local": is_local,
+                        "stat_key": f"item{i}",
+                        "stat_value": float(iid),
+                    })
 
     # gdy blok nie oznacza gracza lokalnego, rozpoznajemy go po championId
     if rows and not any(r["is_local"] for r in rows):
@@ -1716,6 +1732,34 @@ CREATE VIEW IF NOT EXISTS norm_source AS
 def init_snowball_match():
     with connect() as con:
         con.executescript(SNOWBALL_MATCH_SCHEMA)
+
+
+LIVE_EVENT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS live_event_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  saved_at INTEGER NOT NULL,
+  champion_id INTEGER,
+  events TEXT NOT NULL
+);
+"""
+
+
+def init_live_event_log():
+    with connect() as con:
+        con.executescript(LIVE_EVENT_SCHEMA)
+
+
+def save_live_events(champion_id, events):
+    """Surowy log zdarzen Live Client (kille/zgony/wieze z timestampami).
+    Zbierany od 1.09: zyje tylko z portem 2999, wiec kazda gra bez zapisu
+    to bezpowrotna strata. Analiza metryk timingu - po ~50 grach albo
+    zbieranie wypada (bramka rewizyjna z backlogu)."""
+    with connect() as con:
+        con.execute(
+            "INSERT INTO live_event_log (saved_at, champion_id, events) "
+            "VALUES (?,?,?)",
+            (int(time.time()), champion_id, json.dumps(events)))
+    log_event("eventdata", {"events": len(events), "champion_id": champion_id})
 
 
 def snowball_ingest(puuid, games):
