@@ -251,7 +251,7 @@ def path_to_goal(current, ladder):
 def patch_meta(mode=None):
     """Baner patch-awareness (karta 15): normy i model licza sie glownie
     na poprzednim patchu, a patch w Mayhemie zmienia tez mnozniki balansu
-    trybu (odkrycie Bartka na customach, 1.09)."""
+    trybu (potwierdzone na customach, 1.09)."""
     cur = db.get_setting("ddragon_patch") or ""
     short = ".".join(cur.split(".")[:2]) if cur else None
     games = db.games_on_patch(short, mode) if short else 0
@@ -541,7 +541,7 @@ async def history_lcu(payload: dict):
         # dopiero przy nastepnej grze. Drugi trigger domyka potok; trening
         # jest idempotentny, wiec podwojne odpalenie kosztuje tylko CPU w tle.
         try:
-            await asyncio.to_thread(model.train, DEFAULT_MODE)
+            await asyncio.to_thread(model.train, DEFAULT_MODE, True, GOAL)
         except Exception as e:
             await asyncio.to_thread(db.log_event, "model_train_fail",
                                     {"error": f"{type(e).__name__}: {e}"},
@@ -583,7 +583,7 @@ async def push_grade(payload: dict):
         # wlasnie jego. Trening na tej probce to ulamek sekundy; jego awaria
         # nie moze zablokowac zapisu oceny, stad oslona.
         try:
-            await asyncio.to_thread(model.train, DEFAULT_MODE)
+            await asyncio.to_thread(model.train, DEFAULT_MODE, True, GOAL)
         except Exception as e:
             await asyncio.to_thread(db.log_event, "model_train_fail",
                                     {"error": f"{type(e).__name__}: {e}"}, ts)
@@ -612,6 +612,7 @@ async def read_pass():
         **st,
         "tempo": await asyncio.to_thread(db.recent_tempo, DEFAULT_MODE, 7),
         "best_expected": state.get("last_best_expected"),
+        "projection": db.get_json_setting("mission_projection"),
     }
 
 
@@ -713,7 +714,7 @@ async def model_status(min_games: int = 40):
 
 @write_api.post("/model/train")
 async def model_train(mode: str | None = None):
-    return await asyncio.to_thread(model.train, mode or DEFAULT_MODE)
+    return await asyncio.to_thread(model.train, mode or DEFAULT_MODE, True, GOAL)
 
 
 @api.get("/model")

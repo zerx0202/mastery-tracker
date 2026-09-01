@@ -395,7 +395,68 @@ def _choose_l2(X_raw, specs):
 
 # ---------- trening ----------
 
-def train(mode=None, save=True):
+def mission_projection(goal, mode=None, runs=300, pool_size=None,
+                       max_games=1500, seed=None):
+    """Realna projekcja misji: mediana i kwartyle liczby gier do GOAL na
+    ktorymkolwiek championie, Z LOSOWANIEM puli (kazda gra: losowe
+    pool_size championow, gramy najlepszego wg E(c)). To zastepuje
+    "dolna granice" (E lidera), ktora ignorowala, ze lider musi sie
+    najpierw trafic. Liczone w tle po treningu, czytane w kafelku."""
+    import random
+
+    from . import scoring
+    from .db import (get_ladder, latest_snapshot_id, median_final_pool_size,
+                     snapshot_rows)
+    sid = latest_snapshot_id()
+    ladder = get_ladder()
+    if sid is None or not ladder:
+        return None
+    rates_all = champion_rates(mode)
+    rates, prior = rates_all["champions"], rates_all["prior"]
+    base = {r["champion_id"]: r["milestone"] for r in snapshot_rows(sid)
+            if r["milestone"] < goal}
+    if len(base) < 2:
+        return None
+    pool_size = pool_size or median_final_pool_size()
+    ids = list(base.keys())
+    rnd = random.Random(seed)
+
+    def p_of(cid, ms):
+        step = ladder.get(ms)
+        if step is None:
+            return 0.05
+        p, _th, _n = scoring._p_step(cid, step, rates, prior)
+        return p or 0.05
+
+    def exp_games(cid, ms):
+        total = 0.0
+        for m in range(ms, goal):
+            total += 1.0 / max(p_of(cid, m), 1e-6)
+        return total
+
+    results = []
+    for _ in range(runs):
+        st = dict(base)
+        games = 0
+        done = False
+        while games < max_games and not done:
+            pool = rnd.sample(ids, min(pool_size, len(ids)))
+            best = min(pool, key=lambda c: exp_games(c, st[c]))
+            games += 1
+            if rnd.random() < p_of(best, st[best]):
+                st[best] += 1
+                if st[best] >= goal:
+                    done = True
+        results.append(games if done else max_games)
+    results.sort()
+    n = len(results)
+    return {"median": results[n // 2], "p25": results[n // 4],
+            "p75": results[(3 * n) // 4], "runs": runs,
+            "pool_size": pool_size,
+            "capped": results[-1] >= max_games}
+
+
+def train(mode=None, save=True, goal=None):
     rows = training_rows(mode)
     baselines, global_median = champion_baselines(mode)
     external = get_json_setting("external_dpm") or None
@@ -491,6 +552,16 @@ def train(mode=None, save=True):
             "mode": mode, "l2": l2,
             "samples": {t: out["models"][t].get("samples") for t in THRESHOLDS},
         })
+        if goal:
+            # projekcja misji z losowaniem pul - liczona przy kazdym treningu,
+            # zeby kafelek czytal gotowa mediane zamiast dolnej granicy
+            try:
+                proj = mission_projection(goal, mode)
+                if proj:
+                    proj["ts"] = int(time.time())
+                    set_json_setting("mission_projection", proj)
+            except Exception:
+                pass
     return out
 
 

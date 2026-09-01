@@ -268,7 +268,7 @@ async function renderSide() {
     if (pa && pa.events && pa.events.length) {
       const evs = [...pa.events].sort((a, b) => a.days_left - b.days_left);
       // Zegar MISJI = event SEZONOWY ("Season 3: Act I") - potwierdzone
-      // przez Bartka 1.09: to on konczy misje maestrii (potem okienko na
+      // 1.09 w kliencie: to on konczy misje maestrii (potem okienko na
       // odbior nagrod, potem nowy akt z patchem). "Classic Pass" tez ma
       // "Act" w nazwie, ale to inna przepustka; "Mayhem Set" to niezalezna
       // przepustka trybu, bywa przedluzana.
@@ -287,7 +287,23 @@ async function renderSide() {
           <span>za <b>${Math.floor(e.days_left)} dni</b></span></div>`;
       }).join("");
       let proj = "";
-      if (pa.best_expected && pa.tempo > 0 && mission) {
+      const sim = pa.projection;
+      if (sim && sim.median && pa.tempo > 0 && mission) {
+        const needDays = Math.ceil(sim.median / pa.tempo);
+        const d25 = Math.ceil(sim.p25 / pa.tempo);
+        const d75 = Math.ceil(sim.p75 / pa.tempo);
+        const slack = Math.floor(mission.days_left) - needDays;
+        proj = slack < 0
+          ? `<div class="kv" style="color:var(--warn)"><span><b>REŻIM WARIANCJI</b></span>
+              <span>brakuje ~${-slack} dni</span></div>
+             <div class="tagline" style="color:var(--warn)">Do końca „${esc(mission.name)}"
+              za mało czasu na pewniaki — bierz wysokie, choć niepewne P.</div>`
+          : `<div class="kv"><span>Projekcja misji
+                <small class="dim">(symulacja)</small></span>
+              <span>~${needDays} dni <small class="dim">(${d25}–${d75};
+                mediana ${sim.median} gier, pula ${sim.pool_size};
+                zapas ${slack}, zegar: ${esc(mission.name)})</small></span></div>`;
+      } else if (pa.best_expected && pa.tempo > 0 && mission) {
         const needDays = Math.ceil(pa.best_expected / pa.tempo);
         const slack = Math.floor(mission.days_left) - needDays;
         proj = slack < 0
