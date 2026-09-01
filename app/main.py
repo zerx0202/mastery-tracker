@@ -248,6 +248,17 @@ def path_to_goal(current, ladder):
     return games, steps, marks
 
 
+def patch_meta(mode=None):
+    """Baner patch-awareness (karta 15): normy i model licza sie glownie
+    na poprzednim patchu, a patch w Mayhemie zmienia tez mnozniki balansu
+    trybu (odkrycie Bartka na customach, 1.09)."""
+    cur = db.get_setting("ddragon_patch") or ""
+    short = ".".join(cur.split(".")[:2]) if cur else None
+    games = db.games_on_patch(short, mode) if short else 0
+    return {"version": cur or None, "short": short, "games": games,
+            "fresh": bool(short) and games < 8}
+
+
 @api.get("/targets")
 async def targets(limit: int = 30, only: str | None = None,
                   ids: str | None = None, mode: str | None = None):
@@ -298,8 +309,22 @@ async def targets(limit: int = 30, only: str | None = None,
     md = db.get_json_setting("grade_model")
     ready = await asyncio.to_thread(model.readiness)
     own_counts = await asyncio.to_thread(model.own_games_map, use_mode)
+    pop = await asyncio.to_thread(db.champion_sb_popularity)
+    nz = sorted(v for v in pop.values() if v > 0)
+
+    def pop_tier(n):
+        if not n or len(nz) < 3:
+            return None
+        lo, hi = nz[len(nz) // 3], nz[(2 * len(nz)) // 3]
+        return "rzadki" if n <= lo else ("czesty" if n >= hi else "sredni")
+
     for r in out:
         r["model_own_games"] = own_counts.get(r["champion_id"], 0)
+        n_pop = pop.get(r["champion_id"], 0)
+        r["sb_pop"] = n_pop
+        r["pop_tier"] = pop_tier(n_pop)
+        # znacznik eksploracji (karta 33): gra ma tez wartosc informacyjna
+        r["explore"] = r["model_own_games"] < 3
     for r in out[:limit]:
         th = r.get("next_threshold")
         if not th:
@@ -319,6 +344,7 @@ async def targets(limit: int = 30, only: str | None = None,
         "mode": use_mode,
         "prior": prior,
         "summary": scoring.summarize(out, GOAL),
+        "patch": await asyncio.to_thread(patch_meta, use_mode),
         "targets": out[:limit],
     }
 
@@ -336,8 +362,9 @@ async def get_weights():
 @write_api.post("/lobby")
 async def push_lobby(payload: dict):
     ids = [int(x) for x in payload.get("champion_ids", [])]
+    trade = [int(x) for x in payload.get("trade_ids", []) if x]
     ts = int(time.time())
-    db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), ts)
+    db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), ts, trade)
     state["last_queue_id"] = payload.get("queue_id")
 
     # historia pul: bez tego nie wiadomo, jaki mial byc wybor
@@ -345,7 +372,7 @@ async def push_lobby(payload: dict):
     if ids:
         pool_id = await asyncio.to_thread(
             db.save_pool, ids, payload.get("queue"), payload.get("queue_id"),
-            payload.get("pool_kind"), ts)
+            payload.get("pool_kind"), ts, trade)
         if pool_id:
             await asyncio.to_thread(db.log_event, "champ_select",
                                     {"pool_id": pool_id, "size": len(ids),
@@ -381,8 +408,10 @@ async def read_lobby(max_age: int = 5400):
         "queue": lob["queue"],
         "pool_kind": lob["pool_kind"],
         "champion_ids": lob["champion_ids"],
+        "trade_ids": lob.get("trade_ids") or [],
         "prior": t.get("prior"),
         "summary": t.get("summary"),
+        "patch": t.get("patch"),
         "targets": t["targets"],
     }
 

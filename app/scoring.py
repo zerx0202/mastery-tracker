@@ -17,6 +17,11 @@ Dlaczego tak, a nie inaczej: symulacja Monte Carlo na prawdziwym stanie
 "najwieksza szansa przebicia" i brak ukonczenia dla strategii szerokosci.
 Misja wymaga dwoch S- na TYM SAMYM championie, wiec kazda strategia
 unikajaca prob S- nigdy nie konczy.
+
+Aktualizacja 1.09: powyzsza symulacja byla liczona dla puli 7; realne pule
+systemu kart to 11-13 (mediana finalnych pul z bazy) i tools/simulate.py
+czyta ja teraz z danych. Ranking strategii bez zmian, bezwzgledne mediany
+gier sa nizsze.
 """
 
 import math

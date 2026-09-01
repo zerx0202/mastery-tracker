@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS lobby (
     champion_ids TEXT NOT NULL,
     queue        TEXT,
     pool_kind    TEXT,
-    updated_at   INTEGER NOT NULL
+    updated_at   INTEGER NOT NULL,
+    trade_ids    TEXT
 );
 """
 
@@ -182,6 +183,16 @@ def save_champions(champs):
         con.executemany(
             "INSERT OR REPLACE INTO champion (id, name, key, tags) VALUES (?, ?, ?, ?)",
             [c if len(c) == 4 else (*c, None) for c in champs])
+
+
+def upgrade_trade_ids():
+    """Cudze picki zostaja w puli (decyzja 31.08 - wymiana dziala), ale
+    dostaja oznaczenie: osobna lista trade_ids obok champion_ids."""
+    with connect() as con:
+        for table in ("lobby", "champ_select_pool"):
+            cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+            if cols and "trade_ids" not in cols:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN trade_ids TEXT")
 
 
 def champion_classes():
@@ -323,13 +334,15 @@ def diff(from_id, to_id):
 
 # ---------- lobby ----------
 
-def set_lobby(champion_ids, queue, pool_kind, ts):
+def set_lobby(champion_ids, queue, pool_kind, ts, trade_ids=None):
     with connect() as con:
         con.execute(
-            "INSERT OR REPLACE INTO lobby (id, champion_ids, queue, pool_kind, updated_at) "
-            "VALUES (1, :ids, :queue, :pool_kind, :ts)",
+            "INSERT OR REPLACE INTO lobby "
+            "(id, champion_ids, queue, pool_kind, updated_at, trade_ids) "
+            "VALUES (1, :ids, :queue, :pool_kind, :ts, :trade)",
             {"ids": json.dumps(champion_ids), "queue": queue,
-             "pool_kind": pool_kind, "ts": ts})
+             "pool_kind": pool_kind, "ts": ts,
+             "trade": json.dumps(sorted(trade_ids or []))})
 
 
 def get_lobby():
@@ -342,6 +355,7 @@ def get_lobby():
         "queue": row["queue"],
         "pool_kind": row["pool_kind"],
         "updated_at": row["updated_at"],
+        "trade_ids": json.loads(row["trade_ids"] or "[]"),
     }
 
 
@@ -965,7 +979,8 @@ CREATE TABLE IF NOT EXISTS champ_select_pool (
     picked_id     INTEGER,
     match_id      TEXT,
     reroll_count  INTEGER,
-    split_id      INTEGER
+    split_id      INTEGER,
+    trade_ids     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_pool_ts    ON champ_select_pool(ts DESC);
@@ -993,7 +1008,7 @@ def init_pool():
         con.executescript(POOL_SCHEMA)
 
 
-def save_pool(champion_ids, queue, queue_id, pool_kind, ts):
+def save_pool(champion_ids, queue, queue_id, pool_kind, ts, trade_ids=None):
     """Zapisuje pule z champ selecta. Nie duplikuje, jesli ta sama pula
     zostala juz zapisana i nie jest jeszcze przypisana do meczu."""
     if not champion_ids:
@@ -1007,11 +1022,13 @@ def save_pool(champion_ids, queue, queue_id, pool_kind, ts):
             return last["id"]
         return con.execute("""
             INSERT INTO champ_select_pool
-              (ts, queue, queue_id, pool_kind, champion_ids, pool_size, split_id)
-            VALUES (:ts, :queue, :queue_id, :pool_kind, :ids, :size, :split)
+              (ts, queue, queue_id, pool_kind, champion_ids, pool_size, split_id,
+               trade_ids)
+            VALUES (:ts, :queue, :queue_id, :pool_kind, :ids, :size, :split, :trade)
         """, {"ts": ts, "queue": queue, "queue_id": queue_id, "pool_kind": pool_kind,
               "ids": ids_json, "size": len(champion_ids),
-              "split": current_split_id()}).lastrowid
+              "split": current_split_id(),
+              "trade": json.dumps(sorted(trade_ids or []))}).lastrowid
 
 
 def link_pool_to_match(match_id, champion_id, reroll_count, ts, max_age=14400):
@@ -1030,6 +1047,41 @@ def link_pool_to_match(match_id, champion_id, reroll_count, ts, max_age=14400):
             "UPDATE champ_select_pool SET picked_id=?, match_id=?, reroll_count=? WHERE id=?",
             (champion_id, match_id, reroll_count, row["id"]))
     return row["id"]
+
+
+def median_final_pool_size():
+    """Mediana FINALNYCH pul kartowych. Walidacja 1.09: tabela miesza stany
+    czesciowe (naplyw kart, 2-6 championow) i pule "full" (173) - filtr:
+    limited + zlinkowane z meczem (link_pool_to_match bierze ostatni stan
+    przed gra). Fallback dla swiezej bazy: limited >= 8, potem stala 11."""
+    import statistics
+    with connect() as con:
+        rows = [r["pool_size"] for r in con.execute(
+            "SELECT pool_size FROM champ_select_pool "
+            "WHERE pool_kind='limited' AND match_id IS NOT NULL AND pool_size>0")]
+        if not rows:
+            rows = [r["pool_size"] for r in con.execute(
+                "SELECT pool_size FROM champ_select_pool "
+                "WHERE pool_kind='limited' AND pool_size>=8")]
+    return int(statistics.median(rows)) if rows else 11
+
+
+def champion_sb_popularity():
+    """Ile gier snowballa widzielismy per champion - proxy popularnosci
+    w populacji Mayhema (walidacja 1.09: rho=-0.583 z resztami modelu)."""
+    with connect() as con:
+        return {r["champion_id"]: r["n"] for r in con.execute(
+            "SELECT champion_id, COUNT(DISTINCT match_id) n FROM player_stat "
+            "WHERE match_id LIKE 'SB%' GROUP BY champion_id")}
+
+
+def games_on_patch(patch_short, mode=None):
+    clause = "AND game_mode = ?" if mode else ""
+    args = (patch_short,) + ((mode,) if mode else ())
+    with connect() as con:
+        return con.execute(
+            f"SELECT COUNT(*) c FROM match_player WHERE patch = ? {clause}",
+            args).fetchone()["c"]
 
 
 def pool_history(limit=100):

@@ -107,10 +107,13 @@ async function renderNow() {
   } catch (e) {}
 
   const inSelect = !!(lobby.active && lobby.targets && lobby.targets.length);
+  const lobbyTrade = new Set(inSelect ? (lobby.trade_ids || []) : []);
   let targets;
+  let patchMeta = null;
 
   if (inSelect) {
     targets = lobby.targets;
+    patchMeta = lobby.patch;
     $("live-bar").innerHTML = `<div class="live"><span class="dot"></span>
       <div><b>${esc(lobby.queue || "Champ select")}</b> —
       ${lobby.champion_ids.length} w puli, odczyt sprzed ${lobby.age}s</div></div>`;
@@ -131,6 +134,7 @@ async function renderNow() {
     }
     GOAL = data.goal;
     targets = data.targets;
+    patchMeta = data.patch;
   }
 
   if (!targets.length) {
@@ -149,7 +153,12 @@ async function renderNow() {
     ? `${Math.round(b.expected_games)}–${Math.round(cons)} gier`
     : `około ${Math.round(b.expected_games)} gier`;
 
-  $("hero").innerHTML = `
+  const patchBanner = (patchMeta && patchMeta.fresh)
+    ? `<div class="patch-banner">⚠ Patch ${esc(patchMeta.short)} od ${patchMeta.games} ${
+        patchMeta.games === 1 ? "gry" : "gier"} — normy i model liczone głównie na
+        poprzednim patchu, a patch zmienia też mnożniki balansu trybu.</div>` : "";
+
+  $("hero").innerHTML = patchBanner + `
     <div class="hero">
       <div>
         <div class="big">${b.steps_remaining}<small>${
@@ -159,6 +168,8 @@ async function renderNow() {
         <div class="who"><span class="rank-badge lead">1</span><img onerror="this.src=BLANK" src="${icon(b.key, b.champion_id)}"
           alt="">${esc(b.name)}</div>
         ${rail(b.milestone, GOAL, b.next_grade)}
+        ${inSelect && lobbyTrade.has(b.champion_id)
+          ? `<div class="range" style="color:var(--warn);margin-top:6px">🔁 pick kolegi — wymaga wymiany</div>` : ""}
         <div class="range" style="margin-top:8px">${modelNote(b)}</div>
         <div class="range dim" style="margin-top:4px;font-size:11.5px">
           orientacyjnie ${gamesLine}</div>
@@ -192,7 +203,12 @@ async function renderNow() {
       <tr>
         <td class="rank-cell">${i + 2}</td>
         <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(t.key, t.champion_id)}" alt="">
-          ${esc(t.name)}</div></td>
+          ${esc(t.name)}${lobbyTrade.has(t.champion_id)
+            ? `<span class="mini-badge trade">wymiana</span>` : ""}${
+          inSelect && t.explore
+            ? `<span class="mini-badge explore">ZBADAJ</span>` : ""}${
+          inSelect && t.pop_tier === "rzadki"
+            ? `<span class="mini-badge rare">słaba populacja</span>` : ""}</div></td>
         <td class="r num">${t.steps_remaining}</td>
         <td><span class="chip ${t.next_grade === "S-" ? "gold" : ""}">${
           esc(t.next_grade || "?")}</span></td>

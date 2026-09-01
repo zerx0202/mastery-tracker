@@ -277,9 +277,10 @@ class Agent:
                 break
         log(f"historia LCU: {total} przeslanych, {new} nowych", "ok")
 
-    async def send_pool(self, ids, mode, pool_kind, queue_id):
+    async def send_pool(self, ids, mode, pool_kind, queue_id, trade_ids=None):
         await self.server.post("/lobby", {
             "champion_ids": sorted(set(ids)),
+            "trade_ids": sorted({t for t in (trade_ids or []) if t}),
             "queue": mode,
             "pool_kind": pool_kind,
             "queue_id": queue_id,
@@ -482,10 +483,18 @@ class Agent:
         # benchEnabled = pula losowana i ograniczona (ARAM, Mayhem, kolejne tryby)
         benched = bool(sess.get("benchEnabled"))
         ids = []
+        trade_ids = []
         if benched:
             pool_kind = "limited"
             ids += [c.get("championId") for c in (sess.get("benchChampions") or [])]
             ids += [p.get("championId") for p in (sess.get("myTeam") or [])]
+            # cudze picki ZOSTAJA w puli (wymiana dziala) - ale UI ma prawo
+            # wiedziec, ktore pozycje wymagaja trade'u (karta 7)
+            me_cell = sess.get("localPlayerCellId")
+            if me_cell is not None:
+                trade_ids = [p.get("championId")
+                             for p in (sess.get("myTeam") or [])
+                             if p.get("cellId") != me_cell and p.get("championId")]
         else:
             pool_kind = "full"
             pick = await self.lcu.get("/lol-champ-select/v1/pickable-champion-ids")
@@ -506,7 +515,7 @@ class Agent:
         if key == self.last_pool_key:
             return
         self.last_pool_key = key
-        await self.send_pool(ids, mode, pool_kind, queue_id)
+        await self.send_pool(ids, mode, pool_kind, queue_id, trade_ids)
         log(f"[{mode} q={queue_id}/{pool_kind}] wyslano {len(ids)} championow", "ok")
 
         # snapshot PRZED gra - raz na champ select

@@ -24,7 +24,17 @@ MAX_GAMES = 1500
 # Ile championow realnie mozesz wybrac w jednej grze.
 # W Mayhemie: twoje losowanie + wspolna lawka. Agent raportowal pule 10-11,
 # ale polowa to picki druzyny, ktorych nie wezmiesz.
-POOL_SIZE = 7
+def _pool_size_from_db():
+    """Walidacja 1.09: realne finalne pule kartowe to 11-13, nie 7 - stala
+    zanizala p trafienia celu i zawyzala projekcje. Czytamy z bazy."""
+    try:
+        from app import db
+        return db.median_final_pool_size()
+    except Exception:
+        return 11
+
+
+POOL_SIZE = _pool_size_from_db()
 
 
 def load_state():
