@@ -38,3 +38,10 @@ def test_save_live_events(fresh_db):
     with db.connect() as con:
         kinds = [r["kind"] for r in con.execute("SELECT kind FROM event_log")]
     assert "eventdata" in kinds
+
+
+def test_latest_snapshot_ts(fresh_db):
+    assert db.latest_snapshot_ts() is None
+    db.save_snapshot(1700000100, [])
+    db.save_snapshot(1700000900, [])
+    assert db.latest_snapshot_ts() == 1700000900

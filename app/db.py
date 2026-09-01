@@ -289,6 +289,12 @@ def latest_snapshot_id():
     return row["id"] if row else None
 
 
+def latest_snapshot_ts():
+    with connect() as con:
+        row = con.execute("SELECT MAX(taken_at) t FROM snapshot").fetchone()
+    return row["t"] if row and row["t"] else None
+
+
 def snapshot_rows(sid):
     with connect() as con:
         return [dict(r) for r in con.execute(

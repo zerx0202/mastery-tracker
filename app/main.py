@@ -65,12 +65,34 @@ async def mayhem_sentinel_loop():
         await asyncio.sleep(3600)
 
 
+async def daily_snapshot_loop():
+    """Karta 17: snapshoty bez klienta. Endpoint /snapshot liczy z publicznego
+    champion-mastery-v4 (agent tylko go wyzwala), wiec w dni bez Windowsa
+    nikt nie strzela - a milestoneGrades zeruje sie przy awansie, czyli
+    dziura w zbieraniu jest realna. Raz na godzine sprawdzamy: ostatni
+    snapshot starszy niz 20 h -> robimy wlasny, z osobnym wpisem w dzienniku."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            last = await asyncio.to_thread(db.latest_snapshot_ts)
+            if time.time() - (last or 0) >= 20 * 3600:
+                r = await snapshot()
+                await asyncio.to_thread(
+                    db.log_event, "snapshot_cron",
+                    {"snapshot_id": r.get("snapshot_id"),
+                     "champions": r.get("champions")}, int(time.time()))
+        except Exception:
+            pass
+        await asyncio.sleep(3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # jeden punkt wejscia do schematu - nowa funkcja init_*/upgrade_* w db.py
     # wykona sie sama, bez pamietania o tej liscie (to tu ginely nowe wpisy)
     db.migrate()
     asyncio.create_task(mayhem_sentinel_loop())
+    asyncio.create_task(daily_snapshot_loop())
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
