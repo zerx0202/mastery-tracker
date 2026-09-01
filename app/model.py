@@ -496,6 +496,84 @@ def train(mode=None, save=True):
 
 # ---------- predykcja ----------
 
+def _dmg_percentile(row, mode):
+    """(27) Percentyl obrazen/min na tle WSZYSTKICH zaobserwowanych gier
+    tym championem w Mayhemie (eog + snowball przez norm_source).
+    Drabinka jak w referencji live: champion(>=8) -> klasa(>=8) -> global."""
+    from .db import champion_classes, connect
+    fv = features.match_features(row)
+    dpm = fv["dpm"]
+    cid = row["champion_id"]
+    clause = "AND m.game_mode = ?" if mode else ""
+    args = ["totalDamageDealtToChampions"] + ([mode] if mode else [])
+    with connect() as con:
+        rows = [(r["champion_id"], r["stat_value"] / (r["duration"] / 60.0))
+                for r in con.execute(f"""
+            SELECT p.champion_id, p.stat_value, m.duration
+            FROM player_stat p JOIN norm_source m ON m.match_id = p.match_id
+            WHERE p.stat_key = ? AND m.duration > 300 {clause}""", args)]
+    if not rows:
+        return None
+    MIN_N = 8
+    vals = [v for c, v in rows if c == cid]
+    scope = "champion"
+    if len(vals) < MIN_N:
+        classes = champion_classes()
+        cls = classes.get(cid)
+        clsv = [v for c, v in rows if cls and classes.get(c) == cls]
+        if cls and len(clsv) >= MIN_N:
+            scope, vals = f"klasa {cls}", clsv
+        else:
+            scope, vals = "global", [v for _, v in rows]
+    below = sum(1 for v in vals if v < dpm)
+    return {"stat": "obrazenia/min", "value": round(dpm, 1),
+            "pct": round(100.0 * below / len(vals)), "n": len(vals),
+            "scope": scope}
+
+
+def explain(match_id):
+    """(13) Karta "czemu taka ocena": wklad kazdej cechy do predykcji
+    (waga x z-score; znak = kierunek ciagniecia) dla obu progow
+    + percentyl obrazen (27). Model porzadkowy oddaje to za darmo."""
+    from .db import connect
+    md = get_json_setting("grade_model")
+    if not md:
+        return None
+    with connect() as con:
+        r = con.execute("""
+            SELECT g.grade, g.champion_id, m.kills, m.deaths, m.assists,
+                   m.dmg_champ, m.gold, m.cs, m.vision, m.heal, m.duration,
+                   m.game_mode
+            FROM grade_observation g JOIN match_player m ON m.match_id = g.match_id
+            WHERE g.match_id = ?""", (match_id,)).fetchone()
+    if not r:
+        return None
+    row = dict(r)
+    mode = row["game_mode"]
+    cached = get_json_setting("champion_baselines") or {}
+    baselines = {int(k): v for k, v in (cached.get("per_champ") or {}).items()}
+    f = extract_features(row, baselines, cached.get("global") or 1.0, None, mode)
+    out = {"match_id": match_id, "grade": row["grade"],
+           "champion_id": row["champion_id"], "thresholds": {}}
+    for th in ("A-", "S-"):
+        m = (md.get("models") or {}).get(th)
+        if not m or "weights" not in m:
+            continue
+        z = m["bias"]
+        contribs = []
+        for j, key in enumerate(md["features"]):
+            c = m["weights"][key] * (f[key] - m["means"][j]) / m["stds"][j]
+            z += c
+            contribs.append({"feature": key, "value": round(f[key], 2),
+                             "pull": round(c, 3)})
+        contribs.sort(key=lambda x: -abs(x["pull"]))
+        out["thresholds"][th] = {"p": round(_sigmoid(z), 3),
+                                 "status": m.get("status"),
+                                 "contributions": contribs}
+    out["percentile"] = _dmg_percentile(row, mode)
+    return out
+
+
 def predict(row, threshold, model=None, baselines=None, mode=None):
     model = model or get_json_setting("grade_model")
     if not model:

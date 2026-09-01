@@ -719,6 +719,15 @@ async def model_explain(mode: str | None = None):
     return out
 
 
+@api.get("/grades/explain")
+async def grades_explain(match_id: str):
+    """Karta 13+27 - rozbicie oceny na sklad i percentyl."""
+    out = await asyncio.to_thread(model.explain, match_id)
+    if not out:
+        raise HTTPException(404, "brak oceny lub statystyk dla tego meczu")
+    return out
+
+
 @api.get("/grades/history")
 async def grades_history(limit: int = 60, mode: str | None = None):
     """Oceny z predykcja modelu obok tego, co faktycznie wypadlo.
@@ -726,7 +735,7 @@ async def grades_history(limit: int = 60, mode: str | None = None):
     use_mode = mode or DEFAULT_MODE
     with db.connect() as c:
         rows = [dict(r) for r in c.execute("""
-            SELECT g.grade, g.champion_id, g.observed_at,
+            SELECT g.grade, g.champion_id, g.observed_at, g.match_id,
                    m.kills, m.deaths, m.assists, m.dmg_champ, m.gold,
                    m.cs, m.vision, m.heal, m.duration
             FROM grade_observation g
@@ -743,6 +752,7 @@ async def grades_history(limit: int = 60, mode: str | None = None):
         fv = features.match_features(r)
         out.append({
             "grade": r["grade"],
+            "match_id": r["match_id"],
             "champion_id": r["champion_id"],
             "name": names.get(r["champion_id"], str(r["champion_id"])),
             "key": keys.get(r["champion_id"]),

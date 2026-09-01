@@ -205,3 +205,20 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
 .mini-badge.explore{background:var(--gold);color:#14161a;font-weight:700;
   letter-spacing:.4px}
 .mini-badge.rare{border:1px solid var(--ok);color:var(--ok)}
+
+/* karta "czemu taka ocena" (13+27) */
+.explain-box{background:rgba(255,255,255,.02);border:1px solid var(--faint);
+  border-radius:10px;padding:12px 14px}
+.pull-row{display:flex;align-items:center;gap:10px;margin:3px 0;font-size:12px}
+.pull-label{width:190px;color:var(--txt)}
+.pull-track{flex:1;display:flex;align-items:center;height:8px}
+.pull-track .half{flex:1;display:flex}
+.pull-track .half.l{justify-content:flex-end}
+.pull-track b{width:1px;height:13px;background:var(--faint);display:block}
+.pull-track i{display:block;height:8px;border-radius:4px}
+.pull-track i.pos{background:var(--ok)}
+.pull-track i.neg{background:var(--warn)}
+.pull-val{width:56px;text-align:right}
+.pull-val.ok{color:var(--ok)}
+.pull-val.warn{color:var(--warn)}
+.explain-row td{background:rgba(255,255,255,.015)}

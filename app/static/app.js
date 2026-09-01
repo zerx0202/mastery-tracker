@@ -318,7 +318,7 @@ async function renderGrades() {
       /^[SA]/.test(g.grade) ? "ok" : "");
     const pa = (ok("A-") && g.p_A != null) ? (100 * g.p_A).toFixed(0) + "%" : "—";
     const ps = (ok("S-") && g.p_S != null) ? (100 * g.p_S).toFixed(0) + "%" : "—";
-    return `<tr>
+    return `<tr class="grade-row" data-mid="${esc(g.match_id || "")}" style="cursor:pointer" title="kliknij: czemu taka ocena">
       <td><span class="chip ${cls}">${esc(g.grade)}</span></td>
       <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(g.key, g.champion_id)}" alt="">
         ${esc(g.name)}</div></td>
@@ -333,7 +333,65 @@ async function renderGrades() {
     <thead><tr><th>Ocena</th><th>Champion</th><th>K/D/A</th>
       <th class="r">Złoto/min</th><th class="r">Obr./min</th>
       <th class="r">Model ≥A-</th><th class="r">Model ≥S-</th></tr></thead>
-    <tbody>${rows}</tbody></table>`;
+    <tbody>${rows}</tbody></table>
+    <div class="tagline" style="margin-top:8px">Kliknij wiersz, żeby zobaczyć,
+      co ciągnęło ocenę w górę, a co w dół.</div>`;
+
+  $("grades-body").querySelector("tbody").addEventListener("click", async ev => {
+    const tr = ev.target.closest("tr.grade-row");
+    if (!tr || !tr.dataset.mid) return;
+    const next = tr.nextElementSibling;
+    if (next && next.classList.contains("explain-row")) { next.remove(); return; }
+    document.querySelectorAll(".explain-row").forEach(e => e.remove());
+    const det = document.createElement("tr");
+    det.className = "explain-row";
+    det.innerHTML = `<td colspan="7" class="dim">liczę…</td>`;
+    tr.after(det);
+    let ex;
+    try {
+      ex = await api("/grades/explain?match_id=" + encodeURIComponent(tr.dataset.mid));
+    } catch (e) {
+      det.innerHTML = `<td colspan="7"><span class="dim">${esc(e.message)}</span></td>`;
+      return;
+    }
+    det.innerHTML = `<td colspan="7">${explainBox(ex)}</td>`;
+  });
+}
+
+const FEATURE_PL = {
+  gold_per_min: "złoto/min", ka_per_min: "zab.+asysty/min",
+  deaths_per_min: "zgony/min", dmg_ratio: "obrażenia (z-score)",
+  duration_min: "długość gry",
+};
+
+function explainBox(ex) {
+  const th = ex.thresholds["A-"] || ex.thresholds["S-"];
+  if (!th) return `<span class="dim">model jeszcze nie trenowany</span>`;
+  const bars = th.contributions.map(c => {
+    const w = Math.min(100, Math.abs(c.pull) * 55);
+    const up = c.pull >= 0;
+    const bar = `<i class="${up ? "pos" : "neg"}" style="width:${w}%"></i>`;
+    return `<div class="pull-row">
+      <span class="pull-label">${esc(FEATURE_PL[c.feature] || c.feature)}
+        <small class="dim">= ${c.value}</small></span>
+      <span class="pull-track"><span class="half l">${up ? "" : bar}</span><b></b><span class="half r">${up ? bar : ""}</span></span>
+      <span class="pull-val ${up ? "ok" : "warn"}">${c.pull > 0 ? "+" : ""}${c.pull.toFixed(2)}</span>
+    </div>`;
+  }).join("");
+  const ths = Object.entries(ex.thresholds).map(([k, v]) =>
+    `${esc(k)}: <b>${(100 * v.p).toFixed(0)}%</b>${
+      v.status === "niewiarygodny"
+        ? ` <small class="dim">(próg niewiarygodny)</small>` : ""}`).join(" · ");
+  const pct = ex.percentile
+    ? `<div class="range" style="margin-top:9px">obrażenia/min ${ex.percentile.value}:
+        <b>${ex.percentile.pct}. percentyl</b> z ${ex.percentile.n} obserwacji
+        <small class="dim">(zakres: ${esc(ex.percentile.scope)})</small></div>` : "";
+  return `<div class="explain-box">
+    <div class="range">Szansa wg modelu — ${ths}</div>
+    <div style="margin-top:9px">${bars}</div>${pct}
+    <div class="tagline" style="margin-top:7px">Wkład = waga cechy × odchylenie
+      od Twojej normy na tym championie; dodatni ciągnął tę ocenę w górę.</div>
+  </div>`;
 }
 
 /* ---------- SPLIT ---------- */
