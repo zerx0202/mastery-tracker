@@ -1084,6 +1084,20 @@ def games_on_patch(patch_short, mode=None):
             args).fetchone()["c"]
 
 
+def recent_tempo(mode=None, days=7):
+    """Gry na dzien w ostatnich `days` dniach - paliwo projekcji deadline'u
+    przepustki. game_creation bywa w ms i w s - normalizujemy."""
+    cutoff = time.time() - days * 86400
+    clause = "WHERE game_mode = ?" if mode else ""
+    args = (mode,) if mode else ()
+    with connect() as con:
+        ts = [r["game_creation"] for r in con.execute(
+            f"SELECT game_creation FROM match_player {clause}", args)]
+    n = sum(1 for t in ts
+            if t and (t / 1000 if t > 10**12 else t) >= cutoff)
+    return round(n / days, 2)
+
+
 def pool_history(limit=100):
     with connect() as con:
         return [dict(r) for r in con.execute("""

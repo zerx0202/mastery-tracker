@@ -338,6 +338,7 @@ async def targets(limit: int = 30, only: str | None = None,
         r["model_verdict"] = (ready.get(th) or {}).get("verdict")
         r["model_auc"] = v.get("auc")
         r["model_games"] = None if not aim else aim.get("based_on_games")
+    state["last_best_expected"] = out[0]["expected_games"] if out else None
     return {
         "goal": GOAL,
         "snapshot_id": sid,
@@ -587,6 +588,31 @@ async def push_grade(payload: dict):
             await asyncio.to_thread(db.log_event, "model_train_fail",
                                     {"error": f"{type(e).__name__}: {e}"}, ts)
     return {"received": len(raw), "new": new, "errors": errors[:5]}
+
+
+@write_api.post("/pass")
+async def receive_pass(payload: dict):
+    """Stan przepustki z event-hubu (karta 18) - agent przysyla po grze
+    i przy starcie. Trzymamy ostatni stan w ustawieniach."""
+    events = payload.get("events") or []
+    if not events:
+        return {"stored": False}
+    await asyncio.to_thread(db.set_json_setting, "pass_state",
+                            {"ts": int(time.time()), "events": events})
+    return {"stored": True, "events": len(events)}
+
+
+@api.get("/pass")
+async def read_pass():
+    """Stan przepustki + tempo grania + oczekiwane gry lidera rankingu
+    (zapisywane przy kazdym /targets) - front sklada z tego zegar
+    i przelacznik rezimu (3+19+32)."""
+    st = db.get_json_setting("pass_state") or {}
+    return {
+        **st,
+        "tempo": await asyncio.to_thread(db.recent_tempo, DEFAULT_MODE, 7),
+        "best_expected": state.get("last_best_expected"),
+    }
 
 
 @write_api.post("/eventdata")

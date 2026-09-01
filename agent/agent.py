@@ -286,6 +286,48 @@ class Agent:
             "queue_id": queue_id,
         })
 
+    async def sync_pass(self):
+        """Tor przepustki (18) + deadline grindu (3+19): event-hub klienta.
+        Sonda 1.09: daty splitu NIE leza w lol-seasons (same ID) - zyja
+        w endDate eventow. Filtr: koniec w <120 dni (evergreeny 2099
+        odpadaja), max 3 eventy."""
+        if not self.lcu.port:
+            return
+        ev = await self.lcu.get("/lol-event-hub/v1/events")
+        if not ev:
+            return
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        out = []
+        for e in ev:
+            info = e.get("eventInfo") or e
+            eid = e.get("eventId") or info.get("eventId")
+            end = info.get("endDate") or e.get("endDate")
+            try:
+                endt = _dt.datetime.fromisoformat(
+                    (end or "").replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            days = (endt - now).total_seconds() / 86400
+            if not eid or days < 0 or days > 120:
+                continue
+            item = {"event_id": eid,
+                    "name": info.get("eventName") or e.get("eventName"),
+                    "end_date": end, "days_left": round(days, 1)}
+            for sub, key in (("reward-track/progress", "progress"),
+                             ("reward-track/unclaimed-rewards", "unclaimed"),
+                             ("is-grace-period", "grace")):
+                item[key] = await self.lcu.get(
+                    f"/lol-event-hub/v1/events/{eid}/{sub}")
+            out.append(item)
+            if len(out) >= 3:
+                break
+        if out:
+            r = await self.server.post("/pass", {"events": out}, timeout=30)
+            if r and r.get("stored"):
+                log(f"przepustka: {len(out)} eventy, najblizszy deadline za "
+                    f"{min(x['days_left'] for x in out):.0f} dni", "dim")
+
     async def trigger_backup(self):
         url = self.cfg.get("backup_url")
         if not url:
@@ -591,6 +633,7 @@ class Agent:
         await asyncio.sleep(self.cfg["post_game_delay_seconds"])
         await self.snapshot("po grze")
         await self.sync_history(self.cfg["history_pages_after_game"])
+        await self.sync_pass()
         await self.trigger_backup()
 
     # ---------- petle ----------
@@ -850,6 +893,7 @@ class Agent:
                     if not self.history_bootstrapped:
                         self.history_bootstrapped = True
                         await self.sync_history(self.cfg["history_pages_on_start"])
+                    await self.sync_pass()
 
                 try:
                     await self.ws_loop()

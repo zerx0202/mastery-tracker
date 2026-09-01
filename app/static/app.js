@@ -229,8 +229,9 @@ async function renderSide() {
   const box = $("side");
   if (!box) return;
   try {
-    const [sp, gr, sys] = await Promise.all([
-      api("/split/progress"), api("/grades/history?limit=3"), api("/system/health")]);
+    const [sp, gr, sys, pa] = await Promise.all([
+      api("/split/progress"), api("/grades/history?limit=3"), api("/system/health"),
+      api("/pass").catch(() => ({}))]);
 
     const dist = sp.distribution || {};
     const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1;
@@ -263,7 +264,51 @@ async function renderSide() {
     const lastGrade = Math.max(ls.grade || 0, ls.eog || 0, ls.snapshot || 0) || null;
     const stale = !lastGrade || (sys.now - lastGrade) > 172800;
 
-    box.innerHTML = `
+    let passHtml = "";
+    if (pa && pa.events && pa.events.length) {
+      const evs = [...pa.events].sort((a, b) => a.days_left - b.days_left);
+      // Zegar MISJI = event sezonowy (akt): milestone'y to maestria
+      // sezonowa. "Mayhem Set" to NIEZALEŻNA przepustka trybu, bywa
+      // przedłużana (korekta Bartka 1.09) — jej koniec nie kończy misji.
+      const mission = evs.find(e => /act|season|split/i.test(e.name || "")) || evs[0];
+      const unclaimed = evs.reduce(
+        (t, e) => t + ((e.unclaimed || {}).rewardsCount || 0), 0);
+      const grace = evs.some(e => e.grace === true);
+      const rows = evs.map(e => {
+        const pr = e.progress || {};
+        const lvl = pr.level != null
+          ? ` <small class="dim">poz. ${pr.level}/${pr.totalLevels}${
+              pr.level >= pr.totalLevels ? " max" : ""}</small>` : "";
+        return `<div class="kv"><span>${esc(e.name || "event")}${lvl}</span>
+          <span>za <b>${Math.floor(e.days_left)} dni</b></span></div>`;
+      }).join("");
+      let proj = "";
+      if (pa.best_expected && pa.tempo > 0 && mission) {
+        const needDays = Math.ceil(pa.best_expected / pa.tempo);
+        const slack = Math.floor(mission.days_left) - needDays;
+        proj = slack < 0
+          ? `<div class="kv" style="color:var(--warn)"><span><b>REŻIM WARIANCJI</b></span>
+              <span>brakuje ~${-slack} dni</span></div>
+             <div class="tagline" style="color:var(--warn)">Do końca „${esc(mission.name)}"
+              za mało czasu na pewniaki — bierz wysokie, choć niepewne P.</div>`
+          : `<div class="kv"><span>Projekcja misji</span>
+              <span>~${needDays} dni <small class="dim">(zapas ${slack},
+                zegar: ${esc(mission.name)})</small></span></div>`;
+      }
+      passHtml = `
+      <div class="panel">
+        <div class="eyebrow">Przepustki i deadline'y</div>
+        ${rows}
+        <div class="kv"><span>Tempo (7 dni)</span><span>${pa.tempo ?? "—"} gier/dzień</span></div>
+        ${unclaimed > 0 ? `<div class="kv" style="color:var(--gold)">
+          <span>🎁 Nieodebrane nagrody</span><span>${unclaimed}</span></div>` : ""}
+        ${grace ? `<div class="tagline" style="color:var(--warn)">
+          Któryś event w okresie łaski — zaraz zniknie!</div>` : ""}
+        ${proj}
+      </div>`;
+    }
+
+    box.innerHTML = passHtml + `
       <div class="panel">
         <div class="eyebrow">Postęp splitu</div>
         ${bars}
