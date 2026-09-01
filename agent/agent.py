@@ -578,7 +578,12 @@ class Agent:
         if not ids:
             return
 
-        key = f"{mode}|{pool_kind}|" + ",".join(map(str, ids))
+        # trade_ids MUSI byc czescia klucza: rotacja z lawka nie zmienia
+        # unii puli (X do gracza, Y na lawke), zmienia tylko przydzial -
+        # bez tego dedup polykal aktualizacje i plakietki "wymiana"
+        # zamarzaly na stanie z poczatku lobby (zgloszenie 1.09)
+        key = (f"{mode}|{pool_kind}|" + ",".join(map(str, ids))
+               + "|t:" + ",".join(map(str, sorted(set(trade_ids)))))
         if key == self.last_pool_key:
             return
         self.last_pool_key = key
