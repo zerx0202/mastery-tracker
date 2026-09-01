@@ -267,10 +267,14 @@ async function renderSide() {
     let passHtml = "";
     if (pa && pa.events && pa.events.length) {
       const evs = [...pa.events].sort((a, b) => a.days_left - b.days_left);
-      // Zegar MISJI = event sezonowy (akt): milestone'y to maestria
-      // sezonowa. "Mayhem Set" to NIEZALEŻNA przepustka trybu, bywa
-      // przedłużana (korekta Bartka 1.09) — jej koniec nie kończy misji.
-      const mission = evs.find(e => /act|season|split/i.test(e.name || "")) || evs[0];
+      // Zegar MISJI = event SEZONOWY ("Season 3: Act I") - potwierdzone
+      // przez Bartka 1.09: to on konczy misje maestrii (potem okienko na
+      // odbior nagrod, potem nowy akt z patchem). "Classic Pass" tez ma
+      // "Act" w nazwie, ale to inna przepustka; "Mayhem Set" to niezalezna
+      // przepustka trybu, bywa przedluzana.
+      const mission = evs.find(e => /season/i.test(e.name || ""))
+        || evs.find(e => /act|split/i.test(e.name || ""))
+        || evs[0];
       const unclaimed = evs.reduce(
         (t, e) => t + ((e.unclaimed || {}).rewardsCount || 0), 0);
       const grace = evs.some(e => e.grace === true);
@@ -291,9 +295,12 @@ async function renderSide() {
               <span>brakuje ~${-slack} dni</span></div>
              <div class="tagline" style="color:var(--warn)">Do końca „${esc(mission.name)}"
               za mało czasu na pewniaki — bierz wysokie, choć niepewne P.</div>`
-          : `<div class="kv"><span>Projekcja misji</span>
+          : `<div class="kv"><span>Projekcja misji
+                <small class="dim">(dolna granica)</small></span>
               <span>~${needDays} dni <small class="dim">(zapas ${slack},
-                zegar: ${esc(mission.name)})</small></span></div>`;
+                zegar: ${esc(mission.name)})</small></span></div>
+             <div class="tagline">Projekcja liczy się liderem rankingu w każdej
+              grze — losowanie puli realnie ją wydłuża.</div>`;
       }
       passHtml = `
       <div class="panel">
