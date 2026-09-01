@@ -168,8 +168,8 @@ async function renderNow() {
         <div class="who"><span class="rank-badge lead">1</span><img onerror="this.src=BLANK" src="${icon(b.key, b.champion_id)}"
           alt="">${esc(b.name)}</div>
         ${rail(b.milestone, GOAL, b.next_grade)}
-        ${inSelect && lobbyTrade.has(b.champion_id)
-          ? `<div class="range" style="color:var(--warn);margin-top:6px">🔁 pick kolegi — wymaga wymiany</div>` : ""}
+        ${inSelect && poolBadges(b, lobbyTrade, inSelect)
+          ? `<div style="margin-top:7px;margin-left:-8px">${poolBadges(b, lobbyTrade, inSelect)}</div>` : ""}
         <div class="range" style="margin-top:8px">${modelNote(b)}</div>
         <div class="range dim" style="margin-top:4px;font-size:11.5px">
           orientacyjnie ${gamesLine}</div>
@@ -203,12 +203,7 @@ async function renderNow() {
       <tr>
         <td class="rank-cell">${i + 2}</td>
         <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(t.key, t.champion_id)}" alt="">
-          ${esc(t.name)}${lobbyTrade.has(t.champion_id)
-            ? `<span class="mini-badge trade">wymiana</span>` : ""}${
-          inSelect && t.explore
-            ? `<span class="mini-badge explore">ZBADAJ</span>` : ""}${
-          inSelect && t.pop_tier === "rzadki"
-            ? `<span class="mini-badge rare">słaba populacja</span>` : ""}</div></td>
+          ${esc(t.name)}${poolBadges(t, lobbyTrade, inSelect)}</div></td>
         <td class="r num">${t.steps_remaining}</td>
         <td><span class="chip ${t.next_grade === "S-" ? "gold" : ""}">${
           esc(t.next_grade || "?")}</span></td>
@@ -336,7 +331,7 @@ async function renderSide() {
     if (ms.length) {
       // pola misji bywaja rozne miedzy wersjami klienta - wyciagamy
       // defensywnie i pokazujemy tylko to, co sie da odczytac
-      const rows = ms.slice(0, 5).map(m => {
+      const rows = ms.filter(m => m.status !== "DUMMY").slice(0, 5).map(m => {
         const title = m.title || m.name || m.internalName || m.id || "misja";
         const o = (m.objectives || [])[0] || {};
         const pr = o.progress || m.progress || {};
@@ -448,6 +443,17 @@ async function renderGrades() {
     }
     det.innerHTML = `<td colspan="7">${explainBox(ex)}</td>`;
   });
+}
+
+function poolBadges(t, lobbyTrade, inSelect) {
+  // jedna rodzina wizualna (ta sama geometria i typografia, roznicowanie
+  // wylacznie kolorem) - trzy style gryzly sie na liscie (uwaga z 1.09)
+  if (!inSelect) return "";
+  return [
+    lobbyTrade.has(t.champion_id) ? `<span class="mini-badge trade">wymiana</span>` : "",
+    t.explore ? `<span class="mini-badge explore">zbadaj</span>` : "",
+    t.pop_tier === "rzadki" ? `<span class="mini-badge rare">słaba populacja</span>` : "",
+  ].join("");
 }
 
 const FEATURE_PL = {
