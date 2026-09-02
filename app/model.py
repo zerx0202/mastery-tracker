@@ -260,9 +260,17 @@ def _fit_ordinal(X, specs, cuts, l2, epochs, lr):
             u = sum(beta[j] * xi[j] for j in range(k))
             # gradient log-wiarygodnosci po u i po konkretnych alpha
             if kind == "censored":
-                s = _sigmoid(u - alphas[cut_ix[r]])
+                lo = cut_ix.get(r)
+                if lo is None:
+                    # rank rowny minimum wypada z cuts (P(>=min)=1), wiec
+                    # log-wiarygodnosc to log 1 = 0 - obserwacja nie niesie
+                    # gradientu. Twarde cut_ix[r] rzucalo tu KeyError
+                    # i klalo CALY trening w foldzie LOO bez zadnej
+                    # dokladnej oceny ponizej progu (wczesna probka).
+                    continue
+                s = _sigmoid(u - alphas[lo])
                 du = 1 - s
-                dalpha = {cut_ix[r]: -(1 - s)}
+                dalpha = {lo: -(1 - s)}
             else:
                 lo = cut_ix.get(r)          # None = najnizszy rank (P(>=r)=1)
                 hi_r = next_up[r]
@@ -301,7 +309,10 @@ def _p_ge(x_std, beta, alphas, rank):
 
 def _auc_ci(auc, n_pos, n_neg):
     """Hanley-McNeil: SE i 95% CI. Zeby ruchy AUC mniejsze niz szum
-    przestaly uchodzic za wynik."""
+    przestaly uchodzic za wynik. Interpretacja (przeglad 2.09): regula
+    "ruchy <0.1 to szum" jest dobra dla progu A-; dla S- przy <10
+    pozytywach SE >= 0.12-0.15, wiec tam szumem sa i ruchy ~0.15.
+    SE jest przyblizeniem - predykcje LOO sa skorelowane miedzy foldami."""
     if auc is None or not n_pos or not n_neg:
         return None, None
     q1 = auc / (2 - auc)
@@ -325,6 +336,13 @@ def _threshold_metrics(preds):
              for p, t in preds)
     base = sum(y) / len(y)
     base_acc = max(base, 1 - base)
+    # log-loss stalego predyktora p=base_rate - punkt odniesienia bramki
+    # useful. accuracy@0.5 przy base rate S- ~0.1-0.2 jest praktycznie
+    # nie do pobicia inaczej niz przerzuceniem pozytywow nad 0.5, wiec
+    # stara bramka byla dla S- de facto nieosiagalna i mierzyla nie to,
+    # co konsumuje E(c)=suma 1/p (przeglad 2.09, W3).
+    base_ll = -(base * math.log(max(base, 1e-13))
+                + (1 - base) * math.log(max(1 - base, 1e-13)))
     pos = [p for p, t in preds if t == 1]
     neg = [p for p, t in preds if t == 0]
     auc = None
@@ -344,8 +362,37 @@ def _threshold_metrics(preds):
         "auc_se": se,
         "auc_ci95": ci,
         "log_loss": round(-ll / len(preds), 4),
+        "baseline_log_loss": round(base_ll, 4),
         "base_rate": round(base, 3),
-        "useful": bool(auc is not None and auc >= 0.65 and acc > base_acc),
+        "useful": bool(auc is not None and auc >= 0.65
+                       and (-ll / len(preds)) < base_ll),
+    }
+
+
+def calibration_stats(pairs):
+    """(B1/W4) Kalibracja garstki predykcji sprzed gry: Brier, hit_rate
+    z 95% CI Wilsona, srednie p i test Z Spiegelhaltera (czy Brier jest
+    gorszy, niz wynika z samych p; |Z| > ~2 = kalibracja odrzucona).
+    Liczone per prog i per zrodlo p, bo laczny Brier progow o roznych
+    base rate jest nieinterpretowalny. pairs = [(p, y)], y w {0,1}."""
+    n = len(pairs)
+    if not n:
+        return None
+    hit = sum(y for _, y in pairs) / n
+    z = 1.96
+    denom = 1 + z * z / n
+    centre = (hit + z * z / (2 * n)) / denom
+    half = z * math.sqrt(hit * (1 - hit) / n + z * z / (4 * n * n)) / denom
+    num = sum((y - p) * (1 - 2 * p) for p, y in pairs)
+    var = sum(((1 - 2 * p) ** 2) * p * (1 - p) for p, y in pairs)
+    return {
+        "n": n,
+        "brier": round(sum((p - y) ** 2 for p, y in pairs) / n, 4),
+        "hit_rate": round(hit, 3),
+        "hit_ci95": [round(max(0.0, centre - half), 3),
+                     round(min(1.0, centre + half), 3)],
+        "mean_p": round(sum(p for p, _ in pairs) / n, 3),
+        "spiegelhalter_z": round(num / math.sqrt(var), 2) if var > 0 else None,
     }
 
 
@@ -395,13 +442,16 @@ def _choose_l2(X_raw, specs):
 
 # ---------- trening ----------
 
-def mission_projection(goal, mode=None, runs=300, pool_size=None,
+def mission_projection(goal, mode=None, runs=1000, pool_size=None,
                        max_games=1500, seed=None):
     """Realna projekcja misji: mediana i kwartyle liczby gier do GOAL na
     ktorymkolwiek championie, Z LOSOWANIEM puli (kazda gra: losowe
     pool_size championow, gramy najlepszego wg E(c)). To zastepuje
     "dolna granice" (E lidera), ktora ignorowala, ze lider musi sie
-    najpierw trafic. Liczone w tle po treningu, czytane w kafelku."""
+    najpierw trafic. Liczone w tle po treningu, czytane w kafelku.
+    runs=1000: przy 300 i seed=None kafelek jitterowal o szum MC po kazdym
+    treningu i ruch o kilka gier mogl uchodzic za sygnal (przeglad 2.09,
+    W6); regula interpretacji: ruch mediany < ~5 gier to nadal szum."""
     import random
 
     from . import scoring

@@ -853,6 +853,24 @@ async function renderSystem() {
         style="font-size:11.5px">· rozstrzygniętych / czekających</span></span>
         <span id="pred-count">${pred.resolved ?? 0} / ${pred.pending_pools ?? 0}${
         pred.brier != null ? ` · Brier ${pred.brier}` : ""}</span></div>
+      ${(() => {
+        // (B1) kalibracja per próg i per źródło p: "częstości" to estymator,
+        // który steruje E(c) — to jego Brier jest miarą uczciwości rankingu
+        const SRC = {model: "model", rates: "częstości (E)"};
+        const rows = Object.entries(pred.per_threshold || {}).flatMap(([th, srcs]) =>
+          Object.entries(srcs).filter(([, c]) => c).map(([src, c]) =>
+            `<div class="kv" style="border:none;padding:2px 0">
+              <span class="dim" style="font-size:11.5px">${th} · ${SRC[src] || src}
+                · n=${c.n}</span>
+              <span style="font-size:12px">Brier ${c.brier} · trafienia ${
+                (100 * c.hit_rate).toFixed(0)}% (CI ${(100 * c.hit_ci95[0]).toFixed(0)}–${
+                (100 * c.hit_ci95[1]).toFixed(0)}) · śr. p ${(100 * c.mean_p).toFixed(0)}%${
+                c.spiegelhalter_z != null ? ` · Z=${c.spiegelhalter_z}` : ""}</span>
+            </div>`));
+        return rows.length ? `<div style="margin-top:6px">${rows.join("")}
+          <div class="tagline">|Z| &gt; 2 = kalibracja odrzucona (Spiegelhalter);
+            przy n &lt; 20 patrz na CI, nie na punkt.</div></div>` : "";
+      })()}
       <div style="margin-top:14px">${modelRows}</div>
       <div class="kv" style="margin-top:10px"><span class="dim" style="font-size:11.5px">
         Miara to walidacja leave-one-out — każda obserwacja raz jako test.

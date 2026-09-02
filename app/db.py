@@ -1910,6 +1910,7 @@ CREATE TABLE IF NOT EXISTS pool_prediction (
     champion_id INTEGER NOT NULL,
     threshold   TEXT,
     p           REAL,
+    next_p      REAL,
     specific    INTEGER DEFAULT 0,
     own_games   INTEGER,
     created_at  INTEGER NOT NULL,
@@ -1924,25 +1925,29 @@ def save_pool_predictions(pool_id, rows, ts):
         for r in rows:
             con.execute(
                 "INSERT OR REPLACE INTO pool_prediction "
-                "(pool_id, champion_id, threshold, p, specific, own_games, created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "(pool_id, champion_id, threshold, p, next_p, specific, "
+                "own_games, created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (pool_id, r["champion_id"], r.get("next_grade"), r.get("model_p"),
+                 r.get("next_p"),
                  1 if r.get("model_specific") else 0, r.get("model_own_games"), ts))
     return len(rows)
 
 
 def prediction_pairs():
     """Predykcje sprzed gry sparowane z tym, co faktycznie wypadlo.
-    Tylko champion, ktorego naprawde wybrano - reszta puli nie ma wyniku."""
+    Tylko champion, ktorego naprawde wybrano - reszta puli nie ma wyniku.
+    (B1) Obok p modelu takze next_p z czestosci - to ONO steruje E(c)
+    i wyborem championa, wiec pary istnieja rowniez tam, gdzie model
+    swiadomie milczy (S- z p=None)."""
     with connect() as con:
         con.executescript(PRED_SCHEMA)
         resolved = [dict(r) for r in con.execute("""
-            SELECT pp.p, pp.threshold, pp.specific, g.grade, csp.ts
+            SELECT pp.p, pp.next_p, pp.threshold, pp.specific, g.grade, csp.ts
             FROM pool_prediction pp
             JOIN champ_select_pool csp
               ON csp.id = pp.pool_id AND csp.picked_id = pp.champion_id
             JOIN grade_observation g ON g.match_id = csp.match_id
-            WHERE pp.p IS NOT NULL
+            WHERE pp.p IS NOT NULL OR pp.next_p IS NOT NULL
             ORDER BY csp.ts DESC""")]
         pending = con.execute("""
             SELECT COUNT(DISTINCT pp.pool_id) c
@@ -1979,6 +1984,17 @@ def init_predictions():
     powstawala leniwie przy pierwszym zapisie, jako jedyna poza migrate()."""
     with connect() as con:
         con.executescript(PRED_SCHEMA)
+
+
+def upgrade_predictions_next_p():
+    """(B1, przeglad 2.09) Scorecard walidowal wylacznie p modelu
+    porzadkowego, a championa wybiera E(c) na czestosciach champion_rates -
+    "jedyny test, ktorego nie da sie oszukac" testowal niewlasciwy
+    estymator. next_p trzyma p szczebla z czestosci w chwili predykcji."""
+    with connect() as con:
+        cols = [r["name"] for r in con.execute("PRAGMA table_info(pool_prediction)")]
+        if "next_p" not in cols:
+            con.execute("ALTER TABLE pool_prediction ADD COLUMN next_p REAL")
 
 
 # ============================================================

@@ -980,14 +980,18 @@ async def model_rates(mode: str | None = None):
 async def model_explain(mode: str | None = None):
     """Ostatnie mecze z predykcja obok faktycznej oceny - do sprawdzenia,
     czy model w ogole trafia."""
-    rows = model.training_rows(mode or DEFAULT_MODE)
+    # (B5) predict bez mode liczyl z-score dmg z populacji WSZYSTKICH
+    # trybow, a wagi/means/stds modelu powstaly na przefiltrowanej -
+    # pokazywane p rozjezdzaly sie z tym, co model naprawde przewiduje
+    use_mode = mode or DEFAULT_MODE
+    rows = model.training_rows(use_mode)
     out = []
     for r in rows[-25:]:
         out.append({
             "grade": r["grade"],
             "champion_id": r["champion_id"],
-            "p_A": (model.predict(r, "A-") or {}).get("p"),
-            "p_S": (model.predict(r, "S-") or {}).get("p"),
+            "p_A": (model.predict(r, "A-", mode=use_mode) or {}).get("p"),
+            "p_S": (model.predict(r, "S-", mode=use_mode) or {}).get("p"),
         })
     return out
 
@@ -1020,8 +1024,9 @@ async def grades_history(limit: int = 60, mode: str | None = None):
 
     out = []
     for r in rows[:limit]:
-        pa = model.predict(r, "A-") or {}
-        ps = model.predict(r, "S-") or {}
+        # (B5) jak w /model/explain: tryb jawnie, spojnie z treningiem
+        pa = model.predict(r, "A-", mode=use_mode) or {}
+        ps = model.predict(r, "S-", mode=use_mode) or {}
         fv = features.match_features(r)
         out.append({
             "grade": r["grade"],
@@ -1120,8 +1125,12 @@ async def export_all():
 
 @api.get("/predictions/scorecard")
 async def predictions_scorecard():
-    """Uczciwosc modelu na predykcjach sprzed gry. Brier: 0 idealnie,
-    0.25 to poziom rzucania moneta przy p=0.5."""
+    """Uczciwosc predykcji sprzed gry. Brier: 0 idealnie, 0.25 to moneta
+    przy p=0.5. (B1, przeglad 2.09) Metryki per prog i per zrodlo p:
+    'model' = regresja porzadkowa (kolumna p), 'rates' = czestosci shrunk
+    (next_p) - to TE DRUGIE steruja E(c) i wyborem championa, wiec to one
+    musza byc walidowane prospektywnie; laczny Brier progow o roznych
+    base rate byl nieinterpretowalny."""
     from . import model as _m
     resolved, pending = await asyncio.to_thread(db.prediction_pairs)
     pairs = []
@@ -1129,13 +1138,24 @@ async def predictions_scorecard():
         y = _m.label_for(r["grade"], r["threshold"])
         if y is None:
             continue
-        pairs.append({"p": r["p"], "hit": y, "threshold": r["threshold"],
-                      "grade": r["grade"], "ts": r["ts"]})
+        pairs.append({"p": r["p"], "next_p": r.get("next_p"), "hit": y,
+                      "threshold": r["threshold"], "grade": r["grade"],
+                      "ts": r["ts"]})
     out = {"resolved": len(pairs), "pending_pools": pending, "pairs": pairs[:50]}
-    if pairs:
-        out["brier"] = round(sum((x["p"] - x["hit"]) ** 2 for x in pairs) / len(pairs), 4)
-        out["hit_rate"] = round(sum(x["hit"] for x in pairs) / len(pairs), 3)
-        out["mean_p"] = round(sum(x["p"] for x in pairs) / len(pairs), 3)
+    # pola plaskie jak dotad (model-p laczne) - stale punkty odniesienia
+    mp = [(x["p"], x["hit"]) for x in pairs if x["p"] is not None]
+    if mp:
+        out["brier"] = round(sum((p - h) ** 2 for p, h in mp) / len(mp), 4)
+        out["hit_rate"] = round(sum(h for _, h in mp) / len(mp), 3)
+        out["mean_p"] = round(sum(p for p, _ in mp) / len(mp), 3)
+    out["per_threshold"] = {}
+    for th in ("A-", "S-"):
+        out["per_threshold"][th] = {
+            src: _m.calibration_stats(
+                [(x[key], x["hit"]) for x in pairs
+                 if x["threshold"] == th and x[key] is not None])
+            for src, key in (("model", "p"), ("rates", "next_p"))
+        }
     return out
 
 
