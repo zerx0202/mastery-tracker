@@ -672,6 +672,54 @@ def save_grade(entry, platform, ts):
     return not existed
 
 
+GRADE_RAW_SCHEMA = """
+CREATE TABLE IF NOT EXISTS grade_raw (
+    match_id    TEXT PRIMARY KEY,
+    game_id     INTEGER NOT NULL,
+    payload     BLOB NOT NULL,
+    captured_at INTEGER NOT NULL
+);
+"""
+
+
+def init_grade_raw():
+    with connect() as con:
+        con.executescript(GRADE_RAW_SCHEMA)
+
+
+def save_grade_raw(updates, platform, ts):
+    """Caly surowy blok champion-mastery-updates per mecz (wzorzec eog_raw).
+    save_grade wyciaga kilkanascie pol, a jedyna kopia reszty zyla w dumpach
+    agenta z rotacja 60 plikow - gdy Riot przebuduje system ocen (robil to
+    z mechanika trybu w 26.03 i 26.12), surowce sprzed zmiany maja istniec
+    (raport 2.09, P3). Zwraca liczbe zapisanych meczow."""
+    import zlib
+    entries = [e for e in (updates if isinstance(updates, list) else [updates])
+               if isinstance(e, dict)]
+    by_gid = {}
+    for e in entries:
+        gid = e.get("gameId")
+        if gid:
+            by_gid.setdefault(gid, []).append(e)
+    with connect() as con:
+        for gid, ents in by_gid.items():
+            con.execute(
+                "INSERT OR REPLACE INTO grade_raw "
+                "(match_id, game_id, payload, captured_at) VALUES (?,?,?,?)",
+                (f"{platform.upper()}_{gid}", gid,
+                 zlib.compress(json.dumps(ents, separators=(",", ":")).encode()),
+                 ts))
+    return len(by_gid)
+
+
+def load_grade_raw(match_id):
+    import zlib
+    with connect() as con:
+        row = con.execute("SELECT payload FROM grade_raw WHERE match_id=?",
+                          (match_id,)).fetchone()
+    return json.loads(zlib.decompress(row["payload"])) if row else None
+
+
 def grade_stats():
     """Rozklad ocen i pokrycie meczami - podstawa pod model p_A / p_S."""
     with connect() as con:
@@ -1434,6 +1482,64 @@ def backfill_grades_from_snapshots(window=7200):
             "skipped_existing": skipped, "unmatched": unmatched}
 
 
+def data_gates():
+    """(P4) Liczniki bramek danych ze STAN.md - "sprawdzać liczniki" ma
+    znaczyc "spojrzec na System", nie "policzyc recznie w bazie". Progi sa
+    orientacyjne (~), definicje bramek zyja w STAN.md - tu tylko odczyt."""
+    s_rank = GRADE_RANK["S-"]
+    with connect() as con:
+        exact = con.execute(
+            "SELECT COUNT(*) c FROM grade_observation "
+            "WHERE COALESCE(censored,0)=0").fetchone()["c"]
+        s_pos = sum(1 for r in con.execute(
+            "SELECT grade FROM grade_observation WHERE COALESCE(censored,0)=0")
+            if GRADE_RANK.get(r["grade"], -1) >= s_rank)
+        eventdata = con.execute(
+            "SELECT COUNT(*) c FROM live_event_log").fetchone()["c"]
+        usable = con.execute("""
+            SELECT COUNT(*) c FROM grade_observation g
+            JOIN match_player m ON m.match_id = g.match_id""").fetchone()["c"]
+    resolved, _pending = prediction_pairs()
+    return [
+        {"key": "s_minus", "label": "Model S- (dokładne pozytywy)",
+         "have": s_pos, "need": 5},
+        {"key": "brier", "label": "Brier interpretowalny (pary predykcji)",
+         "have": len(resolved), "need": 20},
+        {"key": "fatigue", "label": "Hipoteza zmęczenia (dokładne oceny)",
+         "have": exact, "need": 40},
+        {"key": "eventdata", "label": "Rewizja eventdata (gry z logiem)",
+         "have": eventdata, "need": 50},
+        {"key": "class_feats", "label": "Cechy klasowe (obserwacje)",
+         "have": usable, "need": 60},
+        {"key": "big_review", "label": "Rewizja duża: ranking/CUSUM/kalibracja",
+         "have": usable, "need": 100},
+    ]
+
+
+def pipeline_sanity():
+    """(P8) Dziury w potoku - kazda z tych liczb powinna byc ~0; niezerowa
+    znaczy, ze ktorys kanal danych przecieka i warto spojrzec wczesniej
+    niz po fakcie."""
+    import time as _t
+    cutoff = int(_t.time()) - 86400
+    with connect() as con:
+        orphan_grades = con.execute("""
+            SELECT COUNT(*) c FROM grade_observation g
+            LEFT JOIN match_player m ON m.match_id = g.match_id
+            WHERE m.match_id IS NULL""").fetchone()["c"]
+        eog_no_participants = con.execute("""
+            SELECT COUNT(*) c FROM eog_raw e
+            LEFT JOIN (SELECT DISTINCT match_id FROM match_participant) p
+              ON p.match_id = e.match_id
+            WHERE p.match_id IS NULL""").fetchone()["c"]
+        stale_pools = con.execute(
+            "SELECT COUNT(*) c FROM champ_select_pool "
+            "WHERE match_id IS NULL AND ts < ?", (cutoff,)).fetchone()["c"]
+    return {"orphan_grades": orphan_grades,
+            "eog_no_participants": eog_no_participants,
+            "stale_pools": stale_pools}
+
+
 def model_status(min_games=40):
     """Marker: ile obserwacji mamy i czy juz warto stroic model."""
     with connect() as con:
@@ -1892,12 +1998,19 @@ def snowball_add_candidates(puuids, ts):
 
 
 def snowball_next(limit=1):
-    """Gracze do sprawdzenia: nigdy nie sprawdzani albo starsi niz okno."""
+    """Gracze do sprawdzenia: nigdy nie sprawdzani albo starsi niz okno.
+    (P7) Priorytet: gracze widziani w wielu wlasnych meczach
+    (match_participant) - ich historie karmia normy i karte 9 najszybciej;
+    reszta po staremu, od najdawniej sprawdzanych."""
     cutoff = int(time.time()) - SNOWBALL_REVISIT_DAYS * 86400
     with connect() as con:
-        return [r["puuid"] for r in con.execute(
-            "SELECT puuid FROM snowball_seen WHERE checked_at < ? "
-            "ORDER BY checked_at ASC, added_at ASC LIMIT ?", (cutoff, limit))]
+        return [r["puuid"] for r in con.execute("""
+            SELECT s.puuid FROM snowball_seen s
+            LEFT JOIN (SELECT puuid, COUNT(*) n FROM match_participant
+                       GROUP BY puuid) mp ON mp.puuid = s.puuid
+            WHERE s.checked_at < ?
+            ORDER BY COALESCE(mp.n, 0) DESC, s.checked_at ASC, s.added_at ASC
+            LIMIT ?""", (cutoff, limit))]
 
 
 def snowball_mark(puuid, kiwi_games, new_rows):

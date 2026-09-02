@@ -2,14 +2,36 @@
 """Maly serwer HTTP wyzwalajacy backup. Slucha tylko na localhoscie -
 kontener dociera do niego przez host.docker.internal."""
 import http.server
+import json
+import os
 import subprocess
 import threading
 import time
+import urllib.request
 
 SCRIPT = "/Users/zerx/stacks/riot/backup.sh"
 MIN_INTERVAL = 300          # nie czesciej niz raz na 5 minut
 _last = [0.0]
 _lock = threading.Lock()
+
+# (P5) Wynik backupu leci do event_logu backendu - porazka nie moze zyc
+# tylko w stdout launchd. Token przez env (MASTERY_API_TOKEN w plist);
+# bez tokenu dziala, gdy backend nie wymusza.
+BACKEND = os.environ.get("MASTERY_API", "http://127.0.0.1:8000")
+TOKEN = os.environ.get("MASTERY_API_TOKEN", "")
+
+
+def report(ok, note):
+    try:
+        req = urllib.request.Request(
+            BACKEND + "/api/backup/report",
+            data=json.dumps({"ok": ok, "note": note[:500]}).encode(),
+            headers={"Content-Type": "application/json",
+                     **({"X-API-Token": TOKEN} if TOKEN else {})},
+            method="POST")
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print(f"raportu backupu nie dostarczono: {e}", flush=True)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -29,9 +51,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def run_backup(self):
         try:
             r = subprocess.run([SCRIPT], capture_output=True, text=True, timeout=600)
-            print(r.stdout.strip() or r.stderr.strip(), flush=True)
+            out = r.stdout.strip() or r.stderr.strip()
+            print(out, flush=True)
+            report(r.returncode == 0, out)
         except Exception as e:
             print(f"blad backupu: {e}", flush=True)
+            report(False, f"{type(e).__name__}: {e}")
 
     def respond(self, code, msg):
         body = msg.encode()

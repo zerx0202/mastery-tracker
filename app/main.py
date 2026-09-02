@@ -589,6 +589,12 @@ async def push_grade(payload: dict):
 
     ts = int(time.time())
     new, errors = 0, []
+    try:
+        # surowiec w calosci (P3) - save_grade nizej wyciaga tylko wybrane
+        # pola; awaria archiwum nie moze zablokowac zapisu oceny
+        await asyncio.to_thread(db.save_grade_raw, raw, PLATFORM, ts)
+    except Exception as e:
+        errors.append(f"grade_raw: {type(e).__name__}: {e}")
     for entry in raw:
         try:
             if await asyncio.to_thread(db.save_grade, entry, PLATFORM, ts):
@@ -778,6 +784,21 @@ async def balance_refresh():
 async def get_balance():
     """(48) Ostatnio pobrane mnozniki balansu trybu, klucze = champion_id."""
     return db.get_json_setting("mayhem_balance") or {}
+
+
+@write_api.post("/backup/report")
+async def backup_report(payload: dict):
+    """(P5) backup-server na Macu melduje tu wynik backupu. Dashboard
+    zamiast ciszy - powiadomien nie ma z decyzji ostatecznej, ale porazka
+    backupu nie moze zyc tylko w stdout launchd."""
+    ok = bool(payload.get("ok"))
+    note = str(payload.get("note") or "")[:500]
+    ts = int(time.time())
+    await asyncio.to_thread(db.set_json_setting, "last_backup",
+                            {"ts": ts, "ok": ok, "note": note})
+    await asyncio.to_thread(db.log_event, "backup_report",
+                            {"ok": ok, "note": note[:120]}, ts)
+    return {"stored": True}
 
 
 @api.get("/model/status")
@@ -1022,6 +1043,9 @@ async def system_health():
         "model": db.model_status(),
         "ddragon_patch": db.get_setting("ddragon_patch"),
         "events": events,
+        "gates": await asyncio.to_thread(db.data_gates),
+        "pipeline": await asyncio.to_thread(db.pipeline_sanity),
+        "last_backup": db.get_json_setting("last_backup"),
     }
 
 

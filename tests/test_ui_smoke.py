@@ -160,6 +160,15 @@ def test_hero_shows_mayhem_balance_line(page):
     assert "%" in txt
 
 
+def test_system_shows_gates_and_pipeline(page):
+    # (P4/P8) zakladka System: liczniki bramek i zdrowie potoku
+    page.click('nav a[href="#/system"]')
+    panel = page.wait_for_selector('#v-system .panel:has-text("Bramki danych")')
+    assert "/40" in panel.inner_text()
+    page.wait_for_selector('#v-system .kv:has-text("Oceny bez meczu")')
+    page.wait_for_selector('#v-system .kv:has-text("Ostatni backup")')
+
+
 def test_grade_row_expands_and_collapses(page):
     page.click('nav a[href="#/oceny"]')
     row = page.wait_for_selector("tr.grade-row")

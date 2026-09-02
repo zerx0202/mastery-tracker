@@ -758,15 +758,44 @@ async function renderSystem() {
      <td>${LABELS[e.kind] || e.kind}</td>
      <td class="num" style="color:var(--dim);font-size:12px">${esc(e.detail || "")}</td></tr>`).join("");
 
+  // (P4) bramki danych: definicje zyja w STAN.md, tu tylko liczniki
+  const gates = (d.gates || []).map(g => {
+    const done = g.have >= g.need;
+    const w = Math.min(100, 100 * g.have / g.need);
+    return `<div class="bar-row" style="grid-template-columns:1fr 80px 58px">
+      <span style="font-size:12.5px">${esc(g.label)}</span>
+      <div class="bar"><i class="${done ? "ok" : ""}" style="width:${w}%"></i></div>
+      <span style="text-align:right;color:${done ? "var(--ok)" : "var(--dim)"}">${
+        g.have}/${g.need}</span>
+    </div>`;
+  }).join("");
+  // (P8) potok: kazda niezerowa liczba to przeciek ktoregos kanalu
+  const PIPE_PL = {orphan_grades: "Oceny bez meczu",
+    eog_no_participants: "Ekrany bez tożsamości",
+    stale_pools: "Pule bez meczu >24 h"};
+  const pipe = Object.entries(d.pipeline || {}).map(([k, n]) =>
+    `<div class="kv"><span>${PIPE_PL[k] || k}</span>
+     <span style="color:${n ? "var(--warn)" : "var(--ok)"}">${n}</span></div>`).join("");
+  const bk = d.last_backup;
+  const backupKv = `<div class="kv"><span>Ostatni backup</span>
+    <span style="color:${bk ? (bk.ok ? "var(--ok)" : "var(--warn)") : "var(--dim)"}">${
+    bk ? (bk.ok ? "OK" : "BŁĄD") + " · " + ago(bk.ts) : "brak meldunku"}</span></div>`;
+
   let pred = {};
   try { pred = await api("/predictions/scorecard"); } catch (e) {}
   $("system-body").innerHTML = `
     <div class="grid2" style="margin-top:20px">
-      <div class="panel"><div class="eyebrow">Ostatnia aktywność</div>${seen}</div>
+      <div class="panel"><div class="eyebrow">Ostatnia aktywność</div>${seen}${backupKv}</div>
       <div class="panel"><div class="eyebrow">Zebrane dane</div>${counts}
         <div class="kv" style="margin-top:12px"><span>Patch Data Dragon</span>
           <span>${esc(d.ddragon_patch || "—")}</span></div>
       </div>
+      <div class="panel"><div class="eyebrow">Bramki danych</div>${gates}
+        <div class="tagline">Bramki otwierają się same z napływem gier —
+          definicje i decyzje w pamięci projektu.</div></div>
+      <div class="panel"><div class="eyebrow">Zdrowie potoku</div>${pipe}
+        <div class="tagline">Wszystko powyżej zera oznacza przeciekający
+          kanał danych.</div></div>
     </div>
     <div class="panel" style="margin-top:16px">
       <div class="eyebrow">Model</div>
