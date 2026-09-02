@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 
-from . import balance, db, features, model, scoring
+from . import augments, balance, db, features, model, scoring
 from .db import GRADE_RANK
 from .limiter import RateLimiter
 
@@ -143,6 +143,30 @@ async def balance_refresh_loop():
         await asyncio.sleep(6 * 3600)
 
 
+async def augments_refresh_loop():
+    """(6) Slownik augmentow Mayhema z kiwi.bin.json - odswiezany, gdy
+    zmienil sie patch Data Dragona (zestaw id zmienia sie wylacznie
+    z patchem; 26.16 i 26.17 dosypaly nowe wpisy). Fetch z wlasnym
+    User-Agentem - CDN CDragona odrzuca domyslne klienty (lekcja 403
+    z sondy P9). Zrodlo, parser i granica uzycia: app/augments.py."""
+    await asyncio.sleep(150)
+    while True:
+        try:
+            book = db.get_json_setting("augment_book") or {}
+            cur = db.get_setting("ddragon_patch") or ""
+            short = ".".join(cur.split(".")[:2]) if cur else None
+            if short and book.get("patch") != short:
+                r = await state["plain"].get(
+                    augments.BIN_URL, follow_redirects=True, timeout=90,
+                    headers={"User-Agent": "mastery-tracker/1.0"})
+                if r.status_code == 200:
+                    await asyncio.to_thread(augments.store_augments,
+                                            r.text, short)
+        except Exception as e:
+            _loop_error("augments", e)
+        await asyncio.sleep(6 * 3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # jeden punkt wejscia do schematu - nowa funkcja init_*/upgrade_* w db.py
@@ -151,6 +175,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(mayhem_sentinel_loop())
     asyncio.create_task(daily_snapshot_loop())
     asyncio.create_task(balance_refresh_loop())
+    asyncio.create_task(augments_refresh_loop())
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
@@ -843,6 +868,61 @@ async def get_balance():
     return db.get_json_setting("mayhem_balance") or {}
 
 
+@api.get("/augments")
+async def get_augments():
+    """(6) Slownik augmentow Mayhema (id -> nazwa/rarity) z kiwi.bin.json."""
+    return augments.get_book()
+
+
+@write_api.post("/augments/refresh")
+async def augments_refresh():
+    """(6) Reczny refresh slownika, poza petla patchowa."""
+    cur = db.get_setting("ddragon_patch") or ""
+    short = ".".join(cur.split(".")[:2]) if cur else None
+    r = await state["plain"].get(
+        augments.BIN_URL, follow_redirects=True, timeout=90,
+        headers={"User-Agent": "mastery-tracker/1.0"})
+    if r.status_code != 200:
+        raise HTTPException(502, f"communitydragon: HTTP {r.status_code}")
+    return await asyncio.to_thread(augments.store_augments, r.text, short)
+
+
+@api.get("/augments/stats")
+async def augments_stats():
+    """(6) Zestawienie OPISOWE wlasnych augmentow z eog na tle ocen.
+    Per-augment n jest jednocyfrowe (57 id na 21 gier w chwili budowy),
+    wiec to sa LICZNIKI do ogladania, nie material na wnioski ilosciowe -
+    zgodnie z regula "ruchy AUC<0.1 to szum" i warunkami panelu E."""
+    def build():
+        with db.connect() as c:
+            rows = [dict(r) for r in c.execute("""
+                SELECT e.augments augs, g.grade, m.win
+                FROM eog_raw e
+                JOIN grade_observation g ON g.match_id = e.match_id
+                LEFT JOIN match_player m ON m.match_id = e.match_id""")]
+        agg = {}
+        for r in rows:
+            try:
+                ids = json.loads(r["augs"] or "[]")
+            except ValueError:
+                ids = []
+            a = model.label_for(r["grade"], "A-") == 1
+            s = model.label_for(r["grade"], "S-") == 1
+            for i in ids:
+                d = agg.setdefault(int(i), {"games": 0, "a_minus": 0,
+                                            "s_minus": 0, "wins": 0})
+                d["games"] += 1
+                d["a_minus"] += 1 if a else 0
+                d["s_minus"] += 1 if s else 0
+                d["wins"] += 1 if r["win"] else 0
+        labels = {x["id"]: x for x in augments.names_for(sorted(agg))}
+        out = [{"id": i, "name": labels[i]["name"],
+                "rarity": labels[i]["rarity"], **d} for i, d in agg.items()]
+        out.sort(key=lambda x: (-x["games"], x["id"]))
+        return {"augments": out}
+    return await asyncio.to_thread(build)
+
+
 @write_api.post("/probe")
 async def probe_create(payload: dict):
     """(42) Konsola LCU: zlecenie surowego GET-a do klienta gry. Wykonuje
@@ -998,10 +1078,16 @@ async def model_explain(mode: str | None = None):
 
 @api.get("/grades/explain")
 async def grades_explain(match_id: str):
-    """Karta 13+27 - rozbicie oceny na sklad i percentyl."""
+    """Karta 13+27 - rozbicie oceny na sklad i percentyl. (6) Do tego
+    etykiety augmentow tej gry - kontekst, nie cecha modelu."""
     out = await asyncio.to_thread(model.explain, match_id)
     if not out:
         raise HTTPException(404, "brak oceny lub statystyk dla tego meczu")
+    with db.connect() as c:
+        r = c.execute("SELECT augments FROM eog_raw WHERE match_id=?",
+                      (match_id,)).fetchone()
+    ids = json.loads(r["augments"]) if r and r["augments"] else []
+    out["augments"] = augments.names_for(ids)
     return out
 
 
@@ -1014,13 +1100,16 @@ async def grades_history(limit: int = 60, mode: str | None = None):
         rows = [dict(r) for r in c.execute("""
             SELECT g.grade, g.champion_id, g.observed_at, g.match_id,
                    m.kills, m.deaths, m.assists, m.dmg_champ, m.gold,
-                   m.cs, m.vision, m.heal, m.duration
+                   m.cs, m.vision, m.heal, m.duration,
+                   e.augments augs
             FROM grade_observation g
             JOIN match_player m ON m.match_id = g.match_id
+            LEFT JOIN eog_raw e ON e.match_id = g.match_id
             WHERE m.duration > 300 AND m.game_mode = ?
             ORDER BY g.observed_at DESC""", (use_mode,))]
         names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM champion")}
         keys = {r["id"]: r["key"] for r in c.execute("SELECT id, key FROM champion")}
+    book = augments.get_book().get("augments") or {}
 
     out = []
     for r in rows[:limit]:
@@ -1041,6 +1130,8 @@ async def grades_history(limit: int = 60, mode: str | None = None):
             "dpm": round(fv["dpm"]),
             "p_A": pa.get("p"), "p_S": ps.get("p"),
             "censored": r["grade"].startswith(">="),
+            "augments": augments.names_for(
+                json.loads(r["augs"]) if r.get("augs") else [], book),
         })
     return {"count": len(rows), "grades": out}
 

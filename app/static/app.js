@@ -568,9 +568,16 @@ function explainBox(ex) {
     ? `<div class="range" style="margin-top:9px">obrażenia/min ${ex.percentile.value}:
         <b>${ex.percentile.pct}. percentyl</b> z ${ex.percentile.n} obserwacji
         <small class="dim">(zakres: ${esc(ex.percentile.scope)})</small></div>` : "";
+  // (6) etykiety augmentów tej gry — kontekst przy ocenie, nie cecha modelu;
+  // id spoza słownika (nowy patch przed refreshem) pokazujemy surowo
+  const augs = (ex.augments && ex.augments.length)
+    ? `<div class="range" style="margin-top:9px">augmenty: ${
+        ex.augments.map(a =>
+          `<span class="chip ${a.rarity === 2 ? "gold" : ""}">${
+            esc(a.name || ("#" + a.id))}</span>`).join(" ")}</div>` : "";
   return `<div class="explain-box">
     <div class="range">Szansa wg modelu — ${ths}</div>
-    <div style="margin-top:9px">${bars}</div>${pct}
+    <div style="margin-top:9px">${bars}</div>${pct}${augs}
     <div class="tagline" style="margin-top:7px">Wkład = waga cechy × odchylenie
       od Twojej normy na tym championie; dodatni ciągnął tę ocenę w górę.</div>
   </div>`;
@@ -736,6 +743,30 @@ async function renderLab() {
       ${lo.toFixed(hi < 10 ? 2 : 0)} – ${hi.toFixed(hi < 10 ? 2 : 0)} ·
       kropki to pojedyncze gry, złota kreska to mediana, ×n to liczba gier</div>
     ${rows}</div>`;
+
+  // (6) augmenty przy ocenach — liczniki OPISOWE (per-augment n jest
+  // jednocyfrowe: to jest do oglądania, nie do wniosków ilościowych)
+  let ag = null;
+  try { ag = await api("/augments/stats"); } catch (e) {}
+  if (ag && ag.augments && ag.augments.length) {
+    const RAR = {0: "", 1: "gold", 2: "gold"};
+    const RAR_TXT = {0: "Silver", 1: "Gold", 2: "Prismatic"};
+    const arows = ag.augments.slice(0, 30).map(a => `<tr>
+      <td><span class="chip ${RAR[a.rarity] || ""}">${esc(a.name || ("#" + a.id))}</span>
+        <small class="dim">${a.rarity != null ? RAR_TXT[a.rarity] : ""}</small></td>
+      <td class="r num">${a.games}</td>
+      <td class="r num">${a.a_minus}</td>
+      <td class="r num">${a.s_minus}</td>
+      <td class="r num">${a.wins}</td>
+    </tr>`).join("");
+    $("lab-body").insertAdjacentHTML("beforeend", `<div class="panel" style="margin-top:14px">
+      <div class="eyebrow">Augmenty przy ocenach (opisowo)</div>
+      <table><thead><tr><th>Augment</th><th class="r">Gier</th>
+        <th class="r">≥A-</th><th class="r">S-</th><th class="r">Win</th></tr></thead>
+      <tbody>${arows}</tbody></table>
+      <div class="tagline">Liczniki z własnych gier — przy tej próbce to
+        kontekst do oglądania, nie materiał na wnioski.</div></div>`);
+  }
 }
 
 /* ---------- SYSTEM ---------- */
