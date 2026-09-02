@@ -13,7 +13,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Zaleznosci
-        run: pip install -r requirements.txt pytest ruff
+        # aiohttp z requirements agenta - bez niego harness agenta
+        # (tests/test_agent.py) pomijalby sie w CI po cichu
+        run: pip install -r requirements.txt -r agent/requirements.txt pytest ruff
       - name: Ruff (m.in. niezdefiniowane nazwy - dzisiejsza klasa bledow)
         run: ruff check app/ agent/ tests/
       - name: Pytest

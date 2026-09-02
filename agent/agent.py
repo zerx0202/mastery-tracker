@@ -19,6 +19,7 @@ zdobyta ocene do konkretnego meczu.
 
 import asyncio
 import base64
+import itertools
 import json
 import ssl
 import sys
@@ -154,43 +155,53 @@ class Server:
         self.cfg = cfg
         self.session = session
         self._flush_task = None
+        self._seq = itertools.count()
 
     def _headers(self):
         tok = self.cfg.get("api_token")
         return {"X-API-Token": tok} if tok else {}
 
-    async def post(self, path, payload=None, timeout=90, _from_queue=False):
+    async def post(self, path, payload=None, timeout=90):
         if self._flush_task is None:
             self._flush_task = asyncio.create_task(self._flush_loop())
+        status, parsed = await self._send(path, payload, timeout)
+        if status is None or status >= 500:
+            self._enqueue(path, payload, timeout)
+            return None
+        if status >= 400:
+            return None
+        return parsed
+
+    async def _send(self, path, payload, timeout):
+        """Jeden strzal do serwera. (None, None) = brak polaczenia; poza tym
+        (status, tresc). Wydzielone, zeby dosylka mogla ODROZNIC lezacy
+        serwer (czekamy) od odrzucenia 4xx (element do odlozenia) - post()
+        zwracal None w obu wypadkach i zatruta glowa blokowala kolejke."""
         url = path if path.startswith("http") else self.cfg["api_base"] + path
         try:
             async with self.session.post(url, json=payload, headers=self._headers(),
                                          timeout=aiohttp.ClientTimeout(total=timeout)) as r:
                 txt = await r.text()
-                if r.status >= 500:
-                    log(f"serwer {r.status} na {path}: {txt[:120]}", "warn")
-                    if not _from_queue:
-                        self._enqueue(path, payload, timeout)
-                    return None
                 if r.status >= 400:
                     log(f"serwer {r.status} na {path}: {txt[:120]}", "warn")
-                    return None
+                    return r.status, None
                 try:
-                    return json.loads(txt)
+                    return r.status, json.loads(txt)
                 except ValueError:
-                    return {"raw": txt}
+                    return r.status, {"raw": txt}
         except Exception as e:
             log(f"blad polaczenia z serwerem ({path}): {e}", "warn")
-            if not _from_queue:
-                self._enqueue(path, payload, timeout)
-            return None
+            return None, None
 
     def _enqueue(self, path, payload, timeout):
         if not any(path.startswith(d) for d in self.DURABLE):
             return
         try:
             self.QUEUE_DIR.mkdir(exist_ok=True)
-            name = f"{int(time.time() * 1000)}.json"
+            # sam timestamp ms kolidowal: ocena i eog zakolejkowane w tej
+            # samej milisekundzie (backend lezy po grze) nadpisywaly sie
+            # nawzajem - licznik gwarantuje unikalnosc i kolejnosc
+            name = f"{int(time.time() * 1000)}-{next(self._seq):04d}.json"
             (self.QUEUE_DIR / name).write_text(
                 json.dumps({"path": path, "payload": payload, "timeout": timeout},
                            ensure_ascii=False), encoding="utf-8")
@@ -213,12 +224,18 @@ class Server:
             try:
                 item = json.loads(f.read_text(encoding="utf-8"))
             except ValueError:
-                f.rename(f.with_suffix(".bad"))
+                f.replace(f.with_suffix(".bad"))
                 continue
-            r = await self.post(item["path"], item.get("payload"),
-                                item.get("timeout", 90), _from_queue=True)
-            if r is None:
+            status, _ = await self._send(item["path"], item.get("payload"),
+                                         item.get("timeout", 90))
+            if status is None or status >= 500:
                 return  # serwer dalej lezy - kolejka czeka w spokoju
+            if status >= 400:
+                # odrzucony merytorycznie nie stanie sie dobry od powtarzania,
+                # a w glowie posortowanej kolejki blokowal WSZYSTKO za soba
+                f.replace(f.with_suffix(".bad"))
+                log(f"dosylka odrzucona ({status}): {item['path']} -> .bad", "warn")
+                continue
             f.unlink(missing_ok=True)
             log(f"dosylka z kolejki: {item['path']} ok", "ok")
 
@@ -433,7 +450,8 @@ class Agent:
             return
         r = await self.server.post("/snowball/candidates", {"puuids": found})
         if r:
-            log(f"snowball: {r['received']} kandydatow, w rejestrze {r['known_total']}", "dim")
+            log(f"snowball: {r.get('received')} kandydatow, "
+                f"w rejestrze {r.get('known_total')}", "dim")
 
     async def snowball_loop(self):
         """Co ~60 s bierze jednego gracza z rejestru serwera i dosyla jego
@@ -626,52 +644,61 @@ class Agent:
         az oba endpointy oddadza dane, klient sprzatnie ekran koncowy albo
         skonczy sie budzet eog_wait_seconds. Rownolegle ocena moze przyjsc
         z WebSocketu - flagi _grade_done/_eog_done gasza wtedy petle."""
-        self._grade_done = False
-        self._eog_done = False
-        deadline = time.monotonic() + float(self.cfg.get("eog_wait_seconds", 120))
-        retry = float(self.cfg.get("eog_retry_seconds", 2))
-        attempt, gone, phase, logged = 0, 0, first_phase, ""
-        while time.monotonic() < deadline:
-            attempt += 1
-            if attempt > 1:
-                # pierwsza proba strzela od razu (endpointy sa ulotne),
-                # kazda kolejna najpierw czyta fazę - log ma pokazywac
-                # stan z chwili proby, nie sprzed cyklu
-                phase = await self.lcu.get("/lol-gameflow/v1/gameflow-phase") or phase
-            if not self._grade_done:
-                await self.capture_grade()
-            if not self._eog_done:
-                await self.capture_eog()
-            state = (f"faza {phase}, ocena: {'jest' if self._grade_done else 'brak'}, "
-                     f"statystyki: {'sa' if self._eog_done else 'brak'}")
-            # log przy kazdej zmianie (fazy albo zlapania) + puls co 10 prob
-            if state != logged or attempt % 10 == 0:
-                log(f"eog: proba {attempt}, {state}", "dim")
-                logged = state
-            if self._grade_done and self._eog_done:
-                break
-            # klient zszedl z ekranu koncowego - te dane juz nie wroca
-            if phase in ("None", "Lobby", "TerminatedInError"):
-                gone += 1
-                if gone >= 3:
+        try:
+            self._grade_done = False
+            self._eog_done = False
+            deadline = time.monotonic() + float(self.cfg.get("eog_wait_seconds", 120))
+            retry = float(self.cfg.get("eog_retry_seconds", 2))
+            attempt, gone, phase, logged = 0, 0, first_phase, ""
+            while time.monotonic() < deadline:
+                attempt += 1
+                if attempt > 1:
+                    # pierwsza proba strzela od razu (endpointy sa ulotne),
+                    # kazda kolejna najpierw czyta fazę - log ma pokazywac
+                    # stan z chwili proby, nie sprzed cyklu
+                    phase = await self.lcu.get("/lol-gameflow/v1/gameflow-phase") or phase
+                if not self._grade_done:
+                    await self.capture_grade()
+                if not self._eog_done:
+                    await self.capture_eog()
+                state = (f"faza {phase}, ocena: {'jest' if self._grade_done else 'brak'}, "
+                         f"statystyki: {'sa' if self._eog_done else 'brak'}")
+                # log przy kazdej zmianie (fazy albo zlapania) + puls co 10 prob
+                if state != logged or attempt % 10 == 0:
+                    log(f"eog: proba {attempt}, {state}", "dim")
+                    logged = state
+                if self._grade_done and self._eog_done:
                     break
-            else:
-                gone = 0
-            await asyncio.sleep(retry)
-        if not self._grade_done:
-            log(f"ocena nie pojawila sie (prob {attempt}, ostatnia faza {phase}) - "
-                "tryb bez maestrii albo LCU jej nie oddal", "warn")
-        if not self._eog_done:
-            log(f"ekran koncowy nie oddal statystyk (ostatnia faza {phase})", "warn")
-        self._grade_done = True
-        self._eog_done = True
-        await self.dump_diagnostics()
-        await asyncio.sleep(self.cfg["post_game_delay_seconds"])
-        await self.snapshot("po grze")
-        await self.sync_history(self.cfg["history_pages_after_game"])
-        await self.sync_pass()
-        await self.sync_missions()
-        await self.trigger_backup()
+                # klient zszedl z ekranu koncowego - te dane juz nie wroca
+                if phase in ("None", "Lobby", "TerminatedInError"):
+                    gone += 1
+                    if gone >= 3:
+                        break
+                else:
+                    gone = 0
+                await asyncio.sleep(retry)
+            if not self._grade_done:
+                log(f"ocena nie pojawila sie (prob {attempt}, ostatnia faza {phase}) - "
+                    "tryb bez maestrii albo LCU jej nie oddal", "warn")
+            if not self._eog_done:
+                log(f"ekran koncowy nie oddal statystyk (ostatnia faza {phase})", "warn")
+            self._grade_done = True
+            self._eog_done = True
+            await self.dump_diagnostics()
+            await asyncio.sleep(self.cfg["post_game_delay_seconds"])
+            await self.snapshot("po grze")
+            await self.sync_history(self.cfg["history_pages_after_game"])
+            await self.sync_pass()
+            await self.sync_missions()
+            await self.trigger_backup()
+        except Exception as e:
+            # epizod nie moze umierac po cichu: bez oslony wyjatek ubijal
+            # zadanie z create_task PO zapisie eog, a PRZED snapshotem,
+            # historia i backupem - i nikt tego nie widzial (raport 2.09)
+            log(f"epizod pomeczowy przerwany: {type(e).__name__}: {e}", "err")
+        finally:
+            self._grade_done = True
+            self._eog_done = True
 
     # ---------- petle ----------
 
