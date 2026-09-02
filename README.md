@@ -34,6 +34,9 @@ flowchart LR
 
     DD["Data Dragon<br/>patch, championi, klasy"]
     RIOT["Riot API<br/>konto→PUUID raz + sentinel"]
+    AM["arammayhem.com<br/>mnożniki balansu trybu"]
+    AM --> BE
+    BK -.meldunek.-> BE
 
     AG -- "HTTPS (Tailscale)<br/>pula / oceny / statystyki / live / snowball" --> BE
     DD --> BE
@@ -63,7 +66,10 @@ begIndex/endIndex są ignorowane na obu wariantach endpointu (sprawdzone sondą:
 alias current-summoner i wariant po PUUID, indeksy do 99). Starszych gier nie
 da się wylistować — ale pojedynczą grę można pobrać po ID w komplecie
 (`/lol-match-history/v1/games/{gameId}`), dowolnie starą. Statystyki są więc
-odzyskiwalne, o ile ID gry zostało kiedykolwiek zapisane.
+odzyskiwalne, o ile ID gry zostało kiedykolwiek zapisane — i agent robi to
+sam: backend zna gry z ekranów końcowych, ocen i domkniętych pul
+(`/api/history/missing`), a agent przy bezczynnym kliencie dociąga brakujące
+pojedynczo po ID, przycięte do własnego uczestnika.
 
 Bezpowrotnie ginie tylko ocena pomeczowa: `champion-mastery-updates` istnieje
 wyłącznie w trakcie ekranu końcowego. Dlatego agent musi działać przy każdej
@@ -76,6 +82,14 @@ go do `live_event_log` — surowiec pod przyszłe metryki timingu. Z ekranu
 końcowego trafiają do bazy także itemy (`item0..item6`) i augmenty
 (`playerAugment1..6`); snowball zbiera itemy od pierwszego dnia, bo historia
 LCU trzyma je płasko w statystykach.
+
+Z bloku końcowego zapisywane są też tożsamości wszystkich dziesięciu graczy
+(`match_participant`: mecz → PUUID per slot, ta sama numeracja co
+w statystykach) — spłaszczanie odrzuca pola nienumeryczne, więc bez osobnej
+tabeli łącze ginęło. Surowe bloki ocen (`champion-mastery-updates`) są
+archiwizowane w całości w `grade_raw` (wzorzec `eog_raw`): zapis wyciąga
+kilkanaście pól, a resztę trzyma skompresowany blob — ubezpieczenie na
+wypadek, gdyby Riot przebudował system ocen.
 
 ## Drabinka milestone'ów
 
@@ -140,6 +154,19 @@ postaciach utility, a C na Viktorze z 48 tysiącami obrażeń. Ocena jest liczon
 względem innych grających tą samą postacią. gold/min rośnie monotonicznie
 z oceną (837 → 869 → 892 → 908 → 964 → 1040) i normalizacji nie wymaga.
 
+## Mnożniki balansu trybu
+
+Mayhem ma odrębny od zwykłego ARAM-a balans per champion (Damage Dealt,
+Damage Received, Healing, Ability Haste…), zmieniany z patchami. Wiki
+tabelaryzuje tylko zwykły ARAM; jedynym znalezionym źródłem prowadzącym
+balans tego trybu jest arammayhem.com — backend parsuje stronę zbiorczą
+raz na dobę (bramka jakości: podejrzanie mały wynik nie nadpisuje ostatnich
+dobrych danych), a UI pokazuje mnożniki przy hero i w panelu live.
+Decyzja graniczna: to źródło służy **wyłącznie do wyświetlania** — nigdy
+jako cecha modelu ani normalizator. Obok, przy nazwie championa, link
+„notki" prowadzi do sekcji championa w notkach patcha na wiki (numeracja
+marketingowa = wewnętrzna + 10 na majorze, od rebrandu 2025).
+
 ## Normy: snowball
 
 Serwisy statystyczne jawnie nie mają Mayhema, więc normy per champion są
@@ -150,6 +177,8 @@ budowane z dwóch własnych źródeł:
 - snowball: z każdego meczu agent zna PUUID-y 9 pozostałych graczy;
   przy bezczynnym kliencie dociąga ich historie przez LCU (1 gracz na minutę,
   okno rewizyty 7 dni, dedup po game_id, własne gry odfiltrowane).
+  Priorytet kolejki mają gracze widziani w wielu własnych meczach
+  (`match_participant`) — ich historie najszybciej karmią normy.
 
 `champion_norms` liczy μ i σ per champion ze ściąganiem champion → klasa
 (tagi Data Dragona) → global, proporcjonalnie do liczby obserwacji. Panel live
@@ -172,7 +201,13 @@ mnożniki balansu trybu, odrębne od zwykłego ARAM-a.
 - Agent: Python 3.11+ (aiohttp), WebSocket LCU z pollingiem jako fallbackiem, kolejka dyskowa
 - Dostęp: Tailscale (serve, tylko tailnet) z certyfikatami HTTPS
 - Uruchomienie: Docker Compose; kontener bez roota (cap_drop ALL, no-new-privileges)
-- Higiena: testy + CI (ruff, pytest), Dependabot
+- Higiena: 90+ testów (backend, harness logiki agenta bez LCU, smoke UI
+  w Playwright na prawdziwym uvicornie) + CI (ruff, pytest), Dependabot
+- Obserwowalność: zakładka System pokazuje liczniki bramek danych, zdrowie
+  potoku (oceny-sieroty, gry bez statystyk itd.) i wynik ostatniego backupu
+  (backup-server melduje go na `/api/backup/report`; token przez env
+  `MASTERY_API_TOKEN`); jest też konsola LCU — surowe GET-y do klienta
+  wykonywane przez agenta, sondy bez PowerShella
 
 ## Źródła danych
 
@@ -187,6 +222,7 @@ mnożniki balansu trybu, odrębne od zwykłego ARAM-a.
 | Data Dragon | patch, nazwy, ikony i klasy championów |
 | `ACCOUNT-V1` | Riot ID → PUUID, raz |
 | `MATCH-V5` | historia spoza Mayhema + sentinel (czy kolejka 2400 już otwarta) |
+| arammayhem.com | mnożniki balansu Mayhema per champion — wyłącznie wyświetlanie |
 
 ## Uruchomienie
 
@@ -212,12 +248,17 @@ ostrzeżenia w dowolnym patchu.
 ## Status
 
 W codziennym użyciu. Snapshoty przed i po grze plus dobowy cron bez klienta,
-oceny dwoma kanałami, pełny ekran końcowy z itemami i augmentami, log zdarzeń
-live, snowball, predykcje zapisywane przed grą (Brier
+oceny dwoma kanałami (surowce archiwizowane w `grade_raw`), pełny ekran
+końcowy z itemami, augmentami i tożsamościami graczy (`match_participant`),
+log zdarzeń live, snowball z priorytetem znajomych PUUID-ów, odzysk gier
+przeoczonych przez okno historii, predykcje zapisywane przed grą (Brier
 w `/api/predictions/scorecard`), model porządkowy z walidacją LOO i kartą
 wyjaśnień, projekcja misji z symulacji, kafelek przepustek i misji
-z event-hubu, podsumowanie splitu, panel live, kolejka dyskowa w agencie,
-backup restic z tygodniową retencją i weryfikacją, testy + CI + Dependabot.
+z event-hubu, mnożniki balansu trybu przy hero i w panelu live, linki do
+notek patcha, podsumowanie splitu, panel live, kolejka dyskowa w agencie
+(odporna na odrzuty i kolizje), konsola LCU i liczniki bramek w Systemie,
+backup restic z tygodniową retencją, weryfikacją i meldunkiem wyniku,
+testy + CI + Dependabot.
 
 ## Credits
 

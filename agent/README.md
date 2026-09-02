@@ -27,7 +27,15 @@ w `.gitignore` i nie trafia do repozytorium.
   zloto szacowane z ubytkow stanu, bo API nie oddaje zarobionego
 - snowball: z kazdego bloku eog zbiera PUUID-y pozostalych graczy,
   a przy bezczynnym kliencie dociaga ich historie (1 gracz na minute) —
-  z tego rosna normy per champion
+  z tego rosna normy per champion. Pusta kolejka (caly rejestr sprawdzony
+  w oknie 7 dni) jest logowana raz — cisza to bezczynnosc, nie awaria
+- odzysk gier: backend prowadzi liste gier znanych z eog/oceny/puli,
+  ktore nie maja statystyk (agent nie dzialal, okno 20 je przeoczylo);
+  agent przy bezczynnym kliencie pobiera je pojedynczo po ID
+  (`/lol-match-history/v1/games/{id}`) i przycina do wlasnego uczestnika
+- konsola LCU: co ~3 s pyta backend o sondy zlecone z zakladki System
+  i wykonuje je surowym GET-em (wylacznie odczyty) — sondy nieznanych
+  endpointow bez PowerShella
 - snapshoty maestrii przed i po grze, historia meczow (okno 20 gier)
 - eventdata: ostatni stan `events` z allgamedata (kille/zgony/wieze
   z timestampami) leci na serwer przy smierci portu 2999 — dane znikaja
@@ -39,7 +47,9 @@ w `.gitignore` i nie trafia do repozytorium.
 - pula champ selecta niesie tez `trade_ids`: picki druzyny, ktore
   wymagaja wymiany (pula celowo zawiera pick kolegow — wymiana dziala)
 - nieudane POST-y (5xx, brak polaczenia) laduja w kolejce dyskowej
-  `agent/queue/` i sa dosylane co 30 s
+  `agent/queue/` i sa dosylane co 30 s; wpis odrzucony przez serwer (4xx)
+  jest odkladany jako `.bad` zamiast blokowac dosylke, a nazwy wpisow
+  maja licznik (dwa POST-y z tej samej milisekundy sie nie nadpisuja)
 
 Ocena istnieje tylko na ekranie koncowym — gra bez dzialajacego agenta traci
 ja bezpowrotnie. Statystyki gry da sie pozniej odzyskac po ID, oceny nie.
@@ -47,3 +57,10 @@ ja bezpowrotnie. Statystyki gry da sie pozniej odzyskac po ID, oceny nie.
 ## Narzedzia
 
 `lcu-dump.ps1` — zrzut struktury historii meczow, do diagnostyki.
+Do biezacych sond wygodniejsza jest konsola LCU w zakladce System.
+
+## Testy
+
+Logika agenta (klucz dedup puli, kolejka dyskowa, przycinanie gry do
+wlasnego uczestnika, konsola) ma harness w `tests/test_agent.py` —
+chodzi bez zywego LCU, na atrapach sesji.
