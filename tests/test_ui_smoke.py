@@ -167,6 +167,9 @@ def test_system_shows_gates_and_pipeline(page):
     assert "/40" in panel.inner_text()
     page.wait_for_selector('#v-system .kv:has-text("Oceny bez meczu")')
     page.wait_for_selector('#v-system .kv:has-text("Ostatni backup")')
+    # (42) konsola LCU renderuje sie z polem sciezki i przyciskiem
+    page.wait_for_selector("#probe-path")
+    page.wait_for_selector("#probe-run")
 
 
 def test_grade_row_expands_and_collapses(page):

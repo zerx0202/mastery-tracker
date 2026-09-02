@@ -207,6 +207,94 @@ def test_flush_stops_on_server_down(tmp_path):
     assert len(calls) == 3, "dosylka ma stanac na pierwszym bledzie, nie mielic reszty"
 
 
+# ---------- konsola LCU (42) + odzysk gier (P6) ----------
+
+class FakeGetSession:
+    """GET-y agenta do backendu (probe/pending, history/missing).
+    Agent robi `await session.get(...)` bez context managera (wzorzec ze
+    snowball_loop), wiec get jest korutyna oddajaca obiekt z .json()."""
+
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+
+    async def get(self, url, timeout=None):
+        body = self.payloads.pop(0) if self.payloads else {}
+
+        class R:
+            async def json(self):
+                return body
+        return R()
+
+
+class FakeLcuRaw:
+    port = "1"
+
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+
+    async def get_raw(self, path, timeout=8):
+        self.calls.append(path)
+        return 200, self.responses.get(path, "{}")
+
+    async def get(self, path, timeout=8):
+        self.calls.append(path)
+        return self.responses.get(path)
+
+
+def test_probe_once_executes_and_reports():
+    async def run():
+        a = ag.Agent({"api_base": "http://backend"})
+        a.session = FakeGetSession([{"probes": [{"id": 7, "path": "/lol-x"}]}])
+        a.lcu = FakeLcuRaw({"/lol-x": '{"ok": 1}'})
+        a.server = FakeServer()
+        n = await a._probe_once()
+        return n, a.server.posts
+
+    n, posts = asyncio.run(run())
+    assert n == 1
+    assert posts == [("/probe/result",
+                      {"id": 7, "http_status": 200, "response": '{"ok": 1}'})]
+
+
+def test_own_slice_picks_me_by_puuid():
+    g = {"gameId": 9, "gameMode": "KIWI",
+         "participants": [{"participantId": 1, "championId": 45},
+                          {"participantId": 2, "championId": 99}],
+         "participantIdentities": [
+             {"participantId": 1, "player": {"puuid": U1}},
+             {"participantId": 2, "player": {"puuid": MY}}]}
+    out = ag.Agent.own_slice(g, MY)
+    assert [p["championId"] for p in out["participants"]] == [99]
+    assert out["participantIdentities"][0]["player"]["puuid"] == MY
+    assert g["participants"][0]["championId"] == 45  # oryginal nietkniety
+    assert ag.Agent.own_slice(g, "nie-ma-mnie") is None
+
+
+def test_recover_once_slims_and_posts():
+    async def run():
+        a = ag.Agent({"api_base": "http://backend"})
+        a.session = FakeGetSession([{"game_ids": [9]}])
+        a.lcu = FakeLcuRaw({
+            "/lol-summoner/v1/current-summoner": {"puuid": MY},
+            "/lol-match-history/v1/games/9": {
+                "gameId": 9,
+                "participants": [{"participantId": 2, "championId": 99}],
+                "participantIdentities": [
+                    {"participantId": 2, "player": {"puuid": MY}}]},
+        })
+        a.server = FakeServer()
+        ok = await a._recover_once()
+        return ok, a.server.posts
+
+    ok, posts = asyncio.run(run())
+    assert ok is True
+    path, payload = posts[0]
+    assert path == "/history/lcu"
+    assert payload["games"][0]["gameId"] == 9
+    assert len(payload["games"][0]["participants"]) == 1
+
+
 # ---------- ocena ----------
 
 def test_submit_grade_ignores_entries_without_grade():

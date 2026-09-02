@@ -257,6 +257,8 @@ class Agent:
         self._eog_task = None      # biezacy epizod lapania ekranu koncowego
         self._grade_done = True    # False tylko w trakcie epizodu
         self._eog_done = True
+        self._sb_idle = False      # czy zalogowano juz pusta kolejke snowballa
+        self._my_puuid = None
 
     # ---------- akcje ----------
 
@@ -469,7 +471,14 @@ class Agent:
                 data = await nxt.json()
                 puuids = data.get("puuids") or []
                 if not puuids:
+                    # pusta kolejka mylila sie z awaria (przypadek 2.09) -
+                    # jeden log na przejscie w bezczynnosc, nie co minute
+                    if not self._sb_idle:
+                        self._sb_idle = True
+                        log("snowball: kolejka pusta - rejestr swiezy, "
+                            "wroce po oknie rewizyty", "dim")
                     continue
+                self._sb_idle = False
                 pu = puuids[0]
                 h = await self.lcu.get(
                     f"/lol-match-history/v1/products/lol/{pu}/matches"
@@ -490,6 +499,98 @@ class Agent:
                             "wszystkie juz w bazie (dedup)", "dim")
             except Exception as e:
                 log(f"snowball: {type(e).__name__}: {e}", "dim")
+
+    # ---------- konsola LCU (42) + odzysk gier (P6) ----------
+
+    async def _probe_once(self):
+        """Jeden obieg konsoli: pobierz zlecone sondy, wykonaj surowe GET-y,
+        odloz wyniki. Wylacznie odczyty z LCU."""
+        r = await self.session.get(
+            self.cfg["api_base"] + "/probe/pending",
+            timeout=aiohttp.ClientTimeout(total=10))
+        probes = (await r.json()).get("probes") or []
+        for p in probes:
+            status, body = await self.lcu.get_raw(p["path"], timeout=15)
+            await self.server.post("/probe/result", {
+                "id": p["id"], "http_status": status,
+                "response": body if isinstance(body, str) else str(body)})
+            log(f"sonda LCU #{p['id']}: {p['path']} -> HTTP {status}", "dim")
+        return len(probes)
+
+    async def probe_loop(self):
+        """(42) Konsola LCU z UI. Sondy sa rzadkie - pusty obieg to jeden
+        lekki GET do wlasnego backendu co 3 s, wylacznie przy zywym kliencie."""
+        while True:
+            await asyncio.sleep(3)
+            try:
+                if self.lcu.port:
+                    await self._probe_once()
+            except Exception as e:
+                log(f"sonda LCU: {type(e).__name__}: {e}", "dim")
+
+    @staticmethod
+    def own_slice(g, my_puuid):
+        """Pelna gra po ID ma 10 uczestnikow, a save_lcu_game na serwerze
+        rozumie historie jednoosobowa - przycinamy do wlasnego uczestnika
+        po puuid z participantIdentities. None = nie moja gra/brak danych."""
+        pid = None
+        idents = g.get("participantIdentities") or []
+        for i in idents:
+            if (i.get("player") or {}).get("puuid") == my_puuid:
+                pid = i.get("participantId")
+                break
+        if pid is None:
+            return None
+        part = next((p for p in (g.get("participants") or [])
+                     if p.get("participantId") == pid), None)
+        if part is None:
+            return None
+        out = dict(g)
+        out["participants"] = [part]
+        out["participantIdentities"] = [i for i in idents
+                                       if i.get("participantId") == pid]
+        return out
+
+    async def _recover_once(self):
+        """Jedna proba odzysku: najnowsza znana gra bez statystyk, pobrana
+        w komplecie po ID i przycieta do wlasnego uczestnika."""
+        r = await self.session.get(
+            self.cfg["api_base"] + "/history/missing?limit=1",
+            timeout=aiohttp.ClientTimeout(total=15))
+        gids = (await r.json()).get("game_ids") or []
+        if not gids:
+            return False
+        gid = gids[0]
+        if not getattr(self, "_my_puuid", None):
+            me = await self.lcu.get("/lol-summoner/v1/current-summoner") or {}
+            self._my_puuid = me.get("puuid")
+        if not self._my_puuid:
+            return False
+        g = await self.lcu.get(f"/lol-match-history/v1/games/{gid}", timeout=20)
+        if not g:
+            log(f"odzysk gry {gid}: LCU nie oddal danych", "dim")
+            return False
+        slim = self.own_slice(g, self._my_puuid)
+        if slim is None:
+            log(f"odzysk gry {gid}: brak wlasnego uczestnika", "warn")
+            return False
+        r2 = await self.server.post("/history/lcu", {"games": [slim]})
+        if r2 is not None:
+            log(f"odzysk gry {gid}: zapisano ({r2.get('new', 0)} nowych)", "ok")
+        return True
+
+    async def recover_loop(self):
+        """(P6) Gry przeoczone przez okno 20 historii (agent nie dzialal)
+        sa pobieralne po ID dowolnie staro. Jedna gra na obieg, tylko przy
+        bezczynnym kliencie - jak snowball."""
+        while True:
+            await asyncio.sleep(120)
+            try:
+                if (not self.lcu.port or self.in_game or self.last_pool_key):
+                    continue
+                await self._recover_once()
+            except Exception as e:
+                log(f"odzysk gier: {type(e).__name__}: {e}", "dim")
 
     async def snowball_probe(self):
         """Jednorazowa sonda pod snowball: czy /lol-match-history dziala dla
@@ -935,6 +1036,8 @@ class Agent:
             asyncio.create_task(self.poll_loop())
             asyncio.create_task(self.snowball_loop())
             asyncio.create_task(self.live_loop())
+            asyncio.create_task(self.probe_loop())
+            asyncio.create_task(self.recover_loop())
 
             while True:
                 port, pw = self.lcu.read_lockfile()

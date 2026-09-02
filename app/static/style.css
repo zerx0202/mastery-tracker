@@ -227,3 +227,10 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
 .patch-link{color:inherit;text-decoration:underline dotted;text-underline-offset:3px}
 .patch-link:hover{color:var(--gold)}
 .who .patch-link{font:500 11px/1 var(--mono);color:var(--dim);margin-left:6px}
+
+/* (42) konsola LCU w Systemie */
+#v-system input,#v-system button{background:var(--panel2);border:1px solid var(--line);
+  color:var(--txt);padding:8px 10px;border-radius:6px;font:13px var(--mono)}
+#v-system button{cursor:pointer}
+#v-system button:hover{border-color:var(--gold)}
+#probe-out{background:var(--panel2);border-radius:6px;padding:10px;color:var(--dim)}

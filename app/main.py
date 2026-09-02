@@ -786,6 +786,49 @@ async def get_balance():
     return db.get_json_setting("mayhem_balance") or {}
 
 
+@write_api.post("/probe")
+async def probe_create(payload: dict):
+    """(42) Konsola LCU: zlecenie surowego GET-a do klienta gry. Wykonuje
+    agent przy najblizszym obiegu (~3 s); tu tylko kolejka. Wylacznie
+    odczyty - zadnych zapisow do LCU."""
+    path = str(payload.get("path") or "").strip()
+    if not path.startswith("/") or ".." in path or len(path) > 300:
+        raise HTTPException(400, "sciezka musi byc absolutna w obrebie LCU")
+    pid = await asyncio.to_thread(db.probe_create, path, int(time.time()))
+    return {"id": pid}
+
+
+@api.get("/probe/pending")
+async def probe_pending():
+    """Agent odpytuje to w petli - zwraca niewykonane sondy."""
+    return {"probes": await asyncio.to_thread(db.probe_pending)}
+
+
+@write_api.post("/probe/result")
+async def probe_result(payload: dict):
+    pid = payload.get("id")
+    if not isinstance(pid, int):
+        raise HTTPException(400, "brak id sondy")
+    await asyncio.to_thread(db.probe_answer, pid, payload.get("http_status"),
+                            str(payload.get("response") or ""), int(time.time()))
+    return {"stored": True}
+
+
+@api.get("/probe/{pid}")
+async def probe_read(pid: int):
+    r = await asyncio.to_thread(db.probe_get, pid)
+    if not r:
+        raise HTTPException(404, "nie ma takiej sondy")
+    return r
+
+
+@api.get("/history/missing")
+async def history_missing(limit: int = 10):
+    """(P6) Znane gry bez statystyk w match_player - agent dociaga je
+    pojedynczo po ID przy bezczynnym kliencie."""
+    return {"game_ids": await asyncio.to_thread(db.missing_own_games, limit)}
+
+
 @write_api.post("/backup/report")
 async def backup_report(payload: dict):
     """(P5) backup-server na Macu melduje tu wynik backupu. Dashboard

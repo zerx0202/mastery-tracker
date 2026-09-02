@@ -772,7 +772,8 @@ async function renderSystem() {
   // (P8) potok: kazda niezerowa liczba to przeciek ktoregos kanalu
   const PIPE_PL = {orphan_grades: "Oceny bez meczu",
     eog_no_participants: "Ekrany bez tożsamości",
-    stale_pools: "Pule bez meczu >24 h"};
+    stale_pools: "Pule bez meczu >24 h",
+    missing_games: "Gry bez statystyk (agent odzyska)"};
   const pipe = Object.entries(d.pipeline || {}).map(([k, n]) =>
     `<div class="kv"><span>${PIPE_PL[k] || k}</span>
      <span style="color:${n ? "var(--warn)" : "var(--ok)"}">${n}</span></div>`).join("");
@@ -814,7 +815,59 @@ async function renderSystem() {
     <div class="panel" style="margin-top:16px">
       <div class="eyebrow">Dziennik zdarzeń</div>
       <table><tbody>${events}</tbody></table>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <div class="eyebrow">Konsola LCU</div>
+      <div class="sub" style="margin-bottom:10px">Surowy GET do klienta gry —
+        wykonuje agent przy najbliższym obiegu (~3 s), wyłącznie odczyty.
+        Token zapisu ten sam co w agencie.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="probe-token" type="password" placeholder="X-API-Token"
+          style="width:170px">
+        <input id="probe-path" placeholder="/lol-summoner/v1/current-summoner"
+          style="flex:1;min-width:240px">
+        <button id="probe-run">Wyślij</button>
+      </div>
+      <pre id="probe-out" style="white-space:pre-wrap;max-height:320px;
+        overflow:auto;margin-top:10px;font-size:12px"></pre>
     </div>`;
+
+  // (42) konsola: zlecenie -> agent wykonuje -> odpytujemy wynik
+  try { $("probe-token").value = localStorage.getItem("api_token") || ""; }
+  catch (e) {}
+  $("probe-run").addEventListener("click", async () => {
+    const out = $("probe-out");
+    const path = $("probe-path").value.trim();
+    if (!path) return;
+    try { localStorage.setItem("api_token", $("probe-token").value); }
+    catch (e) {}
+    out.textContent = "zlecam…";
+    let created;
+    try {
+      const r = await fetch("/api/probe", {method: "POST",
+        headers: {"Content-Type": "application/json",
+                  "X-API-Token": $("probe-token").value},
+        body: JSON.stringify({path})});
+      created = await r.json();
+      if (!r.ok) throw new Error(created.detail || ("HTTP " + r.status));
+    } catch (e) { out.textContent = "błąd zlecenia: " + e.message; return; }
+    const t0 = Date.now();
+    while (Date.now() - t0 < 30000) {
+      await new Promise(res => setTimeout(res, 1000));
+      let p;
+      try { p = await api("/probe/" + created.id); } catch (e) { continue; }
+      if (p.answered_at) {
+        let body = p.response || "";
+        try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) {}
+        out.textContent = `HTTP ${p.http_status}${
+          p.truncated ? " (odpowiedź przycięta)" : ""}\n${body}`;
+        return;
+      }
+      out.textContent = `czekam na agenta… ${
+        Math.round((Date.now() - t0) / 1000)} s`;
+    }
+    out.textContent = "agent nie odpowiedział w 30 s — klient wyłączony?";
+  });
 }
 
 /* ---------- routing ---------- */

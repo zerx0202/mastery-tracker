@@ -1537,7 +1537,9 @@ def pipeline_sanity():
             "WHERE match_id IS NULL AND ts < ?", (cutoff,)).fetchone()["c"]
     return {"orphan_grades": orphan_grades,
             "eog_no_participants": eog_no_participants,
-            "stale_pools": stale_pools}
+            "stale_pools": stale_pools,
+            # (P6) odzyskiwalne przez agenta - niezerowe topnieje samo
+            "missing_games": len(missing_own_games(1000))}
 
 
 def model_status(min_games=40):
@@ -1959,6 +1961,92 @@ def init_predictions():
     powstawala leniwie przy pierwszym zapisie, jako jedyna poza migrate()."""
     with connect() as con:
         con.executescript(PRED_SCHEMA)
+
+
+# ============================================================
+#  Konsola LCU (karta 42) + odzysk gier po ID (P6)
+# ============================================================
+#
+# LCU widzi tylko agent na Windows, a sondy chce sie zlecac z UI - stad
+# kolejka w bazie: UI tworzy zlecenie, agent odpytuje /probe/pending co
+# pare sekund, wykonuje surowy GET i odklada wynik. WYLACZNIE odczyty -
+# zadnych zapisow do LCU (decyzja: zero automatyzacji picków).
+
+PROBE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS lcu_probe (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    path         TEXT NOT NULL,
+    requested_at INTEGER NOT NULL,
+    answered_at  INTEGER,
+    http_status  INTEGER,
+    response     TEXT,
+    truncated    INTEGER DEFAULT 0
+);
+"""
+
+PROBE_KEEP = 50            # sondy to narzedzie diagnostyczne, nie archiwum
+PROBE_MAX_RESPONSE = 100_000
+
+
+def init_probe():
+    with connect() as con:
+        con.executescript(PROBE_SCHEMA)
+
+
+def probe_create(path, ts):
+    with connect() as con:
+        pid = con.execute(
+            "INSERT INTO lcu_probe (path, requested_at) VALUES (?,?)",
+            (path, ts)).lastrowid
+        con.execute(
+            "DELETE FROM lcu_probe WHERE id NOT IN "
+            "(SELECT id FROM lcu_probe ORDER BY id DESC LIMIT ?)",
+            (PROBE_KEEP,))
+    return pid
+
+
+def probe_pending(limit=5):
+    with connect() as con:
+        return [dict(r) for r in con.execute(
+            "SELECT id, path FROM lcu_probe WHERE answered_at IS NULL "
+            "ORDER BY id ASC LIMIT ?", (limit,))]
+
+
+def probe_answer(pid, http_status, response, ts):
+    truncated = 0
+    if response and len(response) > PROBE_MAX_RESPONSE:
+        response = response[:PROBE_MAX_RESPONSE]
+        truncated = 1
+    with connect() as con:
+        con.execute(
+            "UPDATE lcu_probe SET answered_at=?, http_status=?, response=?, "
+            "truncated=? WHERE id=?", (ts, http_status, response, truncated, pid))
+
+
+def probe_get(pid):
+    with connect() as con:
+        r = con.execute("SELECT * FROM lcu_probe WHERE id=?", (pid,)).fetchone()
+    return dict(r) if r else None
+
+
+def missing_own_games(limit=10):
+    """(P6) Gry, o ktorych system wie (eog, ocena albo domknieta pula),
+    a nie maja statystyk w match_player - okno 20 historii LCU je
+    przeoczylo, bo agent nie dzialal. Pojedyncza gre da sie pobrac po ID
+    w komplecie, dowolnie stara (README) - agent dociaga je z tej listy."""
+    with connect() as con:
+        return [r["gid"] for r in con.execute("""
+            SELECT DISTINCT gid FROM (
+                SELECT game_id AS gid, match_id AS mid FROM eog_raw
+                UNION
+                SELECT game_id, match_id FROM grade_observation
+                UNION
+                SELECT CAST(substr(match_id, instr(match_id, '_') + 1) AS INTEGER),
+                       match_id
+                FROM champ_select_pool WHERE match_id IS NOT NULL
+            )
+            WHERE mid NOT IN (SELECT match_id FROM match_player)
+            ORDER BY gid DESC LIMIT ?""", (limit,))]
 
 
 # ============================================================
