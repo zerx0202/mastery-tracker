@@ -11,6 +11,7 @@ agent/lcu-game.json
 # python
 __pycache__/
 *.pyc
+.venv/
 
 # certyfikaty
 *.crt

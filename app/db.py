@@ -800,6 +800,76 @@ def eog_stats():
             "compressed_bytes": size}
 
 
+# ---------- tozsamosci graczy (karta 9) ----------
+#
+# flatten_eog_stats odrzuca pola nienumeryczne, wiec puuid ginal przy
+# splaszczaniu - lacze match_id -> puuid zylo tylko w blobach eog_raw.
+# Ta tabela utrwala je pod ta sama numeracja slotow co player_stat
+# (kolejnosc druzyn i graczy w bloku), zeby JOIN byl trywialny.
+
+MATCH_PARTICIPANT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS match_participant (
+    match_id       TEXT NOT NULL,
+    participant_no INTEGER NOT NULL,
+    puuid          TEXT NOT NULL,
+    team_id        INTEGER,
+    PRIMARY KEY (match_id, participant_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mpart_puuid ON match_participant(puuid);
+"""
+
+
+def init_match_participant():
+    with connect() as con:
+        con.executescript(MATCH_PARTICIPANT_SCHEMA)
+
+
+def save_match_participants(block, match_id):
+    """Tozsamosci graczy z bloku eog -> match_participant. Gracz bez puuid
+    (np. bot) nie dostaje wiersza, ale zajmuje slot - numeracja musi zostac
+    zgodna z player_stat. Zwraca liczbe zapisanych wierszy."""
+    rows = []
+    n = 0
+    for team in block.get("teams") or []:
+        team_id = team.get("teamId")
+        for p in team.get("players") or []:
+            n += 1
+            puuid = p.get("puuid")
+            if not puuid:
+                continue
+            rows.append({"match_id": match_id, "participant_no": n,
+                         "puuid": puuid, "team_id": team_id})
+    if not rows:
+        return 0
+    with connect() as con:
+        con.execute("DELETE FROM match_participant WHERE match_id=?", (match_id,))
+        con.executemany(
+            "INSERT INTO match_participant "
+            "(match_id, participant_no, puuid, team_id) "
+            "VALUES (:match_id, :participant_no, :puuid, :team_id)", rows)
+    return len(rows)
+
+
+def backfill_participants_from_eog():
+    """Odzyskuje tozsamosci z zachowanych blobow eog_raw - gry sprzed
+    patcha, w ktorych lacze zginelo przy splaszczaniu. Idempotentne:
+    save_match_participants nadpisuje wiersze meczu w calosci."""
+    with connect() as con:
+        mids = [r["match_id"] for r in con.execute("SELECT match_id FROM eog_raw")]
+    filled = empty = rows = 0
+    for mid in mids:
+        n = save_match_participants(load_eog(mid) or {}, mid)
+        rows += n
+        if n:
+            filled += 1
+        else:
+            empty += 1
+    out = {"blobs": len(mids), "filled": filled, "empty": empty, "rows": rows}
+    log_event("participant_backfill", out)
+    return out
+
+
 # ============================================================
 #  Splity, ustawienia, log zdarzen
 # ============================================================

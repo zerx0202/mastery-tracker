@@ -668,8 +668,11 @@ async def push_eog(payload: dict):
         match_id = f"{PLATFORM.upper()}_{gid}" if gid else None
         stats_rows = 0
         pool_id = None
+        participants = 0
         if match_id:
             stats_rows = await asyncio.to_thread(db.flatten_eog_stats, block, match_id)
+            participants = await asyncio.to_thread(
+                db.save_match_participants, block, match_id)
             me = db._find_local_player(block)
             reroll = (block.get("rerollData") or {}).get("rerollCount")
             pool_id = await asyncio.to_thread(
@@ -679,8 +682,10 @@ async def push_eog(payload: dict):
                 reroll, ts)
 
         await asyncio.to_thread(db.log_event, "eog", {
-            "new": new, "stats_rows": stats_rows, "pool_id": pool_id}, ts)
-        return {"stored": True, "new": new, "stats_rows": stats_rows, "pool_id": pool_id}
+            "new": new, "stats_rows": stats_rows, "pool_id": pool_id,
+            "participants": participants}, ts)
+        return {"stored": True, "new": new, "stats_rows": stats_rows,
+                "pool_id": pool_id, "participants": participants}
     except Exception as e:
         return {"stored": False, "errors": [f"{type(e).__name__}: {e}"]}
 
@@ -732,6 +737,13 @@ async def stats_share(match_id: str, stat_key: str):
 async def grades_backfill(window: int = 7200):
     """Odzyskuje oceny z historii snapshotow. Bezpieczne do powtarzania."""
     return await asyncio.to_thread(db.backfill_grades_from_snapshots, window)
+
+
+@write_api.post("/participants/backfill")
+async def participants_backfill():
+    """(karta 9) Tozsamosci graczy z zachowanych blobow eog_raw.
+    Bezpieczne do powtarzania."""
+    return await asyncio.to_thread(db.backfill_participants_from_eog)
 
 
 @api.get("/model/status")
