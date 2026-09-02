@@ -374,7 +374,11 @@ async def push_lobby(payload: dict):
         pool_id = await asyncio.to_thread(
             db.save_pool, ids, payload.get("queue"), payload.get("queue_id"),
             payload.get("pool_kind"), ts, trade)
-        if pool_id:
+        # agent wysyla kazda rotacje z lawka (ta sama unia -> ten sam pool_id);
+        # event i predykcje sa per pula, nie per rotacja - inaczej event_log
+        # puchnie, a predykcje sa liczone w kolko dla identycznych ids
+        if pool_id and pool_id != state.get("last_pool_id"):
+            state["last_pool_id"] = pool_id
             await asyncio.to_thread(db.log_event, "champ_select",
                                     {"pool_id": pool_id, "size": len(ids),
                                      "queue": payload.get("queue")}, ts)

@@ -1058,11 +1058,19 @@ def save_pool(champion_ids, queue, queue_id, pool_kind, ts, trade_ids=None):
     if not champion_ids:
         return None
     ids_json = json.dumps(sorted(champion_ids))
+    trade_json = json.dumps(sorted(trade_ids or []))
     with connect() as con:
         last = con.execute(
-            "SELECT id, champion_ids FROM champ_select_pool "
+            "SELECT id, champion_ids, trade_ids FROM champ_select_pool "
             "WHERE match_id IS NULL ORDER BY ts DESC LIMIT 1").fetchone()
         if last and last["champion_ids"] == ids_json:
+            # rotacja z lawka: unia bez zmian, przydzial inny - wiersz zostaje
+            # ten sam, ale trade_ids musi dogonic stan; inaczej historia puli
+            # mrozi sie na poczatku lobby, mimo ze lobby/UI dostaje swieze
+            # plakietki (agent od 7573bde wysyla kazda rotacje)
+            if last["trade_ids"] != trade_json:
+                con.execute("UPDATE champ_select_pool SET trade_ids=? WHERE id=?",
+                            (trade_json, last["id"]))
             return last["id"]
         return con.execute("""
             INSERT INTO champ_select_pool
@@ -1072,7 +1080,7 @@ def save_pool(champion_ids, queue, queue_id, pool_kind, ts, trade_ids=None):
         """, {"ts": ts, "queue": queue, "queue_id": queue_id, "pool_kind": pool_kind,
               "ids": ids_json, "size": len(champion_ids),
               "split": current_split_id(),
-              "trade": json.dumps(sorted(trade_ids or []))}).lastrowid
+              "trade": trade_json}).lastrowid
 
 
 def link_pool_to_match(match_id, champion_id, reroll_count, ts, max_age=14400):

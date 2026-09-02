@@ -15,6 +15,37 @@ def test_trade_ids_roundtrip(fresh_db):
     assert row["trade_ids"] == "[3]"
 
 
+def test_pool_rotation_updates_trade_ids(fresh_db):
+    """Rotacja z lawka: ta sama unia -> ten sam wiersz, ale trade_ids dogania
+    stan. Po zlinkowaniu z meczem ta sama unia to juz nowa pula."""
+    pid = db.save_pool([1, 2, 3], "KIWI", 2400, "limited", 100, trade_ids=[3])
+    assert db.save_pool([1, 2, 3], "KIWI", 2400, "limited", 105, trade_ids=[2]) == pid
+    with db.connect() as con:
+        row = con.execute("SELECT trade_ids, ts FROM champ_select_pool WHERE id=?",
+                          (pid,)).fetchone()
+    assert row["trade_ids"] == "[2]"
+    assert row["ts"] == 100                       # ts pierwszego stanu zostaje
+    db.link_pool_to_match("EUW1_1", 2, 0, 200)
+    assert db.save_pool([1, 2, 3], "KIWI", 2400, "limited", 300, trade_ids=[2]) != pid
+
+
+def test_push_lobby_logs_event_once_per_pool(fresh_db):
+    """Rotacje trafiaja na ten sam pool_id -> jeden event champ_select na pule,
+    nie na kazdy POST; nowa unia = nowa pula = nowy event."""
+    from fastapi.testclient import TestClient
+    from app.main import app, state
+    state.pop("last_pool_id", None)
+    client = TestClient(app)
+    body = {"champion_ids": [1, 2, 3], "trade_ids": [3], "queue": "KIWI",
+            "pool_kind": "limited", "queue_id": 2400}
+    first = client.post("/api/lobby", json=body).json()["pool_id"]
+    assert client.post("/api/lobby", json={**body, "trade_ids": [2]}).json()["pool_id"] == first
+    assert len(db.recent_events(kind="champ_select")) == 1
+    assert db.get_lobby()["trade_ids"] == [2]          # UI dostaje swiezy stan
+    client.post("/api/lobby", json={**body, "champion_ids": [1, 2, 3, 4]})
+    assert len(db.recent_events(kind="champ_select")) == 2
+
+
 def test_median_final_pool_size(fresh_db):
     assert db.median_final_pool_size() == 11          # pusta baza -> stala
     db.save_pool(list(range(1, 4)), "KIWI", 2400, "limited", 10)   # stan czesciowy

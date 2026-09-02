@@ -582,13 +582,19 @@ class Agent:
         # unii puli (X do gracza, Y na lawke), zmienia tylko przydzial -
         # bez tego dedup polykal aktualizacje i plakietki "wymiana"
         # zamarzaly na stanie z poczatku lobby (zgloszenie 1.09)
-        key = (f"{mode}|{pool_kind}|" + ",".join(map(str, ids))
-               + "|t:" + ",".join(map(str, sorted(set(trade_ids)))))
+        ids_key = f"{mode}|{pool_kind}|" + ",".join(map(str, ids)) + "|t:"
+        key = ids_key + ",".join(map(str, sorted(set(trade_ids))))
         if key == self.last_pool_key:
             return
+        # ta sama unia, inny przydzial = rotacja; "|t:" konczy prefiks, wiec
+        # startswith nie pomyli "1,2|t:" z "1,23|t:"
+        rotation = bool(self.last_pool_key) and self.last_pool_key.startswith(ids_key)
         self.last_pool_key = key
         await self.send_pool(ids, mode, pool_kind, queue_id, trade_ids)
-        log(f"[{mode} q={queue_id}/{pool_kind}] wyslano {len(ids)} championow", "ok")
+        if rotation:
+            log(f"[{mode}] rotacja z lawka: {len(trade_ids)} do wymiany", "dim")
+        else:
+            log(f"[{mode} q={queue_id}/{pool_kind}] wyslano {len(ids)} championow", "ok")
 
         # snapshot PRZED gra - raz na champ select
         if not self.pre_snapshot_done:
