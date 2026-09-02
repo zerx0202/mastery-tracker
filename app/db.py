@@ -207,6 +207,15 @@ def champion_count():
         return con.execute("SELECT COUNT(*) c FROM champion").fetchone()["c"]
 
 
+def champion_key(champion_id):
+    """Klucz Data Dragona (np. MonkeyKing dla Wukonga) - takze slug
+    stron buildow arammayhem po zlowercase'owaniu."""
+    with connect() as con:
+        r = con.execute("SELECT key FROM champion WHERE id=?",
+                        (champion_id,)).fetchone()
+    return r["key"] if r else None
+
+
 # ---------- drabinka milestone ----------
 
 def learn_ladder(entries, ts):

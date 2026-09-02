@@ -14,12 +14,17 @@ bez procentu). Champion bez modyfikatorow nie wystepuje na liscie.
 """
 # alias: parametry funkcji nazywaja sie `html` i przeslonilyby modul
 import html as _html
+import json
 import re
 import time
 
 from . import db
 
 BALANCE_URL = "https://arammayhem.com/aram-balance/"
+
+# (49) Strona buildu championa - slug to klucz Data Dragona lowercase
+# (zweryfikowane: monkeyking 200, wukong 404; nunu, drmundo, kogmaw 200).
+BUILD_URL = "https://arammayhem.com/build/{slug}/"
 
 # Ponizej tylu sparsowanych championow uznajemy fetch za uszkodzony
 # (przebudowa strony, blokada) i NIE nadpisujemy ostatnich dobrych danych.
@@ -48,6 +53,54 @@ def parse_balance(html):
 
 def _norm(x):
     return re.sub(r"[^a-z0-9]", "", (x or "").lower())
+
+
+# ---------- (49) sciaga-z-danych per champion ----------
+#
+# Zamiast tekstu mocnych/slabych stron (nie istnieje w zadnym zrodle)
+# strona buildu daje dane: tier + winrate (meta description), ranking
+# augmentow (JSON-LD ItemList - warstwa semantyczna, stabilniejsza niz
+# tailwindowy markup) i sekwencje skilli (tekst "Skill Sequence: ...").
+# Ta sama decyzja graniczna co przy mnoznikach: WYLACZNIE wyswietlanie.
+
+_DESC_RE = re.compile(
+    r'name="description" content="[^"]*?Patch ([\d.]+):[^"]*?'
+    r'([A-Z][+-]?) tier with ([\d.]+)% win rate')
+_LD_AUG_RE = re.compile(
+    r'<script type="application/ld\+json">'
+    r'(\{"@context":"https://schema\.org","@type":"ItemList",'
+    r'"name":"Best Augments for [^<]*?\})</script>')
+_SKILL_RE = re.compile(r"Skill Sequence: ((?:[QWER] )+[QWER])")
+
+
+def parse_build(html):
+    """HTML strony buildu -> {tier, win_rate, site_patch, augments,
+    skill_sequence, skill_priority}. Puste {} = strona nie do odczytania
+    (przebudowa) - caller trzyma to jako nieudany fetch, nie sciagawke."""
+    out = {}
+    m = _DESC_RE.search(html)
+    if m:
+        out["site_patch"] = m.group(1)
+        out["tier"] = m.group(2)
+        out["win_rate"] = float(m.group(3))
+    m = _LD_AUG_RE.search(html)
+    if m:
+        try:
+            items = json.loads(m.group(1)).get("itemListElement") or []
+            names = [i.get("name") for i in items if i.get("name")]
+            if names:
+                out["augments"] = names[:10]
+        except ValueError:
+            pass
+    m = _SKILL_RE.search(html)
+    if m:
+        seq = m.group(1).split()
+        out["skill_sequence"] = " ".join(seq)
+        basics = [s for s in "QWE" if s in seq]
+        # priorytet maksowania: liczba punktow malejaco, remis = wczesniejszy
+        basics.sort(key=lambda s: (-seq.count(s), seq.index(s)))
+        out["skill_priority"] = " > ".join(basics)
+    return out
 
 
 def store_balance(html, ts=None):

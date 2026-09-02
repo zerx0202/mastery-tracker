@@ -65,6 +65,14 @@ def _seed():
         "name": "Season 3: Act I", "days_left": 21.5,
         "progress": {"level": 3, "totalLevels": 20},
         "unclaimed": {"rewardsCount": 0}}]})
+    # (49) sciaga z cache (patch "16.16" = seed); sam wiersz live siejemy
+    # dopiero PO starcie serwera - lifespan robi migrate(), a init_live
+    # celowo DROP-uje live_game
+    db.set_json_setting("cheatsheet", {"99": {
+        "champion_id": 99, "patch": "16.16", "fetched_at": now, "ok": True,
+        "tier": "A", "win_rate": 51.2,
+        "augments": ["Eureka", "High Roller", "Recursion"],
+        "skill_sequence": "Q W E Q Q R", "skill_priority": "Q > E > W"}})
     with db.connect() as con:
         insert_row(con, "match_player", match_id="EUW1_500", game_mode="KIWI",
                    queue_id=2400, duration=1200,
@@ -95,6 +103,10 @@ def ui_server(fresh_db, monkeypatch):
             pytest.fail("uvicorn nie wstal w 15 s")
         time.sleep(0.05)
     port = server.servers[0].sockets[0].getsockname()[1]
+    db.set_live({"champion_id": 99, "champion": "Lux", "game_mode": "KIWI",
+                 "game_time": 300.0, "kills": 2, "deaths": 0, "assists": 3,
+                 "cs": 20, "ward_score": 0.0, "gold_est": 2500, "level": 6,
+                 "payload": "{}", "updated_at": int(time.time())})
     yield f"http://127.0.0.1:{port}"
     server.should_exit = True
     thread.join(timeout=10)
@@ -158,6 +170,15 @@ def test_hero_shows_mayhem_balance_line(page):
     txt = line.inner_text()
     assert "obrażenia" in txt or "leczenie" in txt
     assert "%" in txt
+
+
+def test_live_panel_shows_cheatsheet(page):
+    # (49) sciaga granego championa w panelu live: tier, skille, augmenty
+    panel = page.wait_for_selector('#live-panel .kv:has-text("Mayhem tier")')
+    assert "51.2% WR" in panel.inner_text()
+    page.wait_for_selector('#live-panel .kv:has-text("Q > E > W")')
+    aug = page.wait_for_selector('#live-panel .kv:has-text("Top augmenty")')
+    assert "Eureka" in aug.inner_text()
 
 
 def test_system_shows_gates_and_pipeline(page):

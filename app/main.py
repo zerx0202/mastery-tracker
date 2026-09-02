@@ -829,6 +829,58 @@ async def history_missing(limit: int = 10):
     return {"game_ids": await asyncio.to_thread(db.missing_own_games, limit)}
 
 
+# (49) blokada per champion - dwa rownolegle GET-y (hero + live) nie moga
+# fetchowac tej samej strony dwa razy
+_CHEAT_LOCKS = {}
+
+
+@api.get("/cheatsheet/{champion_id}")
+async def cheatsheet(champion_id: int):
+    """(49) Sciaga-z-danych granego championa: tier, winrate, priorytet
+    skilli i top augmenty ze strony buildu arammayhem. Lazy fetch przy
+    pierwszym zapytaniu, cache per champion per patch w settings; nieudany
+    fetch ponawiany najwczesniej po godzinie. Zrodlo WYLACZNIE do
+    wyswietlania - jak mnozniki balansu."""
+    short = patch_meta()["short"]
+
+    def fresh(ent):
+        return (ent and ent.get("patch") == short
+                and (ent.get("ok")
+                     or time.time() - ent.get("fetched_at", 0) < 3600))
+
+    store = db.get_json_setting("cheatsheet") or {}
+    ent = store.get(str(champion_id))
+    if fresh(ent):
+        return ent
+
+    key = await asyncio.to_thread(db.champion_key, champion_id)
+    if not key:
+        raise HTTPException(404, "nieznany champion")
+
+    lock = _CHEAT_LOCKS.setdefault(champion_id, asyncio.Lock())
+    async with lock:
+        store = db.get_json_setting("cheatsheet") or {}
+        ent = store.get(str(champion_id))
+        if fresh(ent):
+            return ent
+        ent = {"champion_id": champion_id, "patch": short,
+               "fetched_at": int(time.time()), "ok": False}
+        try:
+            r = await state["plain"].get(
+                balance.BUILD_URL.format(slug=key.lower()),
+                follow_redirects=True)
+            if r.status_code == 200:
+                data = balance.parse_build(r.text)
+                if data:
+                    ent.update(data)
+                    ent["ok"] = True
+        except Exception:
+            pass
+        store[str(champion_id)] = ent
+        await asyncio.to_thread(db.set_json_setting, "cheatsheet", store)
+        return ent
+
+
 @write_api.post("/backup/report")
 async def backup_report(payload: dict):
     """(P5) backup-server na Macu melduje tu wynik backupu. Dashboard

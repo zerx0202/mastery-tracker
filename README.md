@@ -167,6 +167,12 @@ jako cecha modelu ani normalizator. Obok, przy nazwie championa, link
 „notki" prowadzi do sekcji championa w notkach patcha na wiki (numeracja
 marketingowa = wewnętrzna + 10 na majorze, od rebrandu 2025).
 
+Z tego samego źródła panel live dostaje ściągę granego championa —
+w Mayhemie często gra się postacią trzeci raz w życiu: tier i winrate
+trybu, priorytet skilli (wyliczony z sekwencji) i top augmenty. Fetch
+leniwy przy pierwszym zapytaniu, cache per champion per patch, nieudane
+pobrania ponawiane najwcześniej po godzinie.
+
 ## Normy: snowball
 
 Serwisy statystyczne jawnie nie mają Mayhema, więc normy per champion są
@@ -254,8 +260,9 @@ log zdarzeń live, snowball z priorytetem znajomych PUUID-ów, odzysk gier
 przeoczonych przez okno historii, predykcje zapisywane przed grą (Brier
 w `/api/predictions/scorecard`), model porządkowy z walidacją LOO i kartą
 wyjaśnień, projekcja misji z symulacji, kafelek przepustek i misji
-z event-hubu, mnożniki balansu trybu przy hero i w panelu live, linki do
-notek patcha, podsumowanie splitu, panel live, kolejka dyskowa w agencie
+z event-hubu, mnożniki balansu trybu przy hero i w panelu live, ściąga
+granego championa (tier, skille, augmenty), linki do notek patcha,
+podsumowanie splitu, panel live, kolejka dyskowa w agencie
 (odporna na odrzuty i kolizje), konsola LCU i liczniki bramek w Systemie,
 backup restic z tygodniową retencją, weryfikacją i meldunkiem wyniku,
 testy + CI + Dependabot.

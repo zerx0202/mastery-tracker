@@ -83,8 +83,33 @@ function balanceLine(mods) {
     Mayhem: ${parts.join(" · ")}</div>`;
 }
 
+/* (49) Sciaga-z-danych granego championa - "grasz ta postacia 3. raz
+   w zyciu": tier, winrate, priorytet skilli, top augmenty. Backend
+   cache'uje per patch; tu tylko pamiec na czas zycia strony (udane
+   odpowiedzi - nieudane sa tanie, backend trzyma negative-cache). */
+const CHEAT = {};
+async function cheatsheet(cid) {
+  if (!cid) return null;
+  if (CHEAT[cid] && CHEAT[cid].ok) return CHEAT[cid];
+  try { CHEAT[cid] = await api("/cheatsheet/" + cid); }
+  catch (e) { return null; }
+  return CHEAT[cid];
+}
+
+function cheatLines(cs) {
+  if (!cs || !cs.ok) return "";
+  const augs = (cs.augments || []).slice(0, 5).map(esc).join(" · ");
+  return `
+    <div class="kv"><span>Mayhem tier</span>
+      <span>${esc(cs.tier || "?")}${cs.win_rate ? ` · ${cs.win_rate}% WR` : ""}</span></div>
+    ${cs.skill_priority ? `<div class="kv"><span>Skille</span>
+      <span class="num" title="${esc(cs.skill_sequence || "")}">${esc(cs.skill_priority)}</span></div>` : ""}
+    ${augs ? `<div class="kv"><span>Top augmenty</span>
+      <span style="font-size:12px;text-align:right;max-width:62%">${augs}</span></div>` : ""}`;
+}
+
 /* ---------- TERAZ ---------- */
-function livePanel(d, bal) {
+function livePanel(d, bal, cheat) {
   const cmp = (key, higher) => {
     const now = d.now[key], ref = (d.reference.hit || {})[key];
     if (ref == null) return {cls: "", note: "brak odniesienia"};
@@ -121,6 +146,7 @@ function livePanel(d, bal) {
     </div>
     ${d.milestone != null ? rail(d.milestone, GOAL, d.need) : ""}
     ${balanceLine(bal && bal[d.champion_id])}
+    ${cheatLines(cheat)}
     <div style="margin-top:14px">${rows}</div>
     <div class="tagline">Złoto liczone z ubytków stanu — obejmuje kowadła
       i mikstury, które znikają z ekwipunku.</div>
@@ -136,7 +162,8 @@ async function renderNow() {
   let live = {active: false};
   try { live = await api("/live"); } catch (e) {}
   const bal = await modeBalance();
-  $("live-panel") && ($("live-panel").innerHTML = live.active ? livePanel(live, bal) : "");
+  const cheat = live.active ? await cheatsheet(live.champion_id) : null;
+  $("live-panel") && ($("live-panel").innerHTML = live.active ? livePanel(live, bal, cheat) : "");
 
   let lobby = {active: false};
   try {
