@@ -32,9 +32,17 @@ def coverage(export, arena):
     return ids, hit, miss, by_id
 
 
+def fetch_arena():
+    # CDN CDragona odrzuca domyslny User-Agent Pythona (403) - kazdy
+    # sensowny wlasny przechodzi
+    req = urllib.request.Request(
+        ARENA_URL, headers={"User-Agent": "mastery-tracker/augment-probe"})
+    return json.loads(urllib.request.urlopen(req, timeout=30).read())
+
+
 def main(path):
     export = json.loads(open(path, encoding="utf-8").read())
-    arena = json.loads(urllib.request.urlopen(ARENA_URL, timeout=30).read())
+    arena = fetch_arena()
     ids, hit, miss, by_id = coverage(export, arena)
     if not ids:
         print("brak augmentow w eksporcie (kolumna eog_raw.augments)")
