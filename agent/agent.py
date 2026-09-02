@@ -298,6 +298,7 @@ class Agent:
         self._sb_idle = False      # czy zalogowano juz pusta kolejke snowballa
         self._my_puuid = None
         self._recover_fails = {}   # gid -> nieudane proby odzysku (A4)
+        self._timeline_fails = {}  # gid -> nieudane proby timeline (C3)
 
     # ---------- akcje ----------
 
@@ -639,16 +640,57 @@ class Agent:
         log(f"odzysk gry {gid}: zapisano ({r2.get('new')} nowych)", "ok")
         return True
 
+    async def _timeline_once(self):
+        """Jedna proba akwizycji timeline (sonda C3: frames dzialaja dla
+        kolejki 2400 takze wstecz). Surowiec w calosci - 10 graczy, bez
+        own_slice (krzywe na tle lobby to istota). POST nie jest DURABLE:
+        timeline w odroznieniu od oceny jest wiecznie odzyskiwalny po ID,
+        wiec porazka zostawia gre na liscie brakujacych zamiast puchnac
+        w kolejce dyskowej. Skip-lista jak w odzysku statystyk (A4)."""
+        r = await self.session.get(
+            self.cfg["api_base"] + "/timelines/missing?limit=5",
+            timeout=aiohttp.ClientTimeout(total=15))
+        gids = (await r.json()).get("game_ids") or []
+        gid = next((g for g in gids
+                    if self._timeline_fails.get(g, 0) < RECOVER_MAX_FAILS), None)
+        if gid is None:
+            return False
+
+        def fail(why, level="dim"):
+            n = self._timeline_fails.get(gid, 0) + 1
+            self._timeline_fails[gid] = n
+            if n >= RECOVER_MAX_FAILS:
+                log(f"timeline gry {gid}: {why} - {n} nieudanych prob, "
+                    "pomijam do restartu agenta", "warn")
+            else:
+                log(f"timeline gry {gid}: {why}", level)
+            return False
+
+        tl = await self.lcu.get(
+            f"/lol-match-history/v1/game-timelines/{gid}", timeout=30)
+        if not isinstance(tl, dict) or not (tl.get("frames") or []):
+            return fail("LCU nie oddal frames")
+        r2 = await self.server.post("/timeline",
+                                    {"game_id": gid, "timeline": tl},
+                                    timeout=60)
+        if not (r2 and r2.get("stored")):
+            return fail("serwer nie zapisal", "warn")
+        self._timeline_fails.pop(gid, None)
+        log(f"timeline gry {gid}: zapisano ({len(tl['frames'])} ramek)", "ok")
+        return True
+
     async def recover_loop(self):
         """(P6) Gry przeoczone przez okno 20 historii (agent nie dzialal)
         sa pobieralne po ID dowolnie staro. Jedna gra na obieg, tylko przy
-        bezczynnym kliencie - jak snowball."""
+        bezczynnym kliencie - jak snowball. Gdy statystyki sa komplet,
+        obieg dociaga zamiast tego jeden timeline (druga reka petli)."""
         while True:
             await asyncio.sleep(120)
             try:
                 if (not self.lcu.port or self.in_game or self.last_pool_key):
                     continue
-                await self._recover_once()
+                if not await self._recover_once():
+                    await self._timeline_once()
             except Exception as e:
                 log(f"odzysk gier: {type(e).__name__}: {e}", "dim")
 

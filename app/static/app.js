@@ -786,7 +786,8 @@ async function renderSystem() {
     model_train: "Trening modelu", split_reset: "Reset splitu",
     grade_backfill: "Odzysk ocen"};
   const NAMES = {match_player: "Mecze", grade_observation: "Oceny",
-    eog_raw: "Ekrany końcowe", champ_select_pool: "Pule z champ selecta",
+    eog_raw: "Ekrany końcowe", match_timeline: "Timeline'y",
+    champ_select_pool: "Pule z champ selecta",
     player_stat: "Wiersze statystyk", snapshot: "Snapshoty"};
 
   // (A6) progi wieku: brak swiezego snapshotu >48 h znaczy, ze dobowy cron
@@ -838,7 +839,8 @@ async function renderSystem() {
     eog_no_participants: "Ekrany bez tożsamości",
     stale_pools: "Pule bez meczu >24 h",
     eog_bez_oceny: "Ekrany BEZ oceny (kanał ocen!)",
-    missing_games: "Gry bez statystyk (agent odzyska)"};
+    missing_games: "Gry bez statystyk (agent odzyska)",
+    timeline_missing: "Gry bez timeline (agent dociąga)"};
   const pipe = Object.entries(d.pipeline || {}).map(([k, n]) =>
     `<div class="kv"><span>${PIPE_PL[k] || k}</span>
      <span style="color:${n ? "var(--warn)" : "var(--ok)"}">${n}</span></div>`).join("");

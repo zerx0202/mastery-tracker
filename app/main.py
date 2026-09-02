@@ -966,6 +966,36 @@ async def history_missing(limit: int = 10):
     return {"game_ids": await asyncio.to_thread(db.missing_own_games, limit)}
 
 
+@api.get("/timelines/missing")
+async def timelines_missing(limit: int = 5):
+    """Gry misji bez timeline - druga reka petli odzysku agenta."""
+    return {"game_ids": await asyncio.to_thread(db.missing_timelines, limit)}
+
+
+@write_api.post("/timeline")
+async def push_timeline(payload: dict):
+    """Agent wysyla tu caly timeline gry z LCU (sonda C3). Surowiec bez
+    analizy; malformed = stored:false (agent liczy niepowodzenie i po
+    RECOVER_MAX_FAILS odstawia gre), awaria zapisu = uczciwe 5xx jak
+    w /grade i /eog - z ta roznica, ze timeline jest odzyskiwalny po ID,
+    wiec agent nie trzyma go w kolejce dyskowej, tylko wraca po gre."""
+    gid = payload.get("game_id")
+    tl = payload.get("timeline")
+    if not gid or not isinstance(tl, dict) or not (tl.get("frames") or []):
+        return {"stored": False, "errors": ["brak game_id albo pustych frames"]}
+    try:
+        ts = int(time.time())
+        new = await asyncio.to_thread(
+            db.save_timeline, f"{PLATFORM.upper()}_{gid}", int(gid), tl, ts)
+        frames = len(tl.get("frames") or [])
+        await asyncio.to_thread(db.log_event, "timeline",
+                                {"game_id": gid, "frames": frames,
+                                 "new": bool(new)}, ts)
+        return {"stored": True, "new": bool(new), "frames": frames}
+    except Exception as e:
+        raise HTTPException(500, f"{type(e).__name__}: {e}") from e
+
+
 # (49) blokada per champion - dwa rownolegle GET-y (hero + live) nie moga
 # fetchowac tej samej strony dwa razy
 _CHEAT_LOCKS = {}
@@ -1295,7 +1325,8 @@ async def system_health():
             "SELECT kind, MAX(ts) ts FROM event_log GROUP BY kind")}
         counts = {}
         for t in ("match_player", "grade_observation", "eog_raw",
-                  "champ_select_pool", "player_stat", "snapshot"):
+                  "match_timeline", "champ_select_pool", "player_stat",
+                  "snapshot"):
             counts[t] = c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
         # filtr per queueId: customy (np. 3270) sa w bazie, ale poza misja -
         # licznik, zeby filtracja byla widoczna, a nie wygladala jak dziura

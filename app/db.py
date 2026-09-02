@@ -887,6 +887,71 @@ def eog_stats():
             "compressed_bytes": size}
 
 
+# ---------- timelines (akwizycja, sonda C3) ----------
+#
+# /lol-match-history/v1/game-timelines/{gameId} oddaje dla kolejki 2400
+# frames co ~60 s (totalGold/xp/level/pozycje WSZYSTKICH 10 graczy +
+# eventy killi z asystami) - takze dla gier spoza okna 20 (sonda C3
+# na najstarszej grze z bazy). Zbieramy caly surowiec wzorcem eog_raw
+# (bez przycinania do wlasnego uczestnika: krzywe na tle lobby to istota);
+# ZADNEJ analizy przed bramkami - pierwsze spojrzenie przy rewizji
+# eventdata (50 gier), cechy tempa za bramka 60-100 obs.
+
+TIMELINE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS match_timeline (
+    match_id     TEXT PRIMARY KEY,
+    game_id      INTEGER NOT NULL,
+    frames       INTEGER,
+    payload      BLOB NOT NULL,
+    captured_at  INTEGER NOT NULL
+);
+"""
+
+
+def init_timelines():
+    with connect() as con:
+        con.executescript(TIMELINE_SCHEMA)
+
+
+def save_timeline(match_id, game_id, timeline, ts):
+    """Caly obiekt timeline (skompresowany). Zwraca True dla nowego wpisu."""
+    import zlib
+    frames = timeline.get("frames") or []
+    with connect() as con:
+        existed = con.execute(
+            "SELECT 1 FROM match_timeline WHERE match_id=?",
+            (match_id,)).fetchone() is not None
+        con.execute(
+            "INSERT OR REPLACE INTO match_timeline "
+            "(match_id, game_id, frames, payload, captured_at) "
+            "VALUES (?,?,?,?,?)",
+            (match_id, game_id, len(frames),
+             zlib.compress(json.dumps(timeline, separators=(",", ":")).encode()),
+             ts))
+    return not existed
+
+
+def load_timeline(match_id):
+    import zlib
+    with connect() as con:
+        row = con.execute("SELECT payload FROM match_timeline WHERE match_id=?",
+                          (match_id,)).fetchone()
+    return json.loads(zlib.decompress(row["payload"])) if row else None
+
+
+def missing_timelines(limit=5):
+    """Gry misji bez zebranego timeline - agent dociaga je pojedynczo przy
+    bezczynnym kliencie (druga reka petli odzysku P6). Najnowsze najpierw;
+    customy (KIWI_CUSTOM) i inne tryby poza zakresem."""
+    with connect() as con:
+        return [r["gid"] for r in con.execute("""
+            SELECT CAST(substr(m.match_id, instr(m.match_id, '_') + 1) AS INTEGER) gid
+            FROM match_player m
+            LEFT JOIN match_timeline t ON t.match_id = m.match_id
+            WHERE m.game_mode = 'KIWI' AND t.match_id IS NULL
+            ORDER BY m.game_creation DESC LIMIT ?""", (limit,))]
+
+
 # ---------- tozsamosci graczy (karta 9) ----------
 #
 # flatten_eog_stats odrzuca pola nienumeryczne, wiec puuid ginal przy
@@ -1587,7 +1652,9 @@ def pipeline_sanity():
             "stale_pools": stale_pools,
             "eog_bez_oceny": eog_no_grade,
             # (P6) odzyskiwalne przez agenta - niezerowe topnieje samo
-            "missing_games": len(missing_own_games(1000))}
+            "missing_games": len(missing_own_games(1000)),
+            # timelines: jak wyzej, druga reka petli odzysku
+            "timeline_missing": len(missing_timelines(1000))}
 
 
 def model_status(min_games=40):

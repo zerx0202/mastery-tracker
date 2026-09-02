@@ -411,6 +411,52 @@ def test_recover_counts_server_rejection_as_failure():
     assert fails.get(9) == 1
 
 
+# ---------- akwizycja timelines ----------
+
+def test_timeline_once_fetches_and_posts():
+    async def run():
+        a = ag.Agent({"api_base": "http://backend"})
+        a.session = FakeGetSession([{"game_ids": [9]}])
+        a.lcu = FakeLcuRaw({
+            "/lol-match-history/v1/game-timelines/9": {
+                "frames": [{"timestamp": 0, "participantFrames": {}}]},
+        })
+        a.server = FakeServer()
+        ok = await a._timeline_once()
+        return ok, a.server.posts
+
+    ok, posts = asyncio.run(run())
+    assert ok is True
+    path, payload = posts[0]
+    assert path == "/timeline"
+    assert payload["game_id"] == 9
+    assert payload["timeline"]["frames"]
+
+
+def test_timeline_once_counts_empty_as_failure_and_skips():
+    """Pusty/martwy timeline nie moze mielic w kolo tej samej gry -
+    ta sama skip-lista co w odzysku statystyk (A4)."""
+    async def run():
+        a = ag.Agent({"api_base": "http://backend"})
+        a.session = FakeGetSession(
+            [{"game_ids": [9, 8]}] * (ag.RECOVER_MAX_FAILS + 1))
+        a.lcu = FakeLcuRaw({
+            # gra 9: LCU oddaje pusty obiekt; gra 8: zdrowy timeline
+            "/lol-match-history/v1/game-timelines/9": {"frames": []},
+            "/lol-match-history/v1/game-timelines/8": {
+                "frames": [{"timestamp": 0}]},
+        })
+        a.server = FakeServer()
+        results = [await a._timeline_once()
+                   for _ in range(ag.RECOVER_MAX_FAILS + 1)]
+        return results, a.server.posts, dict(a._timeline_fails)
+
+    results, posts, fails = asyncio.run(run())
+    assert results[-1] is True, "po odstawieniu gry 9 kolej na gre 8"
+    assert fails.get(9) == ag.RECOVER_MAX_FAILS
+    assert [p["game_id"] for _, p in posts if _ == "/timeline"] == [8]
+
+
 # ---------- ocena ----------
 
 def test_submit_grade_ignores_entries_without_grade():
