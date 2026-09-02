@@ -38,6 +38,24 @@ def test_parse_balance_variants():
     }
 
 
+def test_parse_unescapes_html_entities(fresh_db, monkeypatch):
+    # zlapane na produkcji 2.09: Kog&#39;Maw / Nunu &amp; Willump / Rek&#39;Sai
+    # zostawaly w "unmatched", bo encje psuly dopasowanie nazwy do id
+    monkeypatch.setattr(balance, "MIN_CHAMPIONS", 1)
+    chunk = (
+        '<a href="/build/kogmaw/" class="champion-row" data-name="kogmaw">'
+        '<div class="font-medium">Kog&#39;Maw</div>'
+        '<span class="text-positive">Damage Dealt: +5%</span></a>'
+        '<a href="/build/nunu/" class="champion-row" data-name="nunu">'
+        '<div class="font-medium">Nunu &amp; Willump</div>'
+        '<span class="text-negative">Healing: -10%</span></a>'
+    )
+    assert set(balance.parse_balance(chunk)) == {"Kog'Maw", "Nunu & Willump"}
+    db.save_champions([(96, "Kog'Maw", "KogMaw"), (20, "Nunu & Willump", "Nunu")])
+    out = balance.store_balance(chunk)
+    assert out["matched"] == 2 and out["unmatched"] == []
+
+
 def test_parse_garbage_gives_empty():
     assert balance.parse_balance("<html><body>przebudowa strony</body></html>") == {}
 

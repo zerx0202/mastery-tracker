@@ -12,6 +12,8 @@ Strona jest statycznym HTML (Astro): wiersz championa to
 class="font-medium">Nazwa</div> i spanami "Etykieta: +5%" / "-10" (haste
 bez procentu). Champion bez modyfikatorow nie wystepuje na liscie.
 """
+# alias: parametry funkcji nazywaja sie `html` i przeslonilyby modul
+import html as _html
 import re
 import time
 
@@ -38,7 +40,9 @@ def parse_balance(html):
             continue
         mods = dict(_MOD_RE.findall(chunk))
         if mods:
-            out[name_m.group(1).strip()] = mods
+            # strona escapuje encje (Kog&#39;Maw, Nunu &amp; Willump) -
+            # bez unescape trzy championy nie przypinaly sie do id
+            out[_html.unescape(name_m.group(1)).strip()] = mods
     return out
 
 
