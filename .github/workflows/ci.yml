@@ -18,5 +18,11 @@ jobs:
         run: pip install -r requirements.txt -r agent/requirements.txt pytest ruff
       - name: Ruff (m.in. niezdefiniowane nazwy - dzisiejsza klasa bledow)
         run: ruff check app/ agent/ tests/
+      # node --check: trzy historyczne awarie byly czysto frontowe, a zielony
+      # CI nic o app.js nie mowil (audyt 2.09). Playwright ZOSTAJE poza CI
+      # swiadomie: chromium ~120 MB na kazdy push przy smoke'ach odpalanych
+      # lokalnie w pelnym cyklu przed kazdym oddaniem to koszt bez zysku.
+      - name: Skladnia frontu
+        run: node --check app/static/app.js
       - name: Pytest
         run: pytest tests/ -q

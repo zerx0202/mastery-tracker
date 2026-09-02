@@ -1,6 +1,16 @@
 let PATCH = "16.17.1";
 const $ = id => document.getElementById(id);
-const api = p => fetch("/api" + p).then(r => r.json());
+// (partia D) bez sprawdzenia r.ok awarie backendu przebieraly sie za dane:
+// 500 na ocenach wygladalo jak "Jeszcze zadnych ocen", 400 renderowalo
+// "undefined" w polach - blad ma byc bledem, obsluga w route()/catch-ach
+const api = p => fetch("/api" + p).then(async r => {
+  if (!r.ok) {
+    let d = null;
+    try { d = await r.json(); } catch (e) {}
+    throw new Error((d && d.detail) || ("HTTP " + r.status));
+  }
+  return r.json();
+});
 // Data Dragon zna 173 championow, snapshot ma 175 - najnowsi trafiaja tam
 // z opoznieniem. Zamiast pustego kwadratu pokazujemy zastepnik.
 const BLANK = "data:image/svg+xml," + encodeURIComponent(
@@ -158,30 +168,43 @@ function livePanel(d, bal, cheat) {
   </div>`;
 }
 
+// (partia D) epoka renderu: interwal 4 s odpalal rownolegle przebiegi bez
+// straznika i wolniejszy STARSZY potrafil nadpisac swiezszy widok dokladnie
+// w oknie champ selecta; kazdy zapis DOM za awaitem sprawdza, czy nie
+// wystartowal juz nowszy przebieg
+let NOW_EPOCH = 0;
+
 async function renderNow() {
+  const ep = ++NOW_EPOCH;
+  const stale = () => ep !== NOW_EPOCH;
+
   let live = {active: false};
   try { live = await api("/live"); } catch (e) {}
   const bal = await modeBalance();
   const cheat = live.active ? await cheatsheet(live.champion_id) : null;
+  if (stale()) return;
   $("live-panel") && ($("live-panel").innerHTML = live.active ? livePanel(live, bal, cheat) : "");
 
+  // pasek live-bar skladamy w JEDNEJ zmiennej i ustawiamy raz na koncu -
+  // baner sentinela i blad champ selecta byly wstawiane wczesnie
+  // i wymazywane w tej samej klatce przez pozniejsze innerHTML (audyt 2.09)
+  let barHtml = "";
   let lobby = {active: false};
   try {
     lobby = await api("/lobby");
-    if (lobby.detail) throw new Error(lobby.detail);
   } catch (e) {
-    $("live-bar").innerHTML = `<div class="live" style="border-color:#6B4E28;
+    barHtml += `<div class="live" style="border-color:#6B4E28;
       background:rgba(224,164,88,.07)"><span style="color:var(--warn)">⚠</span>
       <div>Nie udało się odczytać champ selecta: ${esc(e.message)}</div></div>`;
   }
 
   try {
     const sen = await api("/sentinel");
-    if (sen.open) $("live-bar").insertAdjacentHTML("afterbegin", `
+    if (sen.open) barHtml = `
       <div class="live" style="border-color:var(--gold)">
         <span style="color:var(--gold)">★</span>
         <div><b>Riot otworzył API Mayhema</b> — match-v5 zwraca gry z kolejki
-        2400. Można robić backfill pełnych danych.</div></div>`);
+        2400. Można robić backfill pełnych danych.</div></div>` + barHtml;
   } catch (e) {}
 
   const inSelect = !!(lobby.active && lobby.targets && lobby.targets.length);
@@ -192,29 +215,29 @@ async function renderNow() {
   if (inSelect) {
     targets = lobby.targets;
     patchMeta = lobby.patch;
-    $("live-bar").innerHTML = `<div class="live"><span class="dot"></span>
+    barHtml += `<div class="live"><span class="dot"></span>
       <div><b>${esc(lobby.queue || "Champ select")}</b> —
       ${lobby.champion_ids.length} w puli, odczyt sprzed ${lobby.age}s</div></div>`;
+    if (stale()) return;
+    $("live-bar").innerHTML = barHtml;
   } else {
-    $("live-bar").innerHTML = "";
     let data;
     try { data = await api("/targets?limit=12"); } catch (e) {
+      if (stale()) return;
+      $("live-bar").innerHTML = barHtml;
       $("hero").innerHTML = `<div class="hero empty"><div class="empty-state">
-        <h3>Backend nie odpowiada</h3><div>${esc(e.message)}</div></div></div>`;
-      $("cards").innerHTML = "";
-      return;
-    }
-    if (data.detail) {
-      $("hero").innerHTML = `<div class="hero empty"><div class="empty-state">
-        <h3>Brak danych</h3><div>${esc(data.detail)}</div></div></div>`;
+        <h3>Nie można pobrać rankingu</h3><div>${esc(e.message)}</div></div></div>`;
       $("cards").innerHTML = ""; $("cards-label").textContent = "";
       return;
     }
+    if (stale()) return;
+    $("live-bar").innerHTML = barHtml;
     GOAL = data.goal;
     targets = data.targets;
     patchMeta = data.patch;
   }
 
+  if (stale()) return;
   if (!targets.length) {
     $("hero").innerHTML = `<div class="hero empty"><div class="empty-state">
       <h3>Nic do zrobienia w tej puli</h3>
@@ -704,7 +727,10 @@ async function renderSplit() {
 }
 
 /* ---------- LABORATORIUM ---------- */
-const GRADE_ORDER = ["C","C+","B","B+","A","A+",">=A-",">=S-","S-","S","S+"];
+// pelna drabinka z db.GRADES - brakujace minusy i tier D sortowaly sie
+// na indexOf=-1 przed "C", z A- (ocena centralna misji) na czele winowajcow
+const GRADE_ORDER = ["D-","D","D+","C-","C","C+","B-","B","B+",
+                     "A-","A","A+",">=A-",">=S-","S-","S","S+"];
 async function renderLab() {
   const stat = $("lab-stat").value;
   const d = await api("/lab/distribution?stat=" + stat);
@@ -984,8 +1010,17 @@ async function route() {
     $(id).hidden = h !== hash;
     document.querySelector(`nav a[href="${h}"]`)?.classList.toggle("on", h === hash);
   }
+  // (partia D) blad renderu ma byc widoczny w widoku, nie tylko w konsoli -
+  // zakladka wisiala na wiecznym "wczytywanie…" bez sladu dla czlowieka
+  const box = $(VIEWS[hash][0]);
+  box.querySelector(".route-error")?.remove();
   try { await VIEWS[hash][1](); }
-  catch (e) { console.error(e); }
+  catch (e) {
+    console.error(e);
+    box.insertAdjacentHTML("afterbegin", `<div class="route-error msg"
+      style="color:var(--warn)">⚠ Nie udało się załadować widoku:
+      ${esc(e.message)}</div>`);
+  }
 }
 
 async function ddragon() {

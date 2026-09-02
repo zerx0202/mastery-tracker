@@ -65,12 +65,12 @@ RECOVER_MAX_FAILS = 3
 # prawdziwym koncu gry nic nie kosztuje (port i tak juz nie zyje).
 LIVE_GONE_AFTER = 3
 
+# Wylacznie dane ULOTNE (zyja tylko na ekranie koncowym) - trzy endpointy
+# nieulotne (local-player mastery, collections, career-stats) byly zrzucane
+# po kazdej grze bez zadnego konsumenta i kasowane rotacja (audyt 2.09)
 DIAG_ENDPOINTS = [
     "/lol-end-of-game/v1/eog-stats-block",
     MASTERY_UPDATES,
-    "/lol-champion-mastery/v1/local-player/champion-mastery",
-    "/lol-collections/v1/inventories/champion-mastery",
-    "/lol-career-stats/v1/champion-averages",
 ]
 
 
@@ -287,7 +287,6 @@ class Agent:
         self.in_game = False
         self.pre_snapshot_done = False
         self.history_bootstrapped = False
-        self.ws_dead_port = None   # port, na ktorym WS juz odmowil - nie mecz
         self.ws_failures = 0
         self.champ_ids = {}
         self.champ_keys_ci = {}    # klucz DD malymi literami -> (klucz, id)
@@ -625,10 +624,13 @@ class Agent:
         g = await self.lcu.get(f"/lol-match-history/v1/games/{gid}", timeout=20)
         if not g:
             return self._recover_fail(gid, "LCU nie oddal danych")
-        slim = self.own_slice(g, self._my_puuid)
-        if slim is None:
+        # own_slice zostaje jako walidacja "czy to moja gra"; wysylamy PELNY
+        # obiekt - statystyki i tozsamosci pozostalych 9 graczy karmia
+        # player_stat i match_participant po stronie serwera (partia D:
+        # przycinanie wyrzucalo 9/10 pobranego materialu bezpowrotnie)
+        if self.own_slice(g, self._my_puuid) is None:
             return self._recover_fail(gid, "brak wlasnego uczestnika", "warn")
-        r2 = await self.server.post("/history/lcu", {"games": [slim]})
+        r2 = await self.server.post("/history/lcu", {"games": [g]})
         if r2 is None:
             # brak sieci/5xx - payload czeka w kolejce dyskowej, licznik
             # rosnie, zeby wieczne 5xx tez nie zatrzymalo glowy listy

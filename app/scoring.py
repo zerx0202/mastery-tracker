@@ -25,7 +25,6 @@ gier sa nizsze.
 """
 
 import math
-import time
 
 from .db import GRADE_RANK
 
@@ -106,10 +105,8 @@ def expected_games_prior_only(milestone, goal, ladder, prior):
     return total
 
 
-def score_rows(rows, ladder, rates, prior, goal, now_s=None):
+def score_rows(rows, ladder, rates, prior, goal):
     """Modyfikuje rows w miejscu. Sortuje rosnaco po oczekiwanej liczbie gier."""
-    now_s = now_s or int(time.time())
-
     for r in rows:
         cid = r["champion_id"]
         exp, steps, known = expected_games(cid, r["milestone"], goal, ladder, rates, prior)

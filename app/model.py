@@ -81,11 +81,10 @@ def champion_baselines(mode=None):
     return ({c: statistics.median(v) for c, v in per_champ.items()}, global_median)
 
 
-# Mapowanie cech modelu na klucze w player_stat. Tam, gdzie klucz istnieje,
-# normalizujemy przez rozklad tego championa w Mayhemie zamiast brac wartosc
-# bezwzgledna. Zrodla zewnetrzne odpadaja - zaden nie ma tej kolejki.
+# Mapowanie cech modelu na klucze w player_stat. Normalizujemy WYLACZNIE
+# obrazenia (gold/min jest monotoniczne z ocena i normalizacji nie wymaga -
+# martwy wpis goldEarned sugerowal co innego i zapraszal do "wpiecia").
 NORM_KEYS = {
-    "gold_per_min": "goldEarned",
     "dmg_ratio": "totalDamageDealtToChampions",
 }
 

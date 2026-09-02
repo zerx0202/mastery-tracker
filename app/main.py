@@ -12,7 +12,6 @@ from fastapi.staticfiles import StaticFiles
 
 from . import augments, balance, db, features, model, scoring
 from .db import GRADE_RANK
-from .limiter import RateLimiter
 
 API_KEY = os.environ["RIOT_API_KEY"]
 PLATFORM = os.environ.get("RIOT_PLATFORM", "euw1")
@@ -70,7 +69,10 @@ async def mayhem_sentinel_loop():
         try:
             st = db.get_json_setting("mayhem_api") or {}
             if time.time() - st.get("checked_at", 0) >= 20 * 3600:
-                region = os.getenv("REGION", "europe")
+                # stala modulu (RIOT_REGION) - gole os.getenv("REGION") bylo
+                # trzecia nazwa env na ten sam koncept i dzialalo tylko
+                # dzieki zbieznosci defaultow (audyt 2.09)
+                region = REGION
                 puuid = await my_puuid()
                 ids = []
                 try:
@@ -176,7 +178,6 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(daily_snapshot_loop())
     asyncio.create_task(balance_refresh_loop())
     asyncio.create_task(augments_refresh_loop())
-    state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
     state["plain"] = httpx.AsyncClient(timeout=15.0)
@@ -450,7 +451,10 @@ async def push_lobby(payload: dict):
     trade = [int(x) for x in payload.get("trade_ids", []) if x]
     ts = int(time.time())
     db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), ts, trade)
-    state["last_queue_id"] = payload.get("queue_id")
+    # tryb ostatniego lobby czyta /eog przy linkowaniu puli (normalizacja
+    # offsetu championId w JADE) - dotad nikt go nie ZAPISYWAL, wiec cala
+    # ochrona byla martwa (audyt 2.09)
+    state["last_queue_mode"] = payload.get("queue")
 
     # historia pul: bez tego nie wiadomo, jaki mial byc wybor
     pool_id = None
@@ -609,14 +613,25 @@ async def history_status():
 
 @write_api.post("/history/lcu")
 async def history_lcu(payload: dict):
-    """Agent wysyla tu surowe gry z historii LCU."""
+    """Agent wysyla tu surowe gry z historii LCU. Listing wlasny ma jednego
+    uczestnika; odzysk P6 przysyla PELNA gre - wtedy wlasny wiersz idzie po
+    puuid (z cache, bez sieci), a statystyki i tozsamosci pozostalych 9
+    karmia player_stat i match_participant jak przy eog (partia D: own_slice
+    wyrzucal ten material bezpowrotnie)."""
     games = payload.get("games") or []
+    my = db.get_cached_puuid(f"{MY_NAME}#{MY_TAG}")
     new = 0
     errors = []
     for g in games:
         try:
-            if await asyncio.to_thread(db.save_lcu_game, g):
+            if await asyncio.to_thread(db.save_lcu_game, g, my):
                 new += 1
+            if len(g.get("participants") or []) > 1:
+                gid = g.get("gameId")
+                if gid:
+                    await asyncio.to_thread(
+                        db.save_lcu_participants, g,
+                        f"{g.get('platformId', 'EUW1')}_{gid}", my)
         except Exception as e:
             errors.append(f"{type(e).__name__}: {e}")
     if games:
@@ -1126,8 +1141,13 @@ async def grades_history(limit: int = 60, mode: str | None = None):
     """Oceny z predykcja modelu obok tego, co faktycznie wypadlo.
     Kolejnosc po czasie obserwacji - bez ORDER BY SQLite zwraca dowolna."""
     use_mode = mode or DEFAULT_MODE
+    # filtr trybu warunkowo, jak wszedzie: bezwarunkowe `= ?` z NULL-em
+    # (brak DEFAULT_MODE) nie dopasowywalo niczego i widok byl zawsze
+    # pusty - awaria przebrana za brak danych (audyt 2.09)
+    clause = "AND m.game_mode = ?" if use_mode else ""
+    args = (use_mode,) if use_mode else ()
     with db.connect() as c:
-        rows = [dict(r) for r in c.execute("""
+        rows = [dict(r) for r in c.execute(f"""
             SELECT g.grade, g.champion_id, g.observed_at, g.match_id,
                    m.kills, m.deaths, m.assists, m.dmg_champ, m.gold,
                    m.cs, m.vision, m.heal, m.duration,
@@ -1135,8 +1155,8 @@ async def grades_history(limit: int = 60, mode: str | None = None):
             FROM grade_observation g
             JOIN match_player m ON m.match_id = g.match_id
             LEFT JOIN eog_raw e ON e.match_id = g.match_id
-            WHERE m.duration > 300 AND m.game_mode = ?
-            ORDER BY g.observed_at DESC""", (use_mode,))]
+            WHERE m.duration > 300 {clause}
+            ORDER BY g.observed_at DESC""", args)]
         names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM champion")}
         keys = {r["id"]: r["key"] for r in c.execute("SELECT id, key FROM champion")}
     book = augments.get_book().get("augments") or {}

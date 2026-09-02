@@ -322,7 +322,11 @@ def test_own_slice_picks_me_by_puuid():
     assert ag.Agent.own_slice(g, "nie-ma-mnie") is None
 
 
-def test_recover_once_slims_and_posts():
+def test_recover_once_posts_full_game():
+    """Partia D: own_slice wyrzucal 9/10 pobranego materialu (statystyki
+    i puuidy pozostalych graczy - paliwo norm i karty 9). Agent wysyla
+    teraz PELNA gre; przycina backend, ktory umie ja skonsumowac.
+    own_slice zostaje jako walidacja 'czy to moja gra'."""
     async def run():
         a = ag.Agent({"api_base": "http://backend"})
         a.session = FakeGetSession([{"game_ids": [9]}])
@@ -330,8 +334,10 @@ def test_recover_once_slims_and_posts():
             "/lol-summoner/v1/current-summoner": {"puuid": MY},
             "/lol-match-history/v1/games/9": {
                 "gameId": 9,
-                "participants": [{"participantId": 2, "championId": 99}],
+                "participants": [{"participantId": 1, "championId": 45},
+                                 {"participantId": 2, "championId": 99}],
                 "participantIdentities": [
+                    {"participantId": 1, "player": {"puuid": U1}},
                     {"participantId": 2, "player": {"puuid": MY}}]},
         })
         a.server = FakeServer()
@@ -343,7 +349,8 @@ def test_recover_once_slims_and_posts():
     path, payload = posts[0]
     assert path == "/history/lcu"
     assert payload["games"][0]["gameId"] == 9
-    assert len(payload["games"][0]["participants"]) == 1
+    assert len(payload["games"][0]["participants"]) == 2, \
+        "pelny obiekt - bez przycinania po stronie agenta"
 
 
 def test_recover_skips_poisoned_head(tmp_path):
@@ -409,6 +416,54 @@ def test_recover_counts_server_rejection_as_failure():
     ok, fails = asyncio.run(run())
     assert ok is False
     assert fails.get(9) == 1
+
+
+# ---------- epizod pomeczowy (post_game_capture) ----------
+
+class FakeLcuEpisode(FakeLcuRaw):
+    """Odpowiedzi zalezne od numeru proby - ocena i eog pojawiaja sie
+    dopiero za drugim odczytem, jak w realnym oknie PreEndOfGame."""
+
+    def __init__(self):
+        super().__init__({})
+        self.tries = {}
+
+    async def get(self, path, timeout=8):
+        self.calls.append(path)
+        n = self.tries[path] = self.tries.get(path, 0) + 1
+        if path == "/lol-gameflow/v1/gameflow-phase":
+            return "PreEndOfGame"
+        if path == ag.MASTERY_UPDATES:
+            return [{"grade": "S-", "championId": 45, "gameId": 9,
+                     "pointsGained": 800}] if n >= 2 else None
+        if path == ag.EOG_STATS_BLOCK:
+            return {"gameId": 9, "teams": []} if n >= 2 else {}
+        return None
+
+
+def test_post_game_capture_sends_grade_eog_and_closes_episode():
+    """Jedyny moment lapania ulotnej oceny nie mial harnessu (luka
+    z przegladu 2.09) - sekwencja: dopytywanie do skutku, POST /grade
+    i /eog, potem snapshot i sync. Fazy koncowe i retry w minutach sa
+    sciete configiem do ulamkow sekund."""
+    async def run():
+        a = ag.Agent({"api_base": "http://backend",
+                      "eog_wait_seconds": 2, "eog_retry_seconds": 0.01,
+                      "post_game_delay_seconds": 0, "enable_dumps": False,
+                      "history_pages_after_game": 1})
+        a.lcu = FakeLcuEpisode()
+        a.server = FakeServer()
+        await a.post_game_capture("WaitingForStats")
+        return a
+
+    a = asyncio.run(run())
+    paths = [p for p, _ in a.server.posts]
+    assert "/grade" in paths and "/eog" in paths
+    assert a._grade_done and a._eog_done
+    gi = paths.index("/grade")
+    assert "/snapshot" in paths[gi:], "snapshot po grze domyka parowanie oceny"
+    grade_payload = dict(a.server.posts)["/grade"]
+    assert grade_payload["updates"][0]["grade"] == "S-"
 
 
 # ---------- akwizycja timelines ----------

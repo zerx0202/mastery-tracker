@@ -30,12 +30,14 @@ CREATE TABLE IF NOT EXISTS champion (
 );
 
 CREATE TABLE IF NOT EXISTS milestone_ladder (
-    from_milestone INTEGER PRIMARY KEY,
+    from_milestone INTEGER NOT NULL,
     require_grades TEXT NOT NULL,
     games          INTEGER NOT NULL,
     reward_marks   INTEGER NOT NULL,
     bonus          INTEGER NOT NULL,
-    observed_at    INTEGER NOT NULL
+    observed_at    INTEGER NOT NULL,
+    split_id       INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (from_milestone, split_id)
 );
 
 CREATE TABLE IF NOT EXISTS snapshot (
@@ -236,7 +238,10 @@ def learn_ladder(entries, ts):
         split_id = current_split_id()
         for r in rows.values():
             r["split_id"] = split_id
-        # progi moga sie zmienic miedzy splitami - nadpisujemy w obrebie splitu
+        # progi moga sie zmienic miedzy splitami - klucz (from_milestone,
+        # split_id) sprawia, ze REPLACE nadpisuje wylacznie w obrebie
+        # biezacego splitu, a historia progow zostaje (partia D: sam
+        # from_milestone w kluczu kasowal drabinke poprzedniego splitu)
         con.executemany(
             "INSERT OR REPLACE INTO milestone_ladder "
             "(from_milestone, require_grades, games, reward_marks, bonus, observed_at, split_id) "
@@ -246,7 +251,20 @@ def learn_ladder(entries, ts):
 
 
 def get_ladder():
+    """Drabinka biezacego splitu; swiezy split bez wierszy (learn_ladder
+    jeszcze nie pobiegl) dostaje ostatnia znana - lepsza stara drabinka
+    niz pusty ranking."""
     with connect() as con:
+        sid = current_split_id()
+        rows = con.execute("SELECT * FROM milestone_ladder WHERE split_id=?",
+                           (sid,)).fetchall()
+        if not rows:
+            last = con.execute(
+                "SELECT MAX(split_id) s FROM milestone_ladder").fetchone()["s"]
+            if last is not None:
+                rows = con.execute(
+                    "SELECT * FROM milestone_ladder WHERE split_id=?",
+                    (last,)).fetchall()
         return {
             r["from_milestone"]: {
                 "require_grades": json.loads(r["require_grades"]),
@@ -254,7 +272,7 @@ def get_ladder():
                 "reward_marks": r["reward_marks"],
                 "bonus": bool(r["bonus"]),
             }
-            for r in con.execute("SELECT * FROM milestone_ladder")
+            for r in rows
         }
 
 
@@ -531,15 +549,22 @@ def normalize_champion_id(cid, game_mode=None):
         return cid % 1000
     return cid
 
-def save_lcu_game(g):
-    """Mecz z historii LCU (stary format v4). Zwraca True jesli wiersz byl nowy."""
+def save_lcu_game(g, my_puuid=None):
+    """Mecz z historii LCU (stary format v4). Zwraca True jesli wiersz byl
+    nowy. Listing wlasnej historii ma jednego uczestnika; pelna gra po ID
+    (odzysk P6) ma dziesieciu - wtedy wlasny wiersz wybieramy po puuid."""
     parts = g.get("participants") or []
     if not parts:
         return False
     p = parts[0]
     if len(parts) > 1:
         ident = {i["participantId"]: i for i in (g.get("participantIdentities") or [])}
-        mine = [x for x in parts if ident.get(x["participantId"])]
+        if my_puuid:
+            mine = [x for x in parts
+                    if (ident.get(x["participantId"], {}).get("player")
+                        or {}).get("puuid") == my_puuid]
+        else:
+            mine = [x for x in parts if ident.get(x["participantId"])]
         p = mine[0] if mine else parts[0]
 
     st = p.get("stats") or {}
@@ -573,6 +598,48 @@ def save_lcu_game(g):
         "patch": short_patch(g.get("gameVersion")),
     }
     return _write_match(row)
+
+
+def save_lcu_participants(g, match_id, my_puuid=None):
+    """(partia D) Pelna gra z odzysku P6 niesie statystyki i tozsamosci
+    WSZYSTKICH 10 graczy - dokladnie to, co z eog karmi player_stat (normy)
+    i match_participant (karta 9). own_slice wyrzucal 9/10 tego materialu
+    bezpowrotnie (gra po odzysku znika z listy missing i nikt po nia nie
+    wraca). Numeracja slotow = participantId z formatu v4. Zwraca liczbe
+    uczestnikow ze statystykami."""
+    parts = g.get("participants") or []
+    if len(parts) <= 1:
+        return 0
+    ident = {i["participantId"]: (i.get("player") or {}).get("puuid")
+             for i in (g.get("participantIdentities") or [])}
+    mode = g.get("gameMode")
+    written = 0
+    with connect() as con:
+        con.execute("DELETE FROM match_participant WHERE match_id=?", (match_id,))
+        for p in parts:
+            pid = p.get("participantId")
+            if not pid:
+                continue
+            puuid = ident.get(pid)
+            if puuid:
+                con.execute(
+                    "INSERT INTO match_participant "
+                    "(match_id, participant_no, puuid, team_id) VALUES (?,?,?,?)",
+                    (match_id, pid, puuid, p.get("teamId")))
+            cid = normalize_champion_id(p.get("championId"), mode)
+            is_local = 1 if (my_puuid and puuid == my_puuid) else 0
+            for k, v in (p.get("stats") or {}).items():
+                if isinstance(v, bool):
+                    v = int(v)
+                if not isinstance(v, (int, float)):
+                    continue
+                con.execute(
+                    "INSERT OR IGNORE INTO player_stat "
+                    "(match_id, participant_no, champion_id, team_id, is_local, "
+                    "stat_key, stat_value) VALUES (?,?,?,?,?,?,?)",
+                    (match_id, pid, cid, p.get("teamId") or 0, is_local, k, v))
+            written += 1
+    return written
 
 
 # ---------- statystyki ----------
@@ -1344,9 +1411,13 @@ def champion_sb_popularity():
     """Ile gier snowballa widzielismy per champion - proxy popularnosci
     w populacji Mayhema (walidacja 1.09: rho=-0.583 z resztami modelu)."""
     with connect() as con:
+        # GLOB zamiast LIKE: przy domyslnej kolacji LIKE nie schodzil do
+        # zakresu indeksu (PK zaczyna sie od match_id) i skanowal cala
+        # najwieksza tabele bazy - per request /targets, co 4 s przy
+        # otwartej karcie (audyt 2.09)
         return {r["champion_id"]: r["n"] for r in con.execute(
             "SELECT champion_id, COUNT(DISTINCT match_id) n FROM player_stat "
-            "WHERE match_id LIKE 'SB%' GROUP BY champion_id")}
+            "WHERE match_id GLOB 'SB_*' GROUP BY champion_id")}
 
 
 def games_on_patch(patch_short, mode=None):
@@ -2018,7 +2089,6 @@ CREATE TABLE IF NOT EXISTS pool_prediction (
 
 def save_pool_predictions(pool_id, rows, ts):
     with connect() as con:
-        con.executescript(PRED_SCHEMA)
         for r in rows:
             con.execute(
                 "INSERT OR REPLACE INTO pool_prediction "
@@ -2037,7 +2107,6 @@ def prediction_pairs():
     i wyborem championa, wiec pary istnieja rowniez tam, gdzie model
     swiadomie milczy (S- z p=None)."""
     with connect() as con:
-        con.executescript(PRED_SCHEMA)
         resolved = [dict(r) for r in con.execute("""
             SELECT pp.p, pp.next_p, pp.threshold, pp.specific, g.grade, csp.ts
             FROM pool_prediction pp
@@ -2252,12 +2321,31 @@ CREATE VIEW IF NOT EXISTS norm_source AS
     SELECT match_id, duration, game_mode FROM match_player
     UNION ALL
     SELECT 'SB_' || game_id, duration, game_mode FROM snowball_match;
+
+CREATE TABLE IF NOT EXISTS snowball_pair (
+    game_id  INTEGER NOT NULL,
+    puuid    TEXT NOT NULL,
+    PRIMARY KEY (game_id, puuid)
+);
 """
 
 
 def init_snowball_match():
     with connect() as con:
         con.executescript(SNOWBALL_MATCH_SCHEMA)
+
+
+def upgrade_snowball_pairs():
+    """(partia D) Dedup po samym game_id odrzucal obserwacje INNEGO gracza
+    z tej samej gry (duet A+B: historie mocno sie nakladaja, polowa
+    materialu przepadala z projektu, nie z przypadku). Para (gra, gracz)
+    w osobnej tabeli; snowball_match zostaje 1 wiersz na gre, wiec widok
+    norm_source nie duplikuje. Backfill: pierwszy obserwator z from_puuid."""
+    with connect() as con:
+        con.execute(
+            "INSERT OR IGNORE INTO snowball_pair (game_id, puuid) "
+            "SELECT game_id, from_puuid FROM snowball_match "
+            "WHERE from_puuid IS NOT NULL")
 
 
 LIVE_EVENT_SCHEMA = """
@@ -2314,18 +2402,27 @@ def snowball_ingest(puuid, games):
                 (f"%\\_{gid}",)).fetchone()
             if own:
                 continue
-            cur = con.execute(
+            con.execute(
                 "INSERT OR IGNORE INTO snowball_match "
                 "(game_id, duration, game_mode, queue_id, game_ts, from_puuid) "
                 "VALUES (?,?,?,?,?,?)",
                 (gid, dur, mode, qid, int((g.get("gameCreation") or 0) / 1000),
                  puuid))
-            if cur.rowcount == 0:    # juz znana z wczesniejszego snowballa
+            # dedup po PARZE (gra, gracz): ta sama gra widziana od drugiego
+            # gracza to INNY uczestnik i nowa obserwacja norm - dedup po
+            # samym game_id wyrzucal ja bezpowrotnie (partia D)
+            cur = con.execute(
+                "INSERT OR IGNORE INTO snowball_pair (game_id, puuid) "
+                "VALUES (?,?)", (gid, puuid))
+            if cur.rowcount == 0:    # ta gra od TEGO gracza juz zmielona
                 continue
             part = (g.get("participants") or [{}])[0]
             cid = normalize_champion_id(part.get("championId"), mode)
             stats = part.get("stats") or {}
             mid = f"SB_{gid}"
+            pn = con.execute(
+                "SELECT COALESCE(MAX(participant_no), 0) + 1 n "
+                "FROM player_stat WHERE match_id=?", (mid,)).fetchone()["n"]
             for k, v in stats.items():
                 if isinstance(v, bool):
                     v = int(v)
@@ -2335,6 +2432,41 @@ def snowball_ingest(puuid, games):
                     "INSERT OR IGNORE INTO player_stat "
                     "(match_id, participant_no, champion_id, team_id, is_local, "
                     "stat_key, stat_value) VALUES (?,?,?,?,0,?,?)",
-                    (mid, 1, cid, part.get("teamId") or 0, k, v))
+                    (mid, pn, cid, part.get("teamId") or 0, k, v))
                 new_rows += 1
     return kiwi, new_rows
+
+
+def upgrade_ladder_split_key():
+    """(partia D) Stary PK milestone_ladder to sam from_milestone - REPLACE
+    kasowal drabinke poprzedniego splitu, mimo ze kolumne split_id dodano
+    wlasnie po to, by ja zachowac (a backfill cenzur ze starego splitu
+    dostawal progi z nowego). SQLite nie zmienia PK w miejscu, wiec
+    przebudowa: nowa tabela z kluczem (from_milestone, split_id), kopia,
+    podmiana. Wykrycie po liczbie kolumn w kluczu - po przebudowie warunek
+    juz nie lapie. Definicja na koncu pliku, bo migrate() wykonuje funkcje
+    w kolejnosci definicji, a ta musi biec PO ALTER-ach z init_extra."""
+    with connect() as con:
+        pk_cols = con.execute(
+            "SELECT COUNT(*) c FROM pragma_table_info('milestone_ladder') "
+            "WHERE pk > 0").fetchone()["c"]
+        if pk_cols != 1:
+            return
+        con.executescript("""
+            CREATE TABLE milestone_ladder_new (
+                from_milestone INTEGER NOT NULL,
+                require_grades TEXT NOT NULL,
+                games          INTEGER NOT NULL,
+                reward_marks   INTEGER NOT NULL,
+                bonus          INTEGER NOT NULL,
+                observed_at    INTEGER NOT NULL,
+                split_id       INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (from_milestone, split_id)
+            );
+            INSERT INTO milestone_ladder_new
+                SELECT from_milestone, require_grades, games, reward_marks,
+                       bonus, observed_at, COALESCE(split_id, 1)
+                FROM milestone_ladder;
+            DROP TABLE milestone_ladder;
+            ALTER TABLE milestone_ladder_new RENAME TO milestone_ladder;
+        """)

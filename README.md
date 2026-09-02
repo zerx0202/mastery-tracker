@@ -235,7 +235,8 @@ mnożniki balansu trybu, odrębne od zwykłego ARAM-a.
 ### Serwer
 
 ```bash
-cp .env.example .env      # uzupełnij klucz i Riot ID
+cp .env.example .env             # uzupełnij klucz i Riot ID (nazwa + tag)
+docker network create proxy      # raz na hosta — compose używa sieci external
 docker compose up -d --build
 curl -s localhost:8000/api/health
 ```
