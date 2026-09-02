@@ -865,6 +865,8 @@ async function renderSystem() {
     <div class="grid2" style="margin-top:20px">
       <div class="panel"><div class="eyebrow">Ostatnia aktywność</div>${seen}${backupKv}${authKv}${balKv}</div>
       <div class="panel"><div class="eyebrow">Zebrane dane</div>${counts}
+        ${d.custom_games ? `<div class="kv"><span class="dim">w tym treningi
+          (custom, poza misją)</span><span class="dim">${d.custom_games}</span></div>` : ""}
         <div class="kv" style="margin-top:12px"><span>Patch Data Dragon</span>
           <span>${esc(d.ddragon_patch || "—")}</span></div>
       </div>

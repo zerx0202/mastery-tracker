@@ -1297,6 +1297,11 @@ async def system_health():
         for t in ("match_player", "grade_observation", "eog_raw",
                   "champ_select_pool", "player_stat", "snapshot"):
             counts[t] = c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
+        # filtr per queueId: customy (np. 3270) sa w bazie, ale poza misja -
+        # licznik, zeby filtracja byla widoczna, a nie wygladala jak dziura
+        custom = c.execute(
+            "SELECT COUNT(*) c FROM match_player "
+            "WHERE game_mode LIKE '%#_CUSTOM' ESCAPE '#'").fetchone()["c"]
         events = [dict(r) for r in c.execute(
             "SELECT ts, kind, detail FROM event_log ORDER BY ts DESC LIMIT 40")]
     return {
@@ -1314,6 +1319,7 @@ async def system_health():
         "riot_auth": db.get_json_setting("riot_api_auth"),
         "balance_fetched_at": (db.get_json_setting("mayhem_balance")
                                or {}).get("fetched_at"),
+        "custom_games": custom,
     }
 
 

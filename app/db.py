@@ -443,7 +443,7 @@ def save_match(mid, info, puuid):
     row = {
         "match_id": mid,
         "queue_id": info.get("queueId"),
-        "game_mode": info.get("gameMode"),
+        "game_mode": effective_mode(info.get("gameMode"), info.get("queueId")),
         "game_creation": info.get("gameCreation"),
         "duration": info.get("gameDuration"),
         "champion_id": me["championId"],
@@ -479,6 +479,36 @@ def short_patch(version):
 
 # Tryby, w ktorych Riot przesuwa identyfikatory championow.
 OFFSET_MODES = {"JADE"}
+
+# Tryb misji ma JEDNA kolejke matchmakingu. Custom game zglasza ten sam
+# gameMode (C5, sonda 2.09: kolejka 3270 "ARAM: Mayhem", category Custom,
+# queueRewards wylaczone - zero ocen i punktow maestrii), a cala filtracja
+# w modelu/normach idzie po game_mode - dwie gry treningowe weszly przez
+# to do norm jako pelnoprawne KIWI (audyt eksportu 2.09). Zamiast odrzucac
+# (surowiec sie nie wyrzuca), zapis nadaje takim grom odrozniamy tryb;
+# surowe queue_id zostaje w wierszu. Ograniczenie: Live Client (port 2999)
+# nie zna queueId, wiec panel live w customie dalej pokaze referencje
+# KIWI - ulotne, swiadomie zaakceptowane.
+MODE_QUEUES = {"KIWI": 2400}
+
+
+def effective_mode(game_mode, queue_id):
+    q = MODE_QUEUES.get(game_mode)
+    if q is not None and queue_id is not None and queue_id != q:
+        return f"{game_mode}_CUSTOM"
+    return game_mode
+
+
+def upgrade_custom_modes():
+    """Backfill trybu dla gier zapisanych przed filtrem per queueId
+    (2 customy Sionem z 29.08 i 1.09 siedzialy w normach). Idempotentne:
+    po przemianowaniu warunek juz nie lapie."""
+    with connect() as con:
+        for mode, qid in MODE_QUEUES.items():
+            con.execute(
+                "UPDATE match_player SET game_mode = game_mode || '_CUSTOM' "
+                "WHERE game_mode = ? AND queue_id IS NOT NULL AND queue_id != ?",
+                (mode, qid))
 
 
 def _mode_of(match_id):
@@ -519,7 +549,7 @@ def save_lcu_game(g):
     row = {
         "match_id": f"{g.get('platformId', 'EUW1')}_{g['gameId']}",
         "queue_id": g.get("queueId"),
-        "game_mode": g.get("gameMode"),
+        "game_mode": effective_mode(g.get("gameMode"), g.get("queueId")),
         "game_creation": g.get("gameCreation"),
         "duration": g.get("gameDuration"),
         "champion_id": normalize_champion_id(raw_cid, g.get("gameMode")),
@@ -2202,7 +2232,9 @@ def snowball_ingest(puuid, games):
             gid = g.get("gameId")
             mode = g.get("gameMode")
             qid = g.get("queueId")
-            if not gid or (qid != 2400 and mode != "KIWI"):
+            # wylacznie kolejka matchmakingu misji - warunek "albo mode
+            # KIWI" wpuszczal customy obcych graczy (3270) do norm
+            if not gid or qid != MODE_QUEUES["KIWI"]:
                 continue
             kiwi += 1
             dur = int(g.get("gameDuration") or 0)
