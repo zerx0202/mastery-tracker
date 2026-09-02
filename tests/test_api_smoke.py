@@ -8,7 +8,7 @@ from app.main import app
 
 GETS = ["/api/health", "/api/lobby", "/api/targets", "/api/split/progress",
         "/api/grades/history", "/api/model/readiness", "/api/norms",
-        "/api/system/health", "/api/limits"]
+        "/api/system/health", "/api/limits", "/api/balance"]
 
 
 @pytest.mark.parametrize("path", GETS)

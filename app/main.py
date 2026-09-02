@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 
-from . import db, features, model, scoring
+from . import balance, db, features, model, scoring
 from .db import GRADE_RANK
 from .limiter import RateLimiter
 
@@ -86,6 +86,24 @@ async def daily_snapshot_loop():
         await asyncio.sleep(3600)
 
 
+async def balance_refresh_loop():
+    """(48) Mnozniki balansu Mayhema per champion - odswiezane raz na dobe,
+    bo zmieniaja sie tylko z patchem (i hotfixami). Zrodlo, parser
+    i decyzja o granicach uzycia: app/balance.py."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            st = db.get_json_setting("mayhem_balance") or {}
+            if time.time() - st.get("fetched_at", 0) >= 24 * 3600:
+                r = await state["plain"].get(balance.BALANCE_URL,
+                                             follow_redirects=True)
+                if r.status_code == 200:
+                    await asyncio.to_thread(balance.store_balance, r.text)
+        except Exception:
+            pass
+        await asyncio.sleep(6 * 3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # jeden punkt wejscia do schematu - nowa funkcja init_*/upgrade_* w db.py
@@ -93,6 +111,7 @@ async def lifespan(app: FastAPI):
     db.migrate()
     asyncio.create_task(mayhem_sentinel_loop())
     asyncio.create_task(daily_snapshot_loop())
+    asyncio.create_task(balance_refresh_loop())
     state["limiter"] = RateLimiter()
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
@@ -744,6 +763,21 @@ async def participants_backfill():
     """(karta 9) Tozsamosci graczy z zachowanych blobow eog_raw.
     Bezpieczne do powtarzania."""
     return await asyncio.to_thread(db.backfill_participants_from_eog)
+
+
+@write_api.post("/balance/refresh")
+async def balance_refresh():
+    """(48) Reczny refresh mnoznikow balansu Mayhema, poza dobowa petla."""
+    r = await state["plain"].get(balance.BALANCE_URL, follow_redirects=True)
+    if r.status_code != 200:
+        raise HTTPException(502, f"arammayhem: HTTP {r.status_code}")
+    return await asyncio.to_thread(balance.store_balance, r.text)
+
+
+@api.get("/balance")
+async def get_balance():
+    """(48) Ostatnio pobrane mnozniki balansu trybu, klucze = champion_id."""
+    return db.get_json_setting("mayhem_balance") or {}
 
 
 @api.get("/model/status")

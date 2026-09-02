@@ -46,8 +46,45 @@ function patchUrl(short, name) {
   return `https://wiki.leagueoflegends.com/en-us/V${+maj + 10}.${min}${anchor}`;
 }
 
+/* (48) Mnozniki balansu Mayhema - WYLACZNIE wyswietlanie, nigdy cecha
+   modelu (decyzja 2.09; zrodlo i parser po stronie backendu). Jeden fetch
+   na zaladowanie strony - wartosci zmieniaja sie raz na patch. */
+let BALANCE = null;
+async function modeBalance() {
+  if (BALANCE === null) {
+    try { BALANCE = (await api("/balance")).champions || {}; }
+    catch (e) { BALANCE = {}; }
+  }
+  return BALANCE;
+}
+
+/* etykieta PL + czy plus oznacza nerf (jedynie otrzymywane obrazenia) */
+const MOD_PL = {
+  "Damage Dealt": ["obrażenia", false],
+  "Damage Received": ["obr. otrzymywane", true],
+  "Healing": ["leczenie", false],
+  "Shielding": ["tarcze", false],
+  "Ability Haste": ["ability haste", false],
+  "Attack Speed": ["prędkość ataku", false],
+  "Energy Regen": ["regen. energii", false],
+  "Tenacity": ["tenacity", false],
+};
+
+function balanceLine(mods) {
+  if (!mods) return "";
+  const parts = Object.entries(mods).map(([k, v]) => {
+    const [label, invert] = MOD_PL[k] || [k.toLowerCase(), false];
+    const minus = String(v).startsWith("-");
+    const nerf = invert ? !minus : minus;
+    return `<span style="color:var(--${nerf ? "warn" : "ok"})">${esc(label)}
+      ${esc(v)}</span>`;
+  });
+  return `<div class="range dim" style="margin-top:4px;font-size:11.5px">
+    Mayhem: ${parts.join(" · ")}</div>`;
+}
+
 /* ---------- TERAZ ---------- */
-function livePanel(d) {
+function livePanel(d, bal) {
   const cmp = (key, higher) => {
     const now = d.now[key], ref = (d.reference.hit || {})[key];
     if (ref == null) return {cls: "", note: "brak odniesienia"};
@@ -83,6 +120,7 @@ function livePanel(d) {
         d.need ? "trzeba " + esc(d.need) : "brak progu"}</div>
     </div>
     ${d.milestone != null ? rail(d.milestone, GOAL, d.need) : ""}
+    ${balanceLine(bal && bal[d.champion_id])}
     <div style="margin-top:14px">${rows}</div>
     <div class="tagline">Złoto liczone z ubytków stanu — obejmuje kowadła
       i mikstury, które znikają z ekwipunku.</div>
@@ -97,7 +135,8 @@ function livePanel(d) {
 async function renderNow() {
   let live = {active: false};
   try { live = await api("/live"); } catch (e) {}
-  $("live-panel") && ($("live-panel").innerHTML = live.active ? livePanel(live) : "");
+  const bal = await modeBalance();
+  $("live-panel") && ($("live-panel").innerHTML = live.active ? livePanel(live, bal) : "");
 
   let lobby = {active: false};
   try {
@@ -190,6 +229,7 @@ async function renderNow() {
         <div class="range" style="margin-top:8px">${modelNote(b)}</div>
         <div class="range dim" style="margin-top:4px;font-size:11.5px">
           orientacyjnie ${gamesLine}</div>
+        ${balanceLine(bal[b.champion_id])}
       </div>
     </div>`;
 

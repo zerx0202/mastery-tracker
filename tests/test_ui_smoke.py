@@ -56,6 +56,11 @@ def _seed():
     db.save_snapshot(now, entries)
     db.set_lobby([45, 12, 99], "KIWI", "limited", now, trade_ids=[12])
     db.set_setting("ddragon_patch", "16.16.1")
+    db.set_json_setting("mayhem_balance", {
+        "fetched_at": now, "count": 3, "unmatched": [], "champions": {
+            "45": {"Damage Dealt": "-7%", "Damage Received": "+10%"},
+            "12": {"Healing": "+20%"},
+            "99": {"Damage Dealt": "-5%"}}})
     db.set_json_setting("pass_state", {"ts": now, "events": [{
         "name": "Season 3: Act I", "days_left": 21.5,
         "progress": {"level": 3, "totalLevels": 20},
@@ -144,6 +149,15 @@ def test_hero_links_to_patch_notes(page):
     assert re.fullmatch(
         r"https://wiki\.leagueoflegends\.com/en-us/V26\.16#(Veigar|Alistar|Lux)",
         href), href
+
+
+def test_hero_shows_mayhem_balance_line(page):
+    # (48) kazdy champion seeda ma mnozniki, wiec linia jest niezaleznie
+    # od tego, kto wygral ranking i zostal hero
+    line = page.wait_for_selector('#hero .range:has-text("Mayhem:")')
+    txt = line.inner_text()
+    assert "obrażenia" in txt or "leczenie" in txt
+    assert "%" in txt
 
 
 def test_grade_row_expands_and_collapses(page):
