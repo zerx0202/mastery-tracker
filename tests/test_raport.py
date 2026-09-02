@@ -81,9 +81,10 @@ def test_pipeline_sanity_counts(fresh_db):
         insert_row(con, "champ_select_pool", ts=now - 100,
                    champion_ids="[2]", pool_size=1)
     p = db.pipeline_sanity()
-    # missing_games: ocena-sierota EUW1_66 to zarazem znana gra bez statystyk
+    # missing_games: ocena-sierota EUW1_66 to zarazem znana gra bez statystyk;
+    # eog_bez_oceny=0, bo jedyny eog (EUW1_1) ma swoja ocene
     assert p == {"orphan_grades": 1, "eog_no_participants": 1,
-                 "stale_pools": 1, "missing_games": 1}
+                 "stale_pools": 1, "missing_games": 1, "eog_bez_oceny": 0}
 
 
 # ---------- P7: priorytet snowballa ----------

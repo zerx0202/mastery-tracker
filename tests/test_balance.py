@@ -81,6 +81,27 @@ def test_store_maps_names_to_ids(fresh_db, monkeypatch):
     assert st["unmatched"] == []
 
 
+def test_store_refuses_when_names_dont_match(fresh_db, monkeypatch):
+    """Partia A (A7): bramka jakosci liczyla wynik parsera, a zapisywala
+    wynik DOPASOWANIA - przebudowa nazewnictwa strony (precedens: encje
+    HTML) dawala parsed=103, matched=0 i nadpisywala dobre dane pustka."""
+    monkeypatch.setattr(balance, "MIN_CHAMPIONS", 2)
+    db.save_champions([(266, "Aatrox", "Aatrox"), (103, "Ahri", "Ahri"),
+                       (84, "Akali", "Akali")])
+    balance.store_balance(CHUNK, ts=1700000000)
+
+    # strona zmienia nazwy tak, ze nic sie nie przypina do id
+    broken = CHUNK.replace("Aatrox<", "Aatrox [Reworked]<") \
+                  .replace("Ahri<", "Ahri [Reworked]<") \
+                  .replace("Akali<", "Akali [Reworked]<")
+    out = balance.store_balance(broken, ts=1700000500)
+    assert out["stored"] is False and out["parsed"] == 3
+    st = db.get_json_setting("mayhem_balance")
+    assert st["fetched_at"] == 1700000000, "stare dane maja zostac"
+    kinds = [e["kind"] for e in db.recent_events(5)]
+    assert "balance_match_failed" in kinds
+
+
 def test_store_keeps_old_data_on_broken_fetch(fresh_db, monkeypatch):
     monkeypatch.setattr(balance, "MIN_CHAMPIONS", 2)
     db.save_champions([(266, "Aatrox", "Aatrox"), (103, "Ahri", "Ahri")])

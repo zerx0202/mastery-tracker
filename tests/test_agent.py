@@ -59,14 +59,16 @@ class FakeSession:
 
 
 class FakeServer:
-    """Rejestrator POST-ow do testow logiki champ selecta."""
+    """Rejestrator POST-ow do testow logiki champ selecta i odzysku.
+    Odpowiedz udaje szczesliwy backend (new/stored), bo czesc logiki agenta
+    czyta wynik: odzysk P6 uznaje sukces dopiero po new > 0."""
 
     def __init__(self):
         self.posts = []
 
     async def post(self, path, payload=None, timeout=90):
         self.posts.append((path, payload))
-        return {}
+        return {"new": 1, "stored": True}
 
 
 def make_server(tmp_path, script):
@@ -154,13 +156,62 @@ def test_network_error_enqueues_durable(tmp_path):
     assert item["path"] == "/grade"
 
 
-def test_4xx_on_live_post_not_enqueued(tmp_path):
+def test_4xx_on_direct_durable_post_saved_as_bad(tmp_path):
+    """Partia A (K3): trwale 4xx na bezposrednim POST (np. 401 po rotacji
+    tokenu) odrzucalo ocene bez zadnej kopii - mechanizm .bad istnial tylko
+    we flushu. Po fixie payload laduje na dysku do recznego odzysku."""
     async def run():
         srv = make_server(tmp_path, [401])
-        await srv.post("/grade", {"updates": []})
+        await srv.post("/grade", {"updates": [{"grade": "S-"}]})
 
     asyncio.run(run())
-    assert not list((tmp_path / "queue").glob("*.json"))
+    q = tmp_path / "queue"
+    assert not list(q.glob("*.json")), "4xx nie idzie do dosylki"
+    bad = list(q.glob("*.bad"))
+    assert len(bad) == 1
+    item = json.loads(bad[0].read_text(encoding="utf-8"))
+    assert item["path"] == "/grade"
+    assert item["payload"] == {"updates": [{"grade": "S-"}]}
+
+
+def test_4xx_on_nondurable_post_leaves_no_trace(tmp_path):
+    async def run():
+        srv = make_server(tmp_path, [401])
+        await srv.post("/live", {"ended": True})
+
+    asyncio.run(run())
+    q = tmp_path / "queue"
+    assert not q.exists() or not list(q.glob("*"))
+
+
+def test_eventdata_is_durable(tmp_path):
+    """Partia A (K1): /eventdata nie bylo w DURABLE, wbrew komentarzowi
+    w live_loop - log zdarzen ginal przy lezacym backendzie."""
+    async def run():
+        srv = make_server(tmp_path, [ConnectionError("backend lezy")])
+        await srv.post("/eventdata", {"events": [{"EventName": "ChampionKill"}],
+                                      "champion_id": 45})
+
+    asyncio.run(run())
+    files = list((tmp_path / "queue").glob("*.json"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_text(encoding="utf-8"))["path"] == "/eventdata"
+
+
+def test_ensure_flush_starts_without_any_post(tmp_path):
+    """Partia A (A3): dosylka startowala dopiero przy pierwszym post(),
+    a kazdy post() wymagal zywego klienta LoL - wpisy z poprzedniego
+    uruchomienia lezaly godzinami mimo zywego backendu."""
+    async def run():
+        srv = make_server(tmp_path, [])
+        assert srv._flush_task is None
+        srv.ensure_flush()
+        t1 = srv._flush_task
+        srv.ensure_flush()
+        assert srv._flush_task is t1, "wielokrotne wywolanie = jeden task"
+        t1.cancel()
+
+    asyncio.run(run())
 
 
 def test_flush_delivers_and_consumes(tmp_path):
@@ -293,6 +344,71 @@ def test_recover_once_slims_and_posts():
     assert path == "/history/lcu"
     assert payload["games"][0]["gameId"] == 9
     assert len(payload["games"][0]["participants"]) == 1
+
+
+def test_recover_skips_poisoned_head(tmp_path):
+    """Partia A (A4): odzysk bral zawsze glowe listy (limit=1, DESC) i po
+    kazdym niepowodzeniu wracal do tej samej gry - jedna niepobieralna gra
+    blokowala wszystkie starsze na zawsze (ta sama klasa co zatruta kolejka
+    z 2.09). Po fixie: po RECOVER_MAX_FAILS probach gid jest pomijany
+    do restartu agenta, a odzysk idzie dalej."""
+    async def run():
+        a = ag.Agent({"api_base": "http://backend"})
+        missing = {"game_ids": [9, 8]}
+        # kazde _recover_once robi jeden GET /history/missing
+        a.session = FakeGetSession([missing] * (ag.RECOVER_MAX_FAILS + 1))
+        a.lcu = FakeLcuRaw({
+            "/lol-summoner/v1/current-summoner": {"puuid": MY},
+            # gra 9: LCU stale nie oddaje danych (None); gra 8: zdrowa
+            "/lol-match-history/v1/games/8": {
+                "gameId": 8,
+                "participants": [{"participantId": 2, "championId": 99}],
+                "participantIdentities": [
+                    {"participantId": 2, "player": {"puuid": MY}}]},
+        })
+        a.server = FakeServer()
+        results = []
+        for _ in range(ag.RECOVER_MAX_FAILS + 1):
+            results.append(await a._recover_once())
+        return results, a.server.posts, dict(a._recover_fails)
+
+    results, posts, fails = asyncio.run(run())
+    assert results[:ag.RECOVER_MAX_FAILS] == [False] * ag.RECOVER_MAX_FAILS
+    assert results[-1] is True, "po odstawieniu gry 9 odzysk siega po gre 8"
+    assert fails.get(9) == ag.RECOVER_MAX_FAILS
+    lcu_posts = [p for path, p in posts if path == "/history/lcu"]
+    assert len(lcu_posts) == 1
+    assert lcu_posts[0]["games"][0]["gameId"] == 8
+
+
+def test_recover_counts_server_rejection_as_failure():
+    """Serwer potrafi polknac wyjatek zapisu w 200 z new=0 i errors -
+    agent logowal to jako sukces i mielil te sama gre co 120 s."""
+    async def run():
+        a = ag.Agent({"api_base": "http://backend"})
+        a.session = FakeGetSession([{"game_ids": [9]}])
+        a.lcu = FakeLcuRaw({
+            "/lol-summoner/v1/current-summoner": {"puuid": MY},
+            "/lol-match-history/v1/games/9": {
+                "gameId": 9,
+                "participants": [{"participantId": 2, "championId": 99}],
+                "participantIdentities": [
+                    {"participantId": 2, "player": {"puuid": MY}}]},
+        })
+
+        class RejectingServer(FakeServer):
+            async def post(self, path, payload=None, timeout=90):
+                self.posts.append((path, payload))
+                return {"received": 1, "new": 0,
+                        "errors": ["ValueError: zly ksztalt"]}
+
+        a.server = RejectingServer()
+        ok = await a._recover_once()
+        return ok, dict(a._recover_fails)
+
+    ok, fails = asyncio.run(run())
+    assert ok is False
+    assert fails.get(9) == 1
 
 
 # ---------- ocena ----------

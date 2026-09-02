@@ -1544,9 +1544,18 @@ def pipeline_sanity():
         stale_pools = con.execute(
             "SELECT COUNT(*) c FROM champ_select_pool "
             "WHERE match_id IS NULL AND ts < ?", (cutoff,)).fetchone()["c"]
+        # (A6) jedyna czujka na smierc kanalu ocen: ekran koncowy jest,
+        # oceny nie ma. Rosnaca liczba = patch Riota zabil kanal albo
+        # epizod pomeczowy przegrywa wyscig - a ocena to jedyna strata
+        # bezpowrotna calego systemu
+        eog_no_grade = con.execute("""
+            SELECT COUNT(*) c FROM eog_raw e
+            LEFT JOIN grade_observation g ON g.match_id = e.match_id
+            WHERE g.match_id IS NULL""").fetchone()["c"]
     return {"orphan_grades": orphan_grades,
             "eog_no_participants": eog_no_participants,
             "stale_pools": stale_pools,
+            "eog_bez_oceny": eog_no_grade,
             # (P6) odzyskiwalne przez agenta - niezerowe topnieje samo
             "missing_games": len(missing_own_games(1000))}
 

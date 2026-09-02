@@ -758,8 +758,14 @@ async function renderSystem() {
     eog_raw: "Ekrany końcowe", champ_select_pool: "Pule z champ selecta",
     player_stat: "Wiersze statystyk", snapshot: "Snapshoty"};
 
-  const seen = Object.entries(d.last_seen).map(([k, ts]) =>
-    `<div class="kv"><span>${LABELS[k] || k}</span><span>${ago(ts)}</span></div>`).join("");
+  // (A6) progi wieku: brak swiezego snapshotu >48 h znaczy, ze dobowy cron
+  // nie domyka dziur w milestone'ach - dokladnie to, co mial krzyczec
+  const AGE_WARN = {snapshot: 48 * 3600, snapshot_cron: 48 * 3600};
+  const seen = Object.entries(d.last_seen).map(([k, ts]) => {
+    const old = AGE_WARN[k] && (d.now - (ts || 0)) > AGE_WARN[k];
+    return `<div class="kv"><span>${LABELS[k] || k}</span>
+      <span style="color:${old ? "var(--warn)" : "inherit"}">${ago(ts)}</span></div>`;
+  }).join("");
   const counts = Object.entries(d.counts).map(([k, n]) =>
     `<div class="kv"><span>${NAMES[k] || k}</span><span>${n}</span></div>`).join("");
 
@@ -800,20 +806,33 @@ async function renderSystem() {
   const PIPE_PL = {orphan_grades: "Oceny bez meczu",
     eog_no_participants: "Ekrany bez tożsamości",
     stale_pools: "Pule bez meczu >24 h",
+    eog_bez_oceny: "Ekrany BEZ oceny (kanał ocen!)",
     missing_games: "Gry bez statystyk (agent odzyska)"};
   const pipe = Object.entries(d.pipeline || {}).map(([k, n]) =>
     `<div class="kv"><span>${PIPE_PL[k] || k}</span>
      <span style="color:${n ? "var(--warn)" : "var(--ok)"}">${n}</span></div>`).join("");
+  // (A6) "ostatni sukces 12 dni temu, bo nikt nie gral" wygladal identycznie
+  // jak zdrowie - stad prog wieku takze przy ok:true
   const bk = d.last_backup;
+  const bkOld = bk && (d.now - (bk.ts || 0)) > 7 * 86400;
   const backupKv = `<div class="kv"><span>Ostatni backup</span>
-    <span style="color:${bk ? (bk.ok ? "var(--ok)" : "var(--warn)") : "var(--dim)"}">${
+    <span style="color:${bk ? (bk.ok && !bkOld ? "var(--ok)" : "var(--warn)") : "var(--dim)"}">${
     bk ? (bk.ok ? "OK" : "BŁĄD") + " · " + ago(bk.ts) : "brak meldunku"}</span></div>`;
+  const ra = d.riot_auth;
+  const authKv = `<div class="kv"><span>Klucz Riot API</span>
+    <span style="color:${ra ? (ra.ok ? "var(--ok)" : "var(--warn)") : "var(--dim)"}">${
+    ra ? (ra.ok ? "działa" : `MARTWY (HTTP ${ra.status}) · ` + ago(ra.ts))
+       : "brak danych"}</span></div>`;
+  const balOld = d.balance_fetched_at && (d.now - d.balance_fetched_at) > 8 * 86400;
+  const balKv = `<div class="kv"><span>Mnożniki balansu</span>
+    <span style="color:${balOld ? "var(--warn)" : "inherit"}">${
+    ago(d.balance_fetched_at)}</span></div>`;
 
   let pred = {};
   try { pred = await api("/predictions/scorecard"); } catch (e) {}
   $("system-body").innerHTML = `
     <div class="grid2" style="margin-top:20px">
-      <div class="panel"><div class="eyebrow">Ostatnia aktywność</div>${seen}${backupKv}</div>
+      <div class="panel"><div class="eyebrow">Ostatnia aktywność</div>${seen}${backupKv}${authKv}${balKv}</div>
       <div class="panel"><div class="eyebrow">Zebrane dane</div>${counts}
         <div class="kv" style="margin-top:12px"><span>Patch Data Dragon</span>
           <span>${esc(d.ddragon_patch || "—")}</span></div>

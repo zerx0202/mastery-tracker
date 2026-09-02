@@ -33,6 +33,33 @@ def norm(x: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (x or "").lower())
 
 
+def note_riot_auth(ok, status=None):
+    """(A6) Zdrowie klucza Riot API. Martwy klucz byl niemy: sentinel
+    tlumaczyl kazdy blad jako "kolejka nadal zablokowana", a petla
+    snapshotow lykala wyjatki - luka dobowego krycia milestone'ow rosla
+    tygodniami bez sladu w Systemie. Event tylko przy zmianie stanu."""
+    try:
+        prev = db.get_json_setting("riot_api_auth") or {}
+        if prev.get("ok") == ok and prev.get("status") == status:
+            return
+        db.set_json_setting("riot_api_auth",
+                            {"ok": ok, "status": status, "ts": int(time.time())})
+        db.log_event("riot_auth", {"ok": ok, "status": status})
+    except Exception:
+        pass  # czujka nie moze wywracac sciezki, ktora obserwuje
+
+
+def _loop_error(loop, e):
+    """(A6) Gole `except: pass` w petlach tla czynilo kazda awarie
+    niewidzialna. log_event sam moze pasc (bywa TA awaria) - wtedy
+    zostaje przynajmniej konsola kontenera."""
+    try:
+        db.log_event("loop_error", {
+            "loop": loop, "error": f"{type(e).__name__}: {str(e)[:160]}"})
+    except Exception:
+        pass
+
+
 async def mayhem_sentinel_loop():
     """Riot dzis celowo blokuje Mayhema w match-v5 (403; developer-relations
     #1109 i #1154). Raz na dobe sprawdzamy jednym zapytaniem, czy to sie
@@ -51,8 +78,14 @@ async def mayhem_sentinel_loop():
                         f"https://{region}.api.riotgames.com/lol/match/v5/"
                         f"matches/by-puuid/{puuid}/ids",
                         params={"queue": 2400, "count": 1}) or []
-                except HTTPException:
-                    ids = []  # 403/404 = nadal zablokowane, to norma
+                except HTTPException as e:
+                    # 403/404 = nadal zablokowane, to norma. 401 jest za to
+                    # jednoznaczne: zly/martwy klucz (403 tu NIE rozstrzyga
+                    # o kluczu - zablokowana kolejka tez daje 403; klucz
+                    # rozstrzyga petla snapshotow, gdzie 403 = klucz)
+                    if e.status_code == 401:
+                        note_riot_auth(False, 401)
+                    ids = []
                 db.set_json_setting("mayhem_api", {
                     "checked_at": int(time.time()),
                     "open": bool(ids),
@@ -60,8 +93,8 @@ async def mayhem_sentinel_loop():
                 if ids:
                     db.log_event("mayhem_api_open", {"match_id": ids[0]},
                                  int(time.time()))
-        except Exception:
-            pass
+        except Exception as e:
+            _loop_error("sentinel", e)
         await asyncio.sleep(3600)
 
 
@@ -81,8 +114,14 @@ async def daily_snapshot_loop():
                     db.log_event, "snapshot_cron",
                     {"snapshot_id": r.get("snapshot_id"),
                      "champions": r.get("champions")}, int(time.time()))
-        except Exception:
-            pass
+        except HTTPException as e:
+            # champion-mastery-v4 z dobrym kluczem nie zwraca 401/403 -
+            # tutaj (w odroznieniu od sentinela) to jednoznacznie klucz
+            if e.status_code in (401, 403):
+                note_riot_auth(False, e.status_code)
+            _loop_error("snapshot_cron", e)
+        except Exception as e:
+            _loop_error("snapshot_cron", e)
         await asyncio.sleep(3600)
 
 
@@ -99,8 +138,8 @@ async def balance_refresh_loop():
                                              follow_redirects=True)
                 if r.status_code == 200:
                     await asyncio.to_thread(balance.store_balance, r.text)
-        except Exception:
-            pass
+        except Exception as e:
+            _loop_error("balance", e)
         await asyncio.sleep(6 * 3600)
 
 
@@ -226,6 +265,7 @@ async def snapshot():
     data = await riot_get(
         f"https://{PLATFORM}.api.riotgames.com"
         f"/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}")
+    note_riot_auth(True, 200)
     ts = int(time.time())
     prev = db.latest_snapshot_id()
     sid = await asyncio.to_thread(db.save_snapshot, ts, data)
@@ -606,6 +646,15 @@ async def push_grade(payload: dict):
                 }, ts)
         except Exception as e:
             errors.append(f"{type(e).__name__}: {e}")
+    if errors and new == 0:
+        # (A1) 200 przy zerze udanych zapisow rozbrajalo kolejke dyskowa
+        # agenta (flush kasuje wpis przy kazdym 2xx) - ocena, jedyna
+        # bezpowrotna dana systemu, znikala przy chwilowej awarii bazy.
+        # 5xx = agent odklada i dosyla; zapis jest idempotentny (REPLACE
+        # po match_id), wiec powtorka nic nie psuje. Awaria SAMEGO
+        # archiwum grade_raw przy udanym save_grade zostaje na 200 -
+        # archiwum nie blokuje zapisu oceny (intencja wyzej).
+        raise HTTPException(500, "; ".join(errors[:3]))
     if new:
         # nowa obserwacja = trening od razu. Bez tego grade_model w settings
         # stoi na stanie sprzed oceny, a predykcje/readiness/targets czytaja
@@ -711,8 +760,16 @@ async def push_eog(payload: dict):
             "participants": participants}, ts)
         return {"stored": True, "new": new, "stats_rows": stats_rows,
                 "pool_id": pool_id, "participants": participants}
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"stored": False, "errors": [f"{type(e).__name__}: {e}"]}
+        # (A1) 200 z {stored:false} rozbrajalo kolejke dyskowa agenta -
+        # przy padzie save_eog blob eog_raw i tozsamosci 9 graczy nie
+        # powstawaly JUZ NIGDY (blok zyje w LCU chwile). 5xx = dosylka;
+        # wszystkie kroki sa idempotentne (REPLACE / INSERT OR IGNORE /
+        # DELETE+INSERT), wiec czesciowo udany zapis mozna bezpiecznie
+        # powtorzyc w calosci.
+        raise HTTPException(500, f"{type(e).__name__}: {e}") from e
 
 
 @api.get("/eog")
@@ -1141,6 +1198,11 @@ async def system_health():
         "gates": await asyncio.to_thread(db.data_gates),
         "pipeline": await asyncio.to_thread(db.pipeline_sanity),
         "last_backup": db.get_json_setting("last_backup"),
+        # (A6) czujki: zdrowie klucza Riot i wiek mnoznikow balansu -
+        # progi koloru naklada front, tu czysty odczyt
+        "riot_auth": db.get_json_setting("riot_api_auth"),
+        "balance_fetched_at": (db.get_json_setting("mayhem_balance")
+                               or {}).get("fetched_at"),
     }
 
 

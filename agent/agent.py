@@ -51,6 +51,20 @@ LIVE_BASE = "https://127.0.0.1:2999/liveclientdata"
 # Data Dragona (np. game_character_displayname_MonkeyKing -> MonkeyKing).
 RAW_CHAMP_PREFIX = "game_character_displayname_"
 
+# (A4) Po tylu nieudanych probach odzysku gra jest pomijana do restartu
+# agenta - jedna trwale niepobieralna gra w glowie listy (limit=1, DESC)
+# blokowala odzysk wszystkich starszych na zawsze; ta sama klasa co
+# zatruta glowa kolejki dyskowej z 2.09.
+RECOVER_MAX_FAILS = 3
+
+# (A8) Tyle kolejnych pustych odczytow allgamedata uznajemy za koniec gry.
+# Pojedynczy timeout w srodku meczu byl nieodroznialny od smierci portu
+# 2999: agent wysylal czesciowy eventdata, po wznowieniu zbieral dalej
+# i przy prawdziwym koncu dokladal drugi, pelny log - duplikaty falszowaly
+# licznik bramki "50 gier eventdata". Zwloka 3 x live_poll_seconds przy
+# prawdziwym koncu gry nic nie kosztuje (port i tak juz nie zyje).
+LIVE_GONE_AFTER = 3
+
 DIAG_ENDPOINTS = [
     "/lol-end-of-game/v1/eog-stats-block",
     MASTERY_UPDATES,
@@ -144,11 +158,13 @@ class Server:
     dosylane w tle. Ocena i ekran koncowy istnieja w LCU chwile - jesli
     backend akurat lezy (rebuild, uspiony Mac, czknieta siec), bez bufora
     przepadaja bezpowrotnie. Backend deduplikuje po match_id, wiec dosylka
-    jest bezpieczna nawet podwojna. Bledy 4xx NIE trafiaja do kolejki -
-    zle dane nie stana sie dobre od powtarzania.
+    jest bezpieczna nawet podwojna. Bledy 4xx nie ida do dosylki (zle dane
+    nie stana sie dobre od powtarzania), ale na sciezkach krytycznych
+    payload laduje jako .bad - odrzucenie typu 401 po rotacji tokenu nie
+    moze byc jedyna kopia oceny, ktora wyparowala z LCU.
     """
 
-    DURABLE = ("/grade", "/eog", "/snapshot", "/history/lcu")
+    DURABLE = ("/grade", "/eog", "/snapshot", "/history/lcu", "/eventdata")
     QUEUE_DIR = HERE / "queue"
 
     def __init__(self, cfg, session):
@@ -161,14 +177,28 @@ class Server:
         tok = self.cfg.get("api_token")
         return {"X-API-Token": tok} if tok else {}
 
-    async def post(self, path, payload=None, timeout=90):
-        if self._flush_task is None:
+    def _durable(self, path):
+        return any(path.startswith(d) for d in self.DURABLE)
+
+    def ensure_flush(self):
+        """Startuje petle dosylki, jesli jeszcze nie chodzi. Wolane przy
+        starcie agenta, nie tylko z post() - wpisy z poprzedniego
+        uruchomienia lezaly do pierwszej gry, bo kazdy post() wymaga
+        zywego klienta LoL, a dosylce wystarczy zywy backend."""
+        if self._flush_task is None or self._flush_task.done():
             self._flush_task = asyncio.create_task(self._flush_loop())
+
+    async def post(self, path, payload=None, timeout=90):
+        self.ensure_flush()
         status, parsed = await self._send(path, payload, timeout)
         if status is None or status >= 500:
             self._enqueue(path, payload, timeout)
             return None
         if status >= 400:
+            if self._durable(path):
+                self._write_item(path, payload, timeout, suffix=".bad",
+                                 extra={"status": status})
+                log(f"odrzucone {status}: {path} -> kopia .bad w kolejce", "warn")
             return None
         return parsed
 
@@ -193,21 +223,29 @@ class Server:
             log(f"blad polaczenia z serwerem ({path}): {e}", "warn")
             return None, None
 
-    def _enqueue(self, path, payload, timeout):
-        if not any(path.startswith(d) for d in self.DURABLE):
-            return
+    def _write_item(self, path, payload, timeout, suffix=".json", extra=None):
+        """Wpis kolejki na dysku. .json = do dosylki, .bad = kopia
+        odrzuconego payloadu (nie jest dosylany, ale nie ginie)."""
         try:
             self.QUEUE_DIR.mkdir(exist_ok=True)
             # sam timestamp ms kolidowal: ocena i eog zakolejkowane w tej
             # samej milisekundzie (backend lezy po grze) nadpisywaly sie
             # nawzajem - licznik gwarantuje unikalnosc i kolejnosc
-            name = f"{int(time.time() * 1000)}-{next(self._seq):04d}.json"
+            name = f"{int(time.time() * 1000)}-{next(self._seq):04d}{suffix}"
+            item = {"path": path, "payload": payload, "timeout": timeout}
+            item.update(extra or {})
             (self.QUEUE_DIR / name).write_text(
-                json.dumps({"path": path, "payload": payload, "timeout": timeout},
-                           ensure_ascii=False), encoding="utf-8")
-            log(f"zapisano do kolejki: {path} - dosle, gdy serwer wroci", "warn")
+                json.dumps(item, ensure_ascii=False), encoding="utf-8")
+            return True
         except OSError as e:
             log(f"NIE MOGE zapisac kolejki: {e}", "err")
+            return False
+
+    def _enqueue(self, path, payload, timeout):
+        if not self._durable(path):
+            return
+        if self._write_item(path, payload, timeout):
+            log(f"zapisano do kolejki: {path} - dosle, gdy serwer wroci", "warn")
 
     async def _flush_loop(self):
         while True:
@@ -259,6 +297,7 @@ class Agent:
         self._eog_done = True
         self._sb_idle = False      # czy zalogowano juz pusta kolejke snowballa
         self._my_puuid = None
+        self._recover_fails = {}   # gid -> nieudane proby odzysku (A4)
 
     # ---------- akcje ----------
 
@@ -551,16 +590,32 @@ class Agent:
                                        if i.get("participantId") == pid]
         return out
 
+    def _recover_fail(self, gid, why, level="dim"):
+        """Ksiegowosc niepowodzen odzysku - po RECOVER_MAX_FAILS gra jest
+        pomijana (wroci po restarcie agenta), zeby nie blokowala starszych."""
+        n = self._recover_fails.get(gid, 0) + 1
+        self._recover_fails[gid] = n
+        if n >= RECOVER_MAX_FAILS:
+            log(f"odzysk gry {gid}: {why} - {n} nieudanych prob, "
+                "pomijam do restartu agenta", "warn")
+        else:
+            log(f"odzysk gry {gid}: {why}", level)
+        return False
+
     async def _recover_once(self):
-        """Jedna proba odzysku: najnowsza znana gra bez statystyk, pobrana
-        w komplecie po ID i przycieta do wlasnego uczestnika."""
+        """Jedna proba odzysku: najnowsza NIEPOMIJANA gra bez statystyk,
+        pobrana w komplecie po ID i przycieta do wlasnego uczestnika.
+        Sukces = serwer faktycznie zapisal wiersz (new > 0) - samo 200 nie
+        wystarcza, bo /history/lcu polyka wyjatek zapisu per gra do errors
+        i gra zostawala na liscie missing jako wieczny "sukces"."""
         r = await self.session.get(
-            self.cfg["api_base"] + "/history/missing?limit=1",
+            self.cfg["api_base"] + "/history/missing?limit=10",
             timeout=aiohttp.ClientTimeout(total=15))
         gids = (await r.json()).get("game_ids") or []
-        if not gids:
+        gid = next((g for g in gids
+                    if self._recover_fails.get(g, 0) < RECOVER_MAX_FAILS), None)
+        if gid is None:
             return False
-        gid = gids[0]
         if not getattr(self, "_my_puuid", None):
             me = await self.lcu.get("/lol-summoner/v1/current-summoner") or {}
             self._my_puuid = me.get("puuid")
@@ -568,15 +623,20 @@ class Agent:
             return False
         g = await self.lcu.get(f"/lol-match-history/v1/games/{gid}", timeout=20)
         if not g:
-            log(f"odzysk gry {gid}: LCU nie oddal danych", "dim")
-            return False
+            return self._recover_fail(gid, "LCU nie oddal danych")
         slim = self.own_slice(g, self._my_puuid)
         if slim is None:
-            log(f"odzysk gry {gid}: brak wlasnego uczestnika", "warn")
-            return False
+            return self._recover_fail(gid, "brak wlasnego uczestnika", "warn")
         r2 = await self.server.post("/history/lcu", {"games": [slim]})
-        if r2 is not None:
-            log(f"odzysk gry {gid}: zapisano ({r2.get('new', 0)} nowych)", "ok")
+        if r2 is None:
+            # brak sieci/5xx - payload czeka w kolejce dyskowej, licznik
+            # rosnie, zeby wieczne 5xx tez nie zatrzymalo glowy listy
+            return self._recover_fail(gid, "serwer nieosiagalny (kolejka dosle)")
+        if not r2.get("new"):
+            why = (r2.get("errors") or ["zapis odrzucony (new=0)"])[0]
+            return self._recover_fail(gid, f"serwer nie zapisal: {why}", "warn")
+        self._recover_fails.pop(gid, None)
+        log(f"odzysk gry {gid}: zapisano ({r2.get('new')} nowych)", "ok")
         return True
 
     async def recover_loop(self):
@@ -805,8 +865,11 @@ class Agent:
 
     async def live_loop(self):
         """Odczyt stanu gry na zywo. Port 2999 istnieje tylko podczas meczu,
-        wiec ConnectionError jest normalnym stanem, nie bledem."""
+        wiec ConnectionError jest normalnym stanem, nie bledem. Koniec gry
+        uznajemy po LIVE_GONE_AFTER kolejnych pustych odczytach - pojedynczy
+        timeout w srodku meczu to czkawka, nie koniec."""
         was_live = False
+        misses = 0
         while True:
             try:
                 async with self.session.get(
@@ -819,11 +882,18 @@ class Agent:
 
             if not data:
                 if was_live:
+                    misses += 1
+                    if misses < LIVE_GONE_AFTER:
+                        await asyncio.sleep(self.cfg.get("live_poll_seconds", 2))
+                        continue
                     was_live = False
+                    misses = 0
                     log("koniec danych na zywo", "dim")
                     await self.server.post("/live", {"ended": True}, timeout=15)
                     # eventdata znika razem z portem 2999 - wysylamy ostatni
-                    # zlapany stan (kolejka dyskowa dosle przy braku sieci)
+                    # zlapany stan. Bufor wolno czyscic bezwarunkowo, bo
+                    # /eventdata jest na liscie DURABLE: porazka POST-a
+                    # laduje w kolejce dyskowej, odrzut 4xx jako .bad
                     if getattr(self, "_live_events", None):
                         r = await self.server.post("/eventdata", {
                             "events": self._live_events,
@@ -834,6 +904,7 @@ class Agent:
                         self._live_events = None
                 await asyncio.sleep(self.cfg.get("live_poll_seconds", 2))
                 continue
+            misses = 0
 
             ev = ((data.get("events") or {}).get("Events")) or []
             if ev:
@@ -940,7 +1011,8 @@ class Agent:
         }, timeout=15)
 
     async def load_champ_ids(self):
-        """Nazwa championa -> id, z Data Dragon. Live API podaje tylko nazwe."""
+        """Nazwa championa -> id, z Data Dragon. Live API podaje tylko nazwe.
+        Zwraca True po udanym zaladowaniu."""
         try:
             async with self.session.get(
                 "https://ddragon.leagueoflegends.com/api/versions.json",
@@ -954,8 +1026,19 @@ class Agent:
             self.champ_keys_ci = {k.lower(): (k, cid)
                                   for k, cid in self.champ_ids.items()}
             log(f"mapa championow zaladowana ({len(self.champ_ids)})", "dim")
+            return True
         except Exception as e:
             log(f"nie udalo sie zaladowac mapy championow: {e}", "warn")
+            return False
+
+    async def champ_ids_loop(self):
+        """(A5) Jedyny one-shot fetch w agencie zbudowanym poza tym na retry:
+        czkniecie DNS/DD przy starcie zostawialo pusta mape na caly proces,
+        a z nia champion_id=None w /live i /eventdata do restartu."""
+        while not self.champ_ids:
+            if await self.load_champ_ids():
+                return
+            await asyncio.sleep(60)
 
     async def poll_loop(self):
         """Siatka bezpieczenstwa - gdyby WebSocket przeoczyl zmiane stanu."""
@@ -1032,7 +1115,10 @@ class Agent:
             log("agent startuje")
             log(f"serwer: {self.cfg['api_base']}", "dim")
 
-            await self.load_champ_ids()
+            # dosylka rusza od razu: wpisy z poprzedniego uruchomienia maja
+            # wyjsc, gdy tylko backend zyje - bez czekania na klienta LoL
+            self.server.ensure_flush()
+            asyncio.create_task(self.champ_ids_loop())
             asyncio.create_task(self.poll_loop())
             asyncio.create_task(self.snowball_loop())
             asyncio.create_task(self.live_loop())

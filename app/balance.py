@@ -127,6 +127,17 @@ def store_balance(html, ts=None):
             continue
         champions[str(cid)] = mods
 
+    if len(champions) < MIN_CHAMPIONS:
+        # bramka wyzej chroni przed zepsutym PARSEREM, ale nie przed
+        # zepsutym DOPASOWANIEM (precedens: encje HTML, 2.09) - przy
+        # parsed=103 i matched=0 stare, dobre mnozniki bylyby nadpisane
+        # pustka ze stored=True
+        db.log_event("balance_match_failed",
+                     {"parsed": len(parsed), "matched": len(champions)}, ts)
+        return {"stored": False, "parsed": len(parsed),
+                "matched": len(champions), "unmatched": unmatched[:10],
+                "reason": f"dopasowano mniej niz {MIN_CHAMPIONS} championow"}
+
     payload = {"fetched_at": ts, "source": BALANCE_URL,
                "count": len(champions), "unmatched": unmatched,
                "champions": champions}
