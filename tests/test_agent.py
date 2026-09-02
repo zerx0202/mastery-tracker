@@ -418,6 +418,38 @@ def test_recover_counts_server_rejection_as_failure():
     assert fails.get(9) == 1
 
 
+# ---------- czarna skrzynka (E) ----------
+
+def test_report_health_counts_queue_files(tmp_path):
+    async def run():
+        a = ag.Agent({"api_base": "http://backend"})
+        a.server = FakeServer()
+        a.server.QUEUE_DIR = tmp_path / "queue"
+        a.server.QUEUE_DIR.mkdir()
+        (a.server.QUEUE_DIR / "1.json").write_text("{}")
+        (a.server.QUEUE_DIR / "2.json").write_text("{}")
+        (a.server.QUEUE_DIR / "3.bad").write_text("{}")
+        a.ws_failures = 2
+        await a.report_health()
+        return a.server.posts
+
+    posts = asyncio.run(run())
+    path, payload = posts[0]
+    assert path == "/agent/health"
+    assert payload == {"queue": 2, "bad": 1, "ws_ok": False}
+
+
+def test_incident_is_durable(tmp_path):
+    async def run():
+        srv = make_server(tmp_path, [ConnectionError("backend lezy")])
+        await srv.post("/agent/incident", {"kind": "start"})
+
+    asyncio.run(run())
+    files = list((tmp_path / "queue").glob("*.json"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_text(encoding="utf-8"))["path"] == "/agent/incident"
+
+
 # ---------- epizod pomeczowy (post_game_capture) ----------
 
 class FakeLcuEpisode(FakeLcuRaw):

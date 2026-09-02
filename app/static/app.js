@@ -598,9 +598,19 @@ function explainBox(ex) {
         ex.augments.map(a =>
           `<span class="chip ${a.rarity === 2 ? "gold" : ""}">${
             esc(a.name || ("#" + a.id))}</span>`).join(" ")}</div>` : "";
+  // (E) pozycja na tle 10 graczy TEGO meczu — kontekst, nie diagnoza:
+  // pozycja jest skonfundowana składem (ocena Riota liczy się względem
+  // populacji championa, nie wewnątrz lobby)
+  const mpct = (ex.match_pct && ex.match_pct.length)
+    ? `<div class="range" style="margin-top:9px">na tle meczu: ${
+        ex.match_pct.map(m =>
+          `${esc(m.label)} <b>${m.rank}.</b><small class="dim">/${m.of}</small>`
+        ).join(" · ")}
+        <small class="dim">(pozycja zależy od składu — porównuj z normami
+        championa, nie „dokręcaj" tej listy)</small></div>` : "";
   return `<div class="explain-box">
     <div class="range">Szansa wg modelu — ${ths}</div>
-    <div style="margin-top:9px">${bars}</div>${pct}${augs}
+    <div style="margin-top:9px">${bars}</div>${pct}${mpct}${augs}
     <div class="tagline" style="margin-top:7px">Wkład = waga cechy × odchylenie
       od Twojej normy na tym championie; dodatni ciągnął tę ocenę w górę.</div>
   </div>`;
@@ -887,11 +897,46 @@ async function renderSystem() {
     <span style="color:${balOld ? "var(--warn)" : "inherit"}">${
     ago(d.balance_fetched_at)}</span></div>`;
 
+  // (E) watchdog: przyrost maestrii między snapshotami bez śladu eog =
+  // grano bez agenta; gry są odzyskiwalne, przepadają live/eventdata
+  const gaps = d.agent_gaps || [];
+  const fmtTs = ts => new Date(ts * 1000).toLocaleString("pl-PL",
+    {day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit"});
+  const gapBanner = gaps.length ? `<div class="msg" style="margin-top:16px;
+      border:1px solid #6B4E28;border-radius:8px;padding:10px 14px;
+      color:var(--warn)">⚠ Grano bez agenta: ${gaps.length} ${
+      gaps.length === 1 ? "okno" : "okna"} przyrostu maestrii bez śladu
+      ekranu końcowego (ostatnie: ${fmtTs(gaps[gaps.length - 1].from_ts)}–${
+      fmtTs(gaps[gaps.length - 1].to_ts)}, +${
+      gaps[gaps.length - 1].points_delta} pkt). Gry odzyska P6/backfill,
+      zanim wypadną z okna 20 — bezpowrotnie przepadają live i eventdata.
+    </div>` : "";
+
+  // (E) czarna skrzynka agenta — WIEK meldunku jest częścią sygnału:
+  // martwy agent to starzejący się wpis, nie fałszywe „ok"
+  const ah = d.agent_health;
+  const ahOld = ah && (d.now - (ah.ts || 0)) > 900;
+  const agentPanel = `<div class="panel"><div class="eyebrow">Agent</div>
+    ${ah ? `
+      <div class="kv"><span>Meldunek</span>
+        <span style="color:${ahOld ? "var(--warn)" : "var(--ok)"}">${ago(ah.ts)}</span></div>
+      <div class="kv"><span>Kolejka dosyłki</span>
+        <span style="color:${ah.queue ? "var(--warn)" : "inherit"}">${ah.queue ?? "—"}</span></div>
+      <div class="kv"><span>Odrzucone (.bad)</span>
+        <span style="color:${ah.bad ? "var(--warn)" : "inherit"}">${ah.bad ?? "—"}</span></div>
+      <div class="kv"><span>WebSocket</span>
+        <span style="color:${ah.ws_ok ? "var(--ok)" : "var(--warn)"}">${
+        ah.ws_ok ? "połączony" : "polling"}</span></div>`
+      : `<div class="msg dim">brak meldunku — agent w tej wersji jeszcze
+         nie startował</div>`}
+  </div>`;
+
   let pred = {};
   try { pred = await api("/predictions/scorecard"); } catch (e) {}
-  $("system-body").innerHTML = `
+  $("system-body").innerHTML = gapBanner + `
     <div class="grid2" style="margin-top:20px">
       <div class="panel"><div class="eyebrow">Ostatnia aktywność</div>${seen}${backupKv}${authKv}${balKv}</div>
+      ${agentPanel}
       <div class="panel"><div class="eyebrow">Zebrane dane</div>${counts}
         ${d.custom_games ? `<div class="kv"><span class="dim">w tym treningi
           (custom, poza misją)</span><span class="dim">${d.custom_games}</span></div>` : ""}

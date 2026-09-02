@@ -1063,6 +1063,35 @@ async def cheatsheet(champion_id: int):
         return ent
 
 
+# (E) Czarna skrzynka agenta: cykl zycia widoczny z PWA, nie tylko
+# w konsoli Windows. Metryki (kolejka/.bad/WS) ida best-effort zwyklym
+# POST-em - meldunek o zatkanej kolejce wysylany PRZEZ te kolejke bylby
+# spozniony dokladnie wtedy, gdy jest potrzebny, i sam by ja pompowal.
+# Incydenty (start, pad WS) sa rzadkie i ida sciezka DURABLE agenta.
+AGENT_INCIDENT_KINDS = {"start", "stop", "ws_down", "ws_up", "error"}
+
+
+@write_api.post("/agent/health")
+async def agent_health(payload: dict):
+    await asyncio.to_thread(db.set_json_setting, "agent_health", {
+        "ts": int(time.time()),
+        "queue": payload.get("queue"),
+        "bad": payload.get("bad"),
+        "ws_ok": bool(payload.get("ws_ok")),
+    })
+    return {"stored": True}
+
+
+@write_api.post("/agent/incident")
+async def agent_incident(payload: dict):
+    kind = str(payload.get("kind") or "")
+    if kind not in AGENT_INCIDENT_KINDS:
+        return {"stored": False, "errors": ["nieznany rodzaj incydentu"]}
+    await asyncio.to_thread(db.log_event, f"agent_{kind}",
+                            {"detail": str(payload.get("detail") or "")[:200]})
+    return {"stored": True}
+
+
 @write_api.post("/backup/report")
 async def backup_report(payload: dict):
     """(P5) backup-server na Macu melduje tu wynik backupu. Dashboard
@@ -1133,6 +1162,8 @@ async def grades_explain(match_id: str):
                       (match_id,)).fetchone()
     ids = json.loads(r["augments"]) if r and r["augments"] else []
     out["augments"] = augments.names_for(ids)
+    # (E) pozycja na tle 10 graczy TEGO meczu - kontekst, nie diagnoza
+    out["match_pct"] = await asyncio.to_thread(db.match_percentiles, match_id)
     return out
 
 
@@ -1371,6 +1402,9 @@ async def system_health():
         "balance_fetched_at": (db.get_json_setting("mayhem_balance")
                                or {}).get("fetched_at"),
         "custom_games": custom,
+        # (E) czarna skrzynka agenta + watchdog "grano bez agenta"
+        "agent_health": db.get_json_setting("agent_health"),
+        "agent_gaps": await asyncio.to_thread(db.agent_activity_gaps),
     }
 
 

@@ -164,7 +164,8 @@ class Server:
     moze byc jedyna kopia oceny, ktora wyparowala z LCU.
     """
 
-    DURABLE = ("/grade", "/eog", "/snapshot", "/history/lcu", "/eventdata")
+    DURABLE = ("/grade", "/eog", "/snapshot", "/history/lcu", "/eventdata",
+               "/agent/incident")
     QUEUE_DIR = HERE / "queue"
 
     def __init__(self, cfg, session):
@@ -493,6 +494,41 @@ class Agent:
         if r:
             log(f"snowball: {r.get('received')} kandydatow, "
                 f"w rejestrze {r.get('known_total')}", "dim")
+
+    def _queue_stats(self):
+        q = self.server.QUEUE_DIR
+        if not q.exists():
+            return 0, 0
+        return len(list(q.glob("*.json"))), len(list(q.glob("*.bad")))
+
+    async def report_health(self):
+        """(E) Czarna skrzynka: metryki cyklu zycia (zaleglosc kolejki,
+        liczba .bad, stan WS) widoczne z PWA. Best-effort ZWYKLYM POST-em -
+        meldunek o zatkanej kolejce nie moze isc ta kolejka. UI patrzy na
+        WIEK meldunku: martwy agent = starzejacy sie wpis, nie falszywe
+        'wszystko ok'."""
+        queue, bad = self._queue_stats()
+        await self.server.post("/agent/health", {
+            "queue": queue, "bad": bad,
+            "ws_ok": self.ws_failures == 0}, timeout=10)
+
+    async def health_report_loop(self):
+        while True:
+            try:
+                await self.report_health()
+            except Exception as e:
+                log(f"meldunek zdrowia: {type(e).__name__}: {e}", "dim")
+            await asyncio.sleep(300)
+
+    async def report_incident(self, kind, detail=""):
+        """Incydenty (start, pad/powrot WS) sa rzadkie - ida sciezka
+        DURABLE, wiec przezyja lezacy backend."""
+        try:
+            await self.server.post("/agent/incident",
+                                   {"kind": kind, "detail": str(detail)[:200]},
+                                   timeout=10)
+        except Exception as e:
+            log(f"meldunek incydentu: {type(e).__name__}: {e}", "dim")
 
     async def snowball_loop(self):
         """Co ~60 s bierze jednego gracza z rejestru serwera i dosyla jego
@@ -1121,6 +1157,8 @@ class Agent:
                 await ws.send_str(json.dumps(
                     [5, "OnJsonApiEvent_lol-end-of-game_v1_champion-mastery-updates"]))
                 log("WebSocket podlaczony", "ok")
+                if self.ws_failures:
+                    await self.report_incident("ws_up")
                 self.ws_failures = 0
 
                 async for msg in ws:
@@ -1162,6 +1200,8 @@ class Agent:
             # dosylka rusza od razu: wpisy z poprzedniego uruchomienia maja
             # wyjsc, gdy tylko backend zyje - bez czekania na klienta LoL
             self.server.ensure_flush()
+            await self.report_incident("start")
+            asyncio.create_task(self.health_report_loop())
             asyncio.create_task(self.champ_ids_loop())
             asyncio.create_task(self.poll_loop())
             asyncio.create_task(self.snowball_loop())
@@ -1202,10 +1242,12 @@ class Agent:
                         log(f"WebSocket odrzucil polaczenie: HTTP {e.status} {e.message}", "warn")
                         log("dzialam na pollingu co "
                             f"{self.cfg.get('fallback_poll_seconds', 10)}s - nic nie ginie", "dim")
+                        await self.report_incident("ws_down", f"HTTP {e.status}")
                 except Exception as e:
                     self.ws_failures += 1
                     if self.ws_failures == 1:
                         log(f"WebSocket rozlaczony: {type(e).__name__}: {e}", "dim")
+                        await self.report_incident("ws_down", type(e).__name__)
 
                 # rosnaca przerwa, zeby nie zasypywac logu
                 delay = min(5 * (2 ** min(self.ws_failures, 5)), 120)

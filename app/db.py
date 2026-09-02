@@ -1530,6 +1530,76 @@ def stat_keys():
             "SELECT stat_key, COUNT(*) n FROM player_stat GROUP BY stat_key ORDER BY stat_key")]
 
 
+# (E) Percentyl wewnatrzmeczowy: pozycja wsrod 10 graczy TEGO meczu.
+# Kontekst, nie diagnoza - pozycja jest skonfundowana skladem druzyn
+# (mag nie "dokreci" przetankowania wzgledem tanka), a ocena Riota liczy
+# sie wzgledem populacji championa; UI podpisuje to wprost.
+PCT_KEYS = [
+    ("totalDamageDealtToChampions", "obrażenia"),
+    ("totalDamageTaken", "obrażenia przyjęte"),
+    ("totalHeal", "leczenie"),
+    ("goldEarned", "złoto"),
+]
+
+
+def match_percentiles(match_id):
+    """Rozszerzenie my_share na kilka kluczy per-min naraz. Wylacznie mecze
+    z pelnym lobby (>=8 uczestnikow ze statystykami): wpisy jednoosobowe
+    (wlasny listing LCU, stare SB) pokazywalyby '1. z 1'."""
+    from .features import minutes
+    keys = [k for k, _ in PCT_KEYS]
+    marks = ",".join("?" * len(keys))
+    with connect() as con:
+        dur = con.execute("SELECT duration FROM match_player WHERE match_id=?",
+                          (match_id,)).fetchone()
+        rows = [dict(r) for r in con.execute(
+            f"SELECT participant_no, is_local, stat_key, stat_value "
+            f"FROM player_stat WHERE match_id=? AND stat_key IN ({marks})",
+            (match_id, *keys))]
+    if not dur or len({r["participant_no"] for r in rows}) < 8:
+        return []
+    mins = minutes(dur["duration"])
+    out = []
+    for key, label in PCT_KEYS:
+        vals = [(r["stat_value"], r["is_local"]) for r in rows
+                if r["stat_key"] == key]
+        mine = next((v for v, loc in vals if loc), None)
+        if mine is None or len(vals) < 8:
+            continue
+        better = sum(1 for v, _ in vals if v > mine)
+        out.append({"key": key, "label": label, "rank": better + 1,
+                    "of": len(vals), "per_min": round(mine / mins, 1)})
+    return out
+
+
+def agent_activity_gaps(limit=5, slack=300):
+    """(E) Watchdog "grano bez agenta": miedzy snapshotami punkty maestrii
+    urosly, a agent nie zameldowal ZADNEGO ekranu koncowego w tym oknie.
+    Gry sa odzyskiwalne (P6/backfill), bezpowrotnie przepadaja oceny sprzed
+    dosylki, live i eventdata - baner ma wywolac odzysk, zanim gra wypadnie
+    z okna 20. Okna po timestampach snapshotow (nie dobach kalendarzowych -
+    pulapka UTC), z luzem na wyscigi zapisu."""
+    with connect() as con:
+        snaps = [dict(r) for r in con.execute(
+            "SELECT id, taken_at FROM snapshot ORDER BY taken_at")]
+        totals = {r["snapshot_id"]: r["p"] for r in con.execute(
+            "SELECT snapshot_id, SUM(points) p FROM mastery "
+            "GROUP BY snapshot_id")}
+        eog_ts = [r["ts"] for r in con.execute(
+            "SELECT ts FROM event_log WHERE kind='eog'")]
+    gaps = []
+    for a, b in zip(snaps, snaps[1:], strict=False):
+        delta = (totals.get(b["id"]) or 0) - (totals.get(a["id"]) or 0)
+        if delta <= 0:
+            continue
+        lo, hi = a["taken_at"] - slack, b["taken_at"] + slack
+        if any(lo <= t <= hi for t in eog_ts):
+            continue
+        gaps.append({"from_ts": a["taken_at"], "to_ts": b["taken_at"],
+                     "points_delta": delta})
+    return gaps[-limit:]
+
+
 def my_share(match_id, stat_key):
     """Twoj udzial w stawce danej gry - normalizacja na dlugosc i tempo meczu."""
     with connect() as con:
