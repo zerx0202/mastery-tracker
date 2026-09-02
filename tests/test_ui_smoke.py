@@ -55,6 +55,7 @@ def _seed():
     db.learn_ladder(entries, now)
     db.save_snapshot(now, entries)
     db.set_lobby([45, 12, 99], "KIWI", "limited", now, trade_ids=[12])
+    db.set_setting("ddragon_patch", "16.16.1")
     db.set_json_setting("pass_state", {"ts": now, "events": [{
         "name": "Season 3: Act I", "days_left": 21.5,
         "progress": {"level": 3, "totalLevels": 20},
@@ -132,6 +133,17 @@ def test_pass_tile_renders(page):
     assert "Season 3: Act I" in txt
     assert "za 21 dni" in txt
     assert "Tempo (7 dni)" in txt
+
+
+def test_hero_links_to_patch_notes(page):
+    # (41) wiki nazywa strony marketingowo (V26.16), ddragon wewnetrznie
+    # (16.16.1) - link musi przemapowac numer i dokleic kotwice championa
+    # baner tez ma .patch-link (bez kotwicy) - celujemy w link przy nazwie
+    a = page.wait_for_selector("#hero .who a.patch-link")
+    href = a.get_attribute("href")
+    assert re.fullmatch(
+        r"https://wiki\.leagueoflegends\.com/en-us/V26\.16#(Veigar|Alistar|Lux)",
+        href), href
 
 
 def test_grade_row_expands_and_collapses(page):

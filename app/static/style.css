@@ -222,3 +222,8 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
 .pull-val.ok{color:var(--ok)}
 .pull-val.warn{color:var(--warn)}
 .explain-row td{background:rgba(255,255,255,.015)}
+
+/* (41) dyskretny link do notek patcha - w banerze i przy hero */
+.patch-link{color:inherit;text-decoration:underline dotted;text-underline-offset:3px}
+.patch-link:hover{color:var(--gold)}
+.who .patch-link{font:500 11px/1 var(--mono);color:var(--dim);margin-left:6px}

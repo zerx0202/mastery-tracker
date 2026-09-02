@@ -34,6 +34,18 @@ function rail(milestone, goal, nextGrade) {
           <div class="rail-legend">${legend}</div>`;
 }
 
+/* (41) Link do notek patcha na wiki. Wiki nazywa strony numerem
+   marketingowym (V26.17), a gameVersion/ddragon zostaly przy wewnetrznym
+   (16.17) - od rebrandu numeracji w 2025 marketing = major + 10.
+   Kotwica sekcji championa = nazwa ze spacjami jako podkreslenia
+   (tak MediaWiki generuje id naglowkow). */
+function patchUrl(short, name) {
+  if (!short) return null;
+  const [maj, min] = String(short).split(".");
+  const anchor = name ? "#" + encodeURIComponent(name.replaceAll(" ", "_")) : "";
+  return `https://wiki.leagueoflegends.com/en-us/V${+maj + 10}.${min}${anchor}`;
+}
+
 /* ---------- TERAZ ---------- */
 function livePanel(d) {
   const cmp = (key, higher) => {
@@ -154,9 +166,13 @@ async function renderNow() {
     : `około ${Math.round(b.expected_games)} gier`;
 
   const patchBanner = (patchMeta && patchMeta.fresh)
-    ? `<div class="patch-banner">⚠ Patch ${esc(patchMeta.short)} od ${patchMeta.games} ${
+    ? `<div class="patch-banner">⚠ Patch <a class="patch-link" target="_blank"
+        rel="noopener" href="${patchUrl(patchMeta.short)}">${esc(patchMeta.short)}</a>
+        od ${patchMeta.games} ${
         patchMeta.games === 1 ? "gry" : "gier"} — normy i model liczone głównie na
         poprzednim patchu, a patch zmienia też mnożniki balansu trybu.</div>` : "";
+
+  const patchNotes = patchUrl(patchMeta && patchMeta.short, b.name);
 
   $("hero").innerHTML = patchBanner + `
     <div class="hero">
@@ -166,7 +182,8 @@ async function renderNow() {
       </div>
       <div class="hero-side">
         <div class="who"><span class="rank-badge lead">1</span><img onerror="this.src=BLANK" src="${icon(b.key, b.champion_id)}"
-          alt="">${esc(b.name)}</div>
+          alt="">${esc(b.name)}${patchNotes ? ` <a class="patch-link" href="${patchNotes}"
+          target="_blank" rel="noopener" title="zmiany championa w tym patchu">notki</a>` : ""}</div>
         ${rail(b.milestone, GOAL, b.next_grade)}
         ${inSelect && poolBadges(b, lobbyTrade, inSelect)
           ? `<div style="margin-top:7px;margin-left:-8px">${poolBadges(b, lobbyTrade, inSelect)}</div>` : ""}
