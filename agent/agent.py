@@ -866,6 +866,10 @@ class Agent:
         self._sess_fp = fp
 
         flow = await self.lcu.get("/lol-gameflow/v1/session") or {}
+        if not flow:
+            # (P) chwilowy brak gameflow dawal UNKNOWN/q=0 zamrozone odciskiem
+            # do zmiany sesji - bez odcisku nastepny tik sprobuje jeszcze raz
+            self._sess_fp = None
         queue = (flow.get("gameData") or {}).get("queue") or {}
         mode = queue.get("gameMode") or (flow.get("map") or {}).get("gameMode") or "UNKNOWN"
         queue_id = queue.get("id") or 0
@@ -1252,9 +1256,10 @@ class Agent:
                     event = payload[2]
                     if not isinstance(event, dict):
                         continue
-                    await self.dispatch_ws(event.get("uri", ""), event.get("data"))
+                    await self.dispatch_ws(event.get("uri", ""), event.get("data"),
+                                           event.get("eventType"))
 
-    async def dispatch_ws(self, uri, data):
+    async def dispatch_ws(self, uri, data, event_type=None):
         """(K) Rozdzielnia zdarzen z catch-all: liczy wszystko (meldunek
         zdrowia), obsluguje trzy nasze uri. Zwraca True dla naszych.
         Dokladne sciezki, nie sufiksy: stary warunek endswith(
@@ -1268,7 +1273,10 @@ class Agent:
             await self.handle_phase(data)
         elif uri == "/lol-champ-select/v1/session":
             self.ws_events["champ_select"] += 1
-            await self.handle_champ_select(data if isinstance(data, dict) else None)
+            # (P) Delete niesie ostatni stan sesji - odcisk uznalby go za
+            # powtorke i wyjscie czekaloby na polling (10 s)
+            gone = event_type == "Delete" or not isinstance(data, dict)
+            await self.handle_champ_select(None if gone else data)
         elif uri == "/lol-end-of-game/v1/champion-mastery-updates":
             self.ws_events["mastery"] += 1
             # Ocena wypchnieta przez klienta w momencie powstania - zero

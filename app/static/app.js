@@ -312,10 +312,11 @@ async function renderNow() {
   await patchNotesAll();
   const cheat = live.active ? await cheatsheet(live.champion_id) : null;
   const pnLive = live.active ? await patchNotesFor(live.champion_id) : null;
-  // (M, karta 9) sojusznicy z lobby zyja przez cala gre (wiersz lobby
-  // zostaje do nastepnego champ selecta) - panel live tez ich pokazuje
+  // (M, karta 9) sojusznicy z lobby zyja przez cala gre: wyjscie z champ
+  // selecta zeruje pule, ale backend przepisuje sojusznikow i /lobby oddaje
+  // ich takze jako nieaktywne (P) - panel live tez ich pokazuje
   const lobbyNow = lobbyR.status === "fulfilled" ? lobbyR.value : {active: false};
-  const allies = lobbyNow.active ? (lobbyNow.allies || []) : [];
+  const allies = lobbyNow.allies || [];
   const mates = allies.length ? await playersFor(allies.map(a => a.puuid)) : {};
   if (stale()) return;
   $("live-panel") && ($("live-panel").innerHTML = live.active

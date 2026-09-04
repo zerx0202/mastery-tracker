@@ -648,12 +648,12 @@ def save_lcu_participants(g, match_id, my_puuid=None):
     # (O) boty w formacie v4 poznajemy po tagu BOT - bez tozsamosci i nazwy
     ident = {i["participantId"]: (i.get("player") or {}).get("puuid")
              for i in (g.get("participantIdentities") or [])
-             if (i.get("player") or {}).get("tagLine") != "BOT"}
+             if not _bot_identity(i.get("player") or {})}
     # (M) nazwy z formatu v4: player.gameName#tagLine (summonerName bywa pusty)
     names = []
     for i in g.get("participantIdentities") or []:
         pl = i.get("player") or {}
-        if pl.get("tagLine") == "BOT":
+        if _bot_identity(pl):
             continue
         nm = (f"{pl.get('gameName')}#{pl.get('tagLine')}" if pl.get("gameName")
               else pl.get("summonerName") or "")
@@ -818,11 +818,14 @@ def save_grade(entry, platform, ts):
     sql = ("INSERT OR REPLACE INTO grade_observation (" + ", ".join(GRADE_COLS) +
            ") VALUES (" + ", ".join(f":{c}" for c in GRADE_COLS) + ")")
     with connect() as con:
-        existed = con.execute(
-            "SELECT 1 FROM grade_observation WHERE match_id=?", (row["match_id"],)
-        ).fetchone() is not None
+        old = con.execute(
+            "SELECT COALESCE(censored, 0) AS censored FROM grade_observation "
+            "WHERE match_id=?", (row["match_id"],)).fetchone()
         con.execute(sql, row)
-    return not existed
+    # (P) dokladna ocena nad wierszem cenzurowanym ze snapshotu to NOWA
+    # informacja: bez True /grade nie trenowal modelu i nie logowal zdarzenia,
+    # a odzysk z notyfikacji (K, wariant a) przechodzil bez sladu (przeglad 4.09)
+    return old is None or bool(old["censored"])
 
 
 GRADE_RAW_SCHEMA = """
@@ -1155,6 +1158,13 @@ def _riot_name(p):
 def init_match_participant():
     with connect() as con:
         con.executescript(MATCH_PARTICIPANT_SCHEMA)
+
+
+def _bot_identity(pl):
+    """(P) Bot z pelnej gry LCU: tag BOT i "bot" w nazwie - sam tag to za
+    malo, czlowiek tez moze go miec (przeglad 4.09)."""
+    name = (pl.get("gameName") or pl.get("summonerName") or "").lower()
+    return pl.get("tagLine") == "BOT" and "bot" in name
 
 
 def save_match_participants(block, match_id):
@@ -2957,10 +2967,11 @@ def upgrade_backfill_mitigated():
 def upgrade_drop_bots():
     """(O) Jednorazowe sprzatanie botow zapisanych przed filtrem botPlayer
     (zrzut czlowieka 4.09: "Jade_Taric bot#BOT" z 5 grami przeciw w karcie 9).
-    Bot ma tag BOT - po nim kasujemy tozsamosci i nazwe. Idempotentne."""
+    Bot ma tag BOT i "bot" w nazwie (P: sam tag to za malo, czlowiek tez
+    moze go miec) - po tym kasujemy tozsamosci i nazwe. Idempotentne."""
     with connect() as con:
         bots = [r["puuid"] for r in con.execute(
-            "SELECT puuid FROM player_name WHERE name LIKE '%#BOT'")]
+            "SELECT puuid FROM player_name WHERE name LIKE '%bot%#BOT'")]
         if not bots:
             return
         ph = ",".join("?" * len(bots))

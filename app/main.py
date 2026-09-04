@@ -490,6 +490,14 @@ async def push_lobby(payload: dict):
                "puuid": str(a.get("puuid") or ""), "name": str(a.get("name") or ""),
                "hidden": bool(a.get("hidden"))}
               for a in (payload.get("allies") or []) if isinstance(a, dict)]
+    # (P) wyjscie z champ selecta przychodzi jako pusta pula bez sojusznikow,
+    # a REPLACE wiersza lobby kasowal ich razem z nia - panel live tracil
+    # karte 9 na cala gre (przeglad 4.09). Sojusznicy zyja do nastepnego
+    # champ selecta; puste ids zeruja tylko cele.
+    if not ids and not allies:
+        prev = db.get_lobby()
+        if prev and prev.get("allies"):
+            allies = prev["allies"]
     ts = int(time.time())
     db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), ts, trade,
                  allies)
@@ -533,11 +541,17 @@ async def push_lobby(payload: dict):
 @api.get("/lobby")
 async def read_lobby(max_age: int = 5400):
     lob = db.get_lobby()
-    if not lob or not lob["champion_ids"]:
+    if not lob:
         return {"active": False, "targets": []}
     age = int(time.time()) - lob["updated_at"]
     if age > max_age:
         return {"active": False, "age": age, "targets": []}
+    if not lob["champion_ids"]:
+        # (P) po wyjsciu z champ selecta pula jest pusta, ale sojusznicy
+        # zostaja na czas gry (push_lobby przepisuje ich z poprzedniego
+        # wiersza) - panel live czyta karte 9 wlasnie stad
+        return {"active": False, "age": age, "targets": [],
+                "allies": lob.get("allies") or []}
     t = await lobby_targets(lob["champion_ids"], lob["queue"])
     return {
         "active": True,
