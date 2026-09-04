@@ -49,9 +49,9 @@ def rows_with_extras(db, mode):
             SELECT g.grade, g.champion_id, g.match_id, m.kills, m.deaths,
                    m.assists, m.dmg_champ, m.gold, m.cs, m.vision, m.heal,
                    m.duration, m.dmg_taken,
-                   (SELECT p.stat_value FROM player_stat p
+                   COALESCE(m.dmg_mitigated, (SELECT p.stat_value FROM player_stat p
                      WHERE p.match_id = m.match_id AND p.is_local = 1
-                       AND p.stat_key = 'damageSelfMitigated' LIMIT 1) AS mitigated
+                       AND p.stat_key = 'damageSelfMitigated' LIMIT 1)) AS mitigated
             FROM grade_observation g
             JOIN match_player m ON m.match_id = g.match_id
             WHERE m.duration > 300 AND m.game_mode = ?""", (mode,))]

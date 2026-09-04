@@ -493,6 +493,10 @@ async def push_lobby(payload: dict):
     ts = int(time.time())
     db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), ts, trade,
                  allies)
+    # (M) sojusznik UNHIDDEN zasila slownik nazw - "kto to" jeszcze przed gra
+    await asyncio.to_thread(db.save_player_names,
+                            [(a["puuid"], a["name"]) for a in allies
+                             if a["puuid"] and a["name"]], ts)
     # tryb ostatniego lobby czyta /eog przy linkowaniu puli (normalizacja
     # offsetu championId w JADE) - dotad nikt go nie ZAPISYWAL, wiec cala
     # ochrona byla martwa (audyt 2.09)
@@ -1184,6 +1188,24 @@ async def patch_notes_refresh():
             "reason": ent.get("reason")}
 
 
+# ---------------- (M) karta 9: kto to, wspolna historia, jak poszlo ----------------
+
+@api.get("/players")
+async def players(puuids: str = ""):
+    """Wspolna historia z graczami po puuid - pasek champ selecta i panel
+    live (sojusznicy z K), wiersz oceny (znajomi z innych gier)."""
+    ids = [p for p in puuids.split(",") if len(p) == 36]
+    my = db.get_cached_puuid(f"{MY_NAME}#{MY_TAG}")
+    return await asyncio.to_thread(db.players_summary, ids, my)
+
+
+@api.get("/players/recurring")
+async def players_recurring(min_games: int = 2):
+    """Rejestr powtarzajacych sie graczy (Laboratorium)."""
+    my = db.get_cached_puuid(f"{MY_NAME}#{MY_TAG}")
+    return {"players": await asyncio.to_thread(db.recurring_players, my, min_games)}
+
+
 @api.get("/cheatsheet/{champion_id}")
 async def cheatsheet(champion_id: int):
     """(49) Sciaga-z-danych granego championa: tier, winrate, priorytet
@@ -1363,6 +1385,13 @@ async def grades_explain(match_id: str):
     out["augments"] = augments.names_for(ids)
     # (E) pozycja na tle 10 graczy TEGO meczu - kontekst, nie diagnoza
     out["match_pct"] = await asyncio.to_thread(db.match_percentiles, match_id)
+    # (M, karta 9) znajomi w tym meczu: widziani w INNYCH meczach
+    my = db.get_cached_puuid(f"{MY_NAME}#{MY_TAG}")
+    with db.connect() as c:
+        others = [r["puuid"] for r in c.execute(
+            "SELECT puuid FROM match_participant WHERE match_id=?", (match_id,))]
+    summ = await asyncio.to_thread(db.players_summary, others, my, match_id)
+    out["known_players"] = [{"puuid": p, **d} for p, d in summ.items() if d["games"]]
     return out
 
 

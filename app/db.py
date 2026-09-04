@@ -145,6 +145,9 @@ def upgrade_match_player():
     extra = {
         "source": "TEXT DEFAULT 'api'",
         "champion_id_raw": "INTEGER",
+        # (M) wlasne damageSelfMitigated z listingu LCU - test cech klasowych
+        # (partia L) mial 40 % pokrycia, bo listing nie splaszczal statystyk
+        "dmg_mitigated": "REAL",
     }
     with connect() as con:
         cols = {r["name"] for r in con.execute("PRAGMA table_info(match_player)")}
@@ -419,6 +422,19 @@ _MATCH_INSERT = (
 )
 
 
+def _set_mitigated(match_id, value):
+    """(M) damageSelfMitigated wlasnego uczestnika poza MATCH_COLS - osobny
+    UPDATE, zeby nie ruszac wszystkich budowniczych wierszy meczu (listing,
+    pelna gra, match-v5). Listing wlasnej historii nie ma pewnego
+    participantId, wiec do player_stat nie idzie - tam czekalaby kolizja
+    z numeracja z eog."""
+    if value is None:
+        return
+    with connect() as con:
+        con.execute("UPDATE match_player SET dmg_mitigated=? WHERE match_id=?",
+                    (float(value), match_id))
+
+
 def _write_match(row):
     """Zapisuje mecz, o ile nowe zrodlo nie jest ubozsze od zapisanego.
     Zwraca True jesli wiersz byl nowy."""
@@ -614,7 +630,9 @@ def save_lcu_game(g, my_puuid=None):
         "game_version": g.get("gameVersion"),
         "patch": short_patch(g.get("gameVersion")),
     }
-    return _write_match(row)
+    new = _write_match(row)
+    _set_mitigated(row["match_id"], st.get("damageSelfMitigated"))
+    return new
 
 
 def save_lcu_participants(g, match_id, my_puuid=None):
@@ -629,6 +647,13 @@ def save_lcu_participants(g, match_id, my_puuid=None):
         return 0
     ident = {i["participantId"]: (i.get("player") or {}).get("puuid")
              for i in (g.get("participantIdentities") or [])}
+    # (M) nazwy z formatu v4: player.gameName#tagLine (summonerName bywa pusty)
+    names = []
+    for i in g.get("participantIdentities") or []:
+        pl = i.get("player") or {}
+        nm = (f"{pl.get('gameName')}#{pl.get('tagLine')}" if pl.get("gameName")
+              else pl.get("summonerName") or "")
+        names.append((pl.get("puuid"), nm))
     mode = g.get("gameMode")
     written = 0
     with connect() as con:
@@ -656,6 +681,7 @@ def save_lcu_participants(g, match_id, my_puuid=None):
                     "stat_key, stat_value) VALUES (?,?,?,?,?,?,?)",
                     (match_id, pid, cid, p.get("teamId") or 0, is_local, k, v))
             written += 1
+    save_player_names(names)
     return written
 
 
@@ -1056,6 +1082,46 @@ CREATE INDEX IF NOT EXISTS idx_mpart_puuid ON match_participant(puuid);
 """
 
 
+PLAYER_NAME_SCHEMA = """
+CREATE TABLE IF NOT EXISTS player_name (
+    puuid   TEXT PRIMARY KEY,
+    name    TEXT NOT NULL,
+    seen_at INTEGER NOT NULL
+);
+"""
+
+
+def init_player_name():
+    with connect() as con:
+        con.executescript(PLAYER_NAME_SCHEMA)
+
+
+def save_player_names(pairs, ts=None):
+    """(M, karta 9) puuid -> ostatnia znana nazwa Riot ID. Zrodla: blok eog
+    (riotIdGameName#riotIdTagLine), pelna gra z odzysku (player.gameName),
+    sojusznicy z champ selecta (K). Nazwa zmienia sie rzadko - ostatnia
+    wygrywa. match_participant swiadomie trzyma tylko puuid (tozsamosc),
+    nazwa to etykieta."""
+    import time as _t
+    ts = ts or int(_t.time())
+    rows = [(p, n, ts) for p, n in pairs if p and n]
+    if not rows:
+        return 0
+    with connect() as con:
+        con.executemany(
+            "INSERT OR REPLACE INTO player_name (puuid, name, seen_at) VALUES (?,?,?)",
+            rows)
+    return len(rows)
+
+
+def _riot_name(p):
+    """Nazwa z bloku eog: Riot ID, a bez niego stara nazwa przywolywacza."""
+    gn, tag = p.get("riotIdGameName"), p.get("riotIdTagLine")
+    if gn and tag:
+        return f"{gn}#{tag}"
+    return gn or p.get("summonerName") or ""
+
+
 def init_match_participant():
     with connect() as con:
         con.executescript(MATCH_PARTICIPANT_SCHEMA)
@@ -1066,6 +1132,7 @@ def save_match_participants(block, match_id):
     (np. bot) nie dostaje wiersza, ale zajmuje slot - numeracja musi zostac
     zgodna z player_stat. Zwraca liczbe zapisanych wierszy."""
     rows = []
+    names = []
     n = 0
     for team in block.get("teams") or []:
         team_id = team.get("teamId")
@@ -1076,6 +1143,7 @@ def save_match_participants(block, match_id):
                 continue
             rows.append({"match_id": match_id, "participant_no": n,
                          "puuid": puuid, "team_id": team_id})
+            names.append((puuid, _riot_name(p)))
     if not rows:
         return 0
     with connect() as con:
@@ -1084,7 +1152,77 @@ def save_match_participants(block, match_id):
             "INSERT INTO match_participant "
             "(match_id, participant_no, puuid, team_id) "
             "VALUES (:match_id, :participant_no, :puuid, :team_id)", rows)
+    save_player_names(names)
     return len(rows)
+
+
+def players_summary(puuids, my_puuid, exclude_match=None):
+    """(M, karta 9) Wspolna historia z graczami: mecze razem/przeciw (po
+    team_id z match_participant), wyniki z MOJEJ perspektywy, moja ocena
+    i ich champion w ostatnich wspolnych grach, ostatnio widziany, nazwa.
+    exclude_match: biezacy mecz nie liczy sie jako 'widziany wczesniej'.
+    Bez mojego puuid (cache pusty) nie da sie odroznic 'razem' od 'przeciw'
+    - wtedy pusto, nie zgadujemy."""
+    puuids = [p for p in dict.fromkeys(puuids or []) if p and p != my_puuid]
+    if not puuids or not my_puuid:
+        return {}
+    ph = ",".join("?" * len(puuids))
+    with connect() as con:
+        rows = [dict(r) for r in con.execute(f"""
+            SELECT o.puuid, o.match_id, o.team_id AS their_team,
+                   me.team_id AS my_team, m.win, m.game_creation, g.grade,
+                   (SELECT ps.champion_id FROM player_stat ps
+                     WHERE ps.match_id = o.match_id
+                       AND ps.participant_no = o.participant_no LIMIT 1) AS their_champion
+            FROM match_participant o
+            JOIN match_participant me ON me.match_id = o.match_id AND me.puuid = ?
+            JOIN match_player m ON m.match_id = o.match_id
+            LEFT JOIN grade_observation g ON g.match_id = o.match_id
+            WHERE o.puuid IN ({ph}) AND o.match_id != COALESCE(?, '')
+            ORDER BY m.game_creation DESC""", (my_puuid, *puuids, exclude_match))]
+        names = {r["puuid"]: r["name"] for r in con.execute(
+            f"SELECT puuid, name FROM player_name WHERE puuid IN ({ph})", puuids)}
+
+    def blank(p):
+        return {"name": names.get(p), "games": 0, "with": 0, "against": 0,
+                "wins_with": 0, "wins_against": 0, "last_seen": None, "recent": []}
+    out = {}
+    for r in rows:
+        d = out.setdefault(r["puuid"], blank(r["puuid"]))
+        same = r["their_team"] is not None and r["their_team"] == r["my_team"]
+        d["games"] += 1
+        d["with" if same else "against"] += 1
+        if r["win"]:
+            d["wins_with" if same else "wins_against"] += 1
+        ts = (r["game_creation"] or 0) // 1000
+        d["last_seen"] = max(d["last_seen"] or 0, ts)
+        if len(d["recent"]) < 5:
+            d["recent"].append({"match_id": r["match_id"], "ts": ts, "same_team": same,
+                                "win": bool(r["win"]), "my_grade": r["grade"],
+                                "their_champion": r["their_champion"]})
+    for p in puuids:
+        if p not in out and names.get(p):
+            out[p] = blank(p)
+    return out
+
+
+def recurring_players(my_puuid, min_games=2, limit=40):
+    """(M, karta 9) Rejestr powtarzajacych sie graczy: kto grywa ze mna
+    (albo przeciw) czesciej niz raz, posortowany po liczbie wspolnych gier."""
+    if not my_puuid:
+        return []
+    with connect() as con:
+        cand = [r["puuid"] for r in con.execute("""
+            SELECT o.puuid, COUNT(*) n, MAX(m.game_creation) last
+            FROM match_participant o
+            JOIN match_participant me ON me.match_id = o.match_id AND me.puuid = ?
+            JOIN match_player m ON m.match_id = o.match_id
+            WHERE o.puuid != ?
+            GROUP BY o.puuid HAVING n >= ?
+            ORDER BY n DESC, last DESC LIMIT ?""",
+            (my_puuid, my_puuid, min_games, limit))]
+    summ = players_summary(cand, my_puuid)
+    return [{"puuid": p, **summ[p]} for p in cand if p in summ]
 
 
 def backfill_participants_from_eog():
@@ -2762,3 +2900,19 @@ def upgrade_allies():
             cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
             if cols and "allies" not in cols:
                 con.execute(f"ALTER TABLE {table} ADD COLUMN allies TEXT")
+
+
+def upgrade_backfill_mitigated():
+    """(M) Wlasne damageSelfMitigated do match_player: nowe gry dostaja je
+    z listingu LCU (save_lcu_game), gry sprzed M jednorazowo z player_stat
+    (eog/P6, wiersz is_local). Idempotentne: tylko puste kolumny."""
+    with connect() as con:
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(match_player)")}
+        if "dmg_mitigated" not in cols:
+            return
+        con.execute("""
+            UPDATE match_player SET dmg_mitigated = (
+                SELECT ps.stat_value FROM player_stat ps
+                WHERE ps.match_id = match_player.match_id AND ps.is_local = 1
+                  AND ps.stat_key = 'damageSelfMitigated' LIMIT 1)
+            WHERE dmg_mitigated IS NULL""")

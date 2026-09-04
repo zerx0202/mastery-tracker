@@ -215,8 +215,33 @@ function patchBlock(pn) {
   }</div>${lines.join("")}</div>`;
 }
 
+/* (M, karta 9) Wspolna historia z graczami po puuid - cache na czas zycia
+   strony (po grze liczby rosna o jeden; twardy refresh odswieza). Zrodla
+   tozsamosci: ekrany koncowe i odzysk (10 graczy na mecz), sojusznicy
+   z champ selecta (K); "W/L" z mojej perspektywy. */
+const PLAYERS = {};
+async function playersFor(puuids) {
+  const want = [...new Set(puuids.filter(p => p && p.length === 36 && !(p in PLAYERS)))];
+  if (want.length) {
+    try {
+      const got = await api("/players?puuids=" + want.join(","));
+      want.forEach(p => { PLAYERS[p] = got[p] || null; });
+    } catch (e) { want.forEach(p => { PLAYERS[p] = null; }); }
+  }
+  const out = {};
+  puuids.forEach(p => { if (PLAYERS[p]) out[p] = PLAYERS[p]; });
+  return out;
+}
+function allyLine(a, info) {
+  const name = a.hidden ? "(ukryty)" : esc((a.name || "?").split("#")[0]);
+  if (!info || !info.games) return name;
+  const w = info.with ? ` razem ${info.with}× (${info.wins_with}W/${info.with - info.wins_with}L)` : "";
+  const ag = info.against ? ` przeciw ${info.against}× (${info.wins_against}W/${info.against - info.wins_against}L)` : "";
+  return `${name}<span class="dim">${w}${ag}</span>`;
+}
+
 /* ---------- TERAZ ---------- */
-function livePanel(d, bal, cheat, pn) {
+function livePanel(d, bal, cheat, pn, allies, mates) {
   const cmp = (key, higher) => {
     const now = d.now[key], ref = (d.reference.hit || {})[key];
     if (ref == null) return {cls: "", note: "brak odniesienia"};
@@ -254,6 +279,8 @@ function livePanel(d, bal, cheat, pn) {
     ${d.milestone != null ? rail(d.milestone, GOAL, d.need, d.need_count, d.need_have) : ""}
     ${balanceLine(bal && bal[d.champion_id])}
     ${patchBlock(pn)}
+    ${allies && allies.length ? `<div class="range dim" style="margin-top:4px;font-size:11.5px">
+      Sojusznicy: ${allies.map(a => allyLine(a, (mates || {})[a.puuid])).join(" · ")}</div>` : ""}
     ${cheatLines(cheat)}
     <div style="margin-top:14px">${rows}</div>
     <div class="tagline">Złoto liczone z ubytków stanu — obejmuje kowadła
@@ -285,8 +312,14 @@ async function renderNow() {
   await patchNotesAll();
   const cheat = live.active ? await cheatsheet(live.champion_id) : null;
   const pnLive = live.active ? await patchNotesFor(live.champion_id) : null;
+  // (M, karta 9) sojusznicy z lobby zyja przez cala gre (wiersz lobby
+  // zostaje do nastepnego champ selecta) - panel live tez ich pokazuje
+  const lobbyNow = lobbyR.status === "fulfilled" ? lobbyR.value : {active: false};
+  const allies = lobbyNow.active ? (lobbyNow.allies || []) : [];
+  const mates = allies.length ? await playersFor(allies.map(a => a.puuid)) : {};
   if (stale()) return;
-  $("live-panel") && ($("live-panel").innerHTML = live.active ? livePanel(live, bal, cheat, pnLive) : "");
+  $("live-panel") && ($("live-panel").innerHTML = live.active
+    ? livePanel(live, bal, cheat, pnLive, allies, mates) : "");
 
   // pasek live-bar skladamy w JEDNEJ zmiennej i ustawiamy raz na koncu -
   // baner sentinela i blad champ selecta byly wstawiane wczesnie
@@ -317,9 +350,8 @@ async function renderNow() {
     patchMeta = lobby.patch;
     // (K) sojusznicy z champ selecta: UNHIDDEN z nazwa, HIDDEN uczciwie
     // jako "(ukryty)" - puuid pod karte 9 leci z agenta razem z pula
-    const al = lobby.allies || [];
-    const alTxt = al.length ? ` · sojusznicy: ${al.map(a => a.hidden
-      ? "(ukryty)" : esc((a.name || "?").split("#")[0])).join(", ")}` : "";
+    const alTxt = allies.length ? ` · sojusznicy: ${
+      allies.map(a => allyLine(a, mates[a.puuid])).join(", ")}` : "";
     barHtml += `<div class="live"><span class="dot"></span>
       <div><b>${esc(lobby.queue || "Champ select")}</b> —
       ${lobby.champion_ids.length} w puli, odczyt sprzed ${lobby.age}s${alTxt}</div></div>`;
@@ -729,9 +761,15 @@ function explainBox(ex) {
         ).join(" · ")}
         <small class="dim">(pozycja zależy od składu — porównuj z normami
         championa, nie „dokręcaj" tej listy)</small></div>` : "";
+  // (M, karta 9) znajomi z innych gier - liczby BEZ tego meczu
+  const known = (ex.known_players && ex.known_players.length)
+    ? `<div class="range" style="margin-top:9px">znajomi z innych gier: ${
+        ex.known_players.map(k => `<b>${esc((k.name || k.puuid.slice(0, 8)).split("#")[0])}</b>${
+          k.with ? ` razem ${k.with}× (${k.wins_with}W)` : ""}${
+          k.against ? ` przeciw ${k.against}× (${k.wins_against}W)` : ""}`).join(" · ")}</div>` : "";
   return `<div class="explain-box">
     <div class="range">Szansa wg modelu — ${ths}</div>
-    <div style="margin-top:9px">${bars}</div>${pct}${mpct}${augs}
+    <div style="margin-top:9px">${bars}</div>${pct}${mpct}${augs}${known}
     <div class="tagline" style="margin-top:7px">Wkład = waga cechy × odchylenie
       od Twojej normy na tym championie; dodatni ciągnął tę ocenę w górę.</div>
   </div>`;
@@ -938,6 +976,30 @@ async function renderLab() {
       <tbody>${arows}</tbody></table>
       <div class="tagline">Liczniki z własnych gier — przy tej próbce to
         kontekst do oglądania, nie materiał na wnioski.</div></div>`);
+  }
+
+  // (M, karta 9) rejestr powtarzajacych sie graczy - "kto to, jak z nim szlo"
+  let rp = null;
+  try { rp = await api("/players/recurring"); } catch (e) {}
+  if (rp && rp.players && rp.players.length) {
+    const prow = rp.players.map(p => {
+      const [nm, tag] = (p.name || p.puuid.slice(0, 8)).split("#");
+      return `<tr>
+      <td>${esc(nm)}<small class="dim"> ${esc(tag || "")}</small></td>
+      <td class="r num">${p.with}</td>
+      <td class="r num">${p.wins_with}/${p.with - p.wins_with}</td>
+      <td class="r num">${p.against}</td>
+      <td class="r num">${p.wins_against}/${p.against - p.wins_against}</td>
+      <td class="r num" style="color:var(--dim)">${p.last_seen
+        ? new Date(p.last_seen * 1000).toLocaleDateString("pl-PL") : "—"}</td>
+    </tr>`; }).join("");
+    $("lab-body").insertAdjacentHTML("beforeend", `<div class="panel" style="margin-top:14px">
+      <div class="eyebrow">Powtarzający się gracze (karta 9)</div>
+      <table><thead><tr><th>Gracz</th><th class="r">Razem</th><th class="r">W/L razem</th>
+        <th class="r">Przeciw</th><th class="r">W/L przeciw</th><th class="r">Ostatnio</th></tr></thead>
+      <tbody>${prow}</tbody></table>
+      <div class="tagline">Tożsamości z ekranów końcowych i odzysku (10 graczy na mecz)
+        oraz z champ selecta; W/L z Twojej perspektywy; nazwa = ostatnie znane Riot ID.</div></div>`);
   }
 }
 
