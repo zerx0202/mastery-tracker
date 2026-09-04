@@ -69,7 +69,7 @@ def _seed():
     # dopiero PO starcie serwera - lifespan robi migrate(), a init_live
     # celowo DROP-uje live_game
     db.set_json_setting("cheatsheet", {"99": {
-        "champion_id": 99, "patch": "16.16", "fetched_at": now, "ok": True, "v": 2,
+        "champion_id": 99, "patch": "16.16", "fetched_at": now, "ok": True, "v": 3,
         "tier": "A", "win_rate": 51.2,
         "augments": ["Eureka", "High Roller", "Recursion"],
         "skill_sequence": "Q W E Q Q R", "skill_priority": "Q > E > W"}})
@@ -77,7 +77,7 @@ def _seed():
     # prawdziwy artykul Riota; blok ma kazdy champion seeda, bo "notki"
     # pokazuja sie tylko przy bloku, a hero wybiera ranking
     db.set_json_setting("patch_notes", {
-        "patch": "16.16", "fetched_at": now, "ok": True,
+        "patch": "16.16", "fetched_at": now, "ok": True, "v": 2,
         "url": "https://www.leagueoflegends.com/en-us/news/game-updates/patch-26-16-notes",
         "champions": {slug: {
             "name": name, "summary": f"{name} needs help.", "verdict": "buff",

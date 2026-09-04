@@ -111,29 +111,61 @@ async function cheatsheet(cid) {
   return CHEAT[cid];
 }
 
-function cheatLines(cs) {
+const GLYPH = {buff: "▲", nerf: "▼", mixed: "▲▼", adjust: "~"};
+const normName = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+/* (J) zmiana augmentu w biezacym patchu (sekcja "ARAM: Mayhem" notek) -
+   glif z liniami zmian w tooltipie; NOTES_ALL to cache z patchNotesAll() */
+function augChange(name) {
+  const c = NOTES_ALL && NOTES_ALL.augments && NOTES_ALL.augments[normName(name)];
+  if (!c) return null;
+  const lines = c.changes.map(x => x.label + (x.before != null
+    ? ` ${x.before} → ${x.after}` : `: ${x.after}`)).join("; ");
+  return {verdict: c.verdict, title: `Patch ${NOTES_ALL.patch}: ${lines}`};
+}
+function cheatLines(cs, brief) {
   if (!cs || !cs.ok) return "";
   // (F6) JSON-LD strony sortuje pryzmatyczne na wierzch, wiec plaskie
   // "top 5" to zawsze same pryzmatyczne (rzadsze z natury) - tiery idą
   // osobno, po 3 z kazdego; plaska lista zostaje fallbackiem dla cache
   // sprzed tej zmiany i przebudowy strony
+  const augName = a => {
+    const c = augChange(a.name);
+    return c ? `<span title="${escq(c.title)}">${GLYPH[c.verdict] || "~"} ${esc(a.name)}</span>`
+      : `<span title="${a.win_rate != null ? a.win_rate + "% WR" : ""}">${esc(a.name)}</span>`;
+  };
   const bt = cs.augments_by_tier;
   const tierRows = bt ? ["Prismatic", "Gold", "Silver"].map(t => {
     const list = (bt[t] || []).slice(0, 3);
     if (!list.length) return "";
-    const names = list.map(a => `<span title="${
-      a.win_rate != null ? a.win_rate + "% WR" : ""}">${esc(a.name)}</span>`).join(" · ");
     return `<div class="kv"><span>Augmenty · ${t}</span>
-      <span style="font-size:12px;text-align:right;max-width:62%">${names}</span></div>`;
+      <span style="font-size:12px;text-align:right;max-width:62%">${list.map(augName).join(" · ")}</span></div>`;
   }).join("") : "";
   const augs = (cs.augments || []).slice(0, 5).map(esc).join(" · ");
+  // (J) profil stylu gry (CDragon) i porady Riota (Data Dragon pl_PL):
+  // allytips = jak grac ta postacia (mocne), enemytips = jak grac przeciw
+  // (slabe) - "czym ta postac jest" w trzy sekundy w champ selekcie
+  const ps = cs.playstyle, ta = cs.tactical;
+  const bar = n => "●".repeat(n || 0) + "○".repeat(Math.max(0, 3 - (n || 0)));
+  const profile = ps ? `<div class="kv"><span>Profil</span>
+      <span style="font-size:12px;text-align:right;max-width:72%">obr. ${bar(ps.damage)} · wytrz. ${
+      bar(ps.durability)} · CC ${bar(ps.crowdControl)} · mob. ${bar(ps.mobility)} · użyt. ${bar(ps.utility)}${
+      ta ? ` · ${ta.ranged ? "dystans" : "melee"}${ta.damage ? ", obr. " + esc(ta.damage) : ""}` : ""}</span></div>` : "";
+  const tipsA = (cs.tips_ally || []).slice(0, brief ? 2 : 3);
+  const tipsE = (cs.tips_enemy || []).slice(0, brief ? 1 : 2);
+  const tips = (tipsA.length || tipsE.length) ? `<div class="tips">${
+    tipsA.map(t => `<div class="ok">▲ ${esc(t)}</div>`).join("")}${
+    tipsE.map(t => `<div class="warn">▼ ${esc(t)}</div>`).join("")}</div>` : "";
+  const tierRow = cs.tier ? `<div class="kv"><span>Mayhem tier</span>
+      <span>${esc(cs.tier)}${cs.win_rate ? ` · ${cs.win_rate}% WR` : ""}${
+      brief && cs.skill_priority ? ` · skille ${esc(cs.skill_priority)}` : ""}</span></div>` : "";
+  if (brief) return `${tierRow}${profile}${tips}`;
   return `
-    <div class="kv"><span>Mayhem tier</span>
-      <span>${esc(cs.tier || "?")}${cs.win_rate ? ` · ${cs.win_rate}% WR` : ""}</span></div>
+    ${tierRow}${profile}
     ${cs.skill_priority ? `<div class="kv"><span>Skille</span>
       <span class="num" title="${esc(cs.skill_sequence || "")}">${esc(cs.skill_priority)}</span></div>` : ""}
     ${tierRows || (augs ? `<div class="kv"><span>Top augmenty</span>
-      <span style="font-size:12px;text-align:right;max-width:62%">${augs}</span></div>` : "")}`;
+      <span style="font-size:12px;text-align:right;max-width:62%">${augs}</span></div>` : "")}
+    ${tips}`;
 }
 
 /* (G) Zmiany championa w biezacym patchu - inline z werdyktem, zamiast
@@ -157,9 +189,10 @@ async function patchNotesAll() {
 const escq = s => esc(s).replaceAll('"', "&quot;");
 const VERDICT_PL = {buff: ["▲ buff", "ok"], nerf: ["▼ nerf", "warn"],
                     mixed: ["▲▼ mieszane", "warn"], adjust: ["~ zmiany", ""]};
-function verdictChip(v) {
+function verdictChip(v, title) {
   const t = VERDICT_PL[v];
-  return t ? `<span class="chip ${t[1]}" style="margin-left:6px">${t[0]}</span>` : "";
+  return t ? `<span class="chip ${t[1]}" style="margin-left:6px"${
+    title ? ` title="${escq(title)}"` : ""}>${t[0]}</span>` : "";
 }
 function patchBlock(pn) {
   if (!pn || !pn.ok) return "";
@@ -243,9 +276,13 @@ async function renderNow() {
   const ep = ++NOW_EPOCH;
   const stale = () => ep !== NOW_EPOCH;
 
-  let live = {active: false};
-  try { live = await api("/live"); } catch (e) {}
+  // (J) trzy odczyty naraz zamiast po kolei - w champ selekcie liczy sie
+  // kazda sekunda, a zaden z nich nie zalezy od pozostalych
+  const [liveR, lobbyR, senR] = await Promise.allSettled(
+    [api("/live"), api("/lobby"), api("/sentinel")]);
+  const live = liveR.status === "fulfilled" ? liveR.value : {active: false};
   const bal = await modeBalance();
+  await patchNotesAll();
   const cheat = live.active ? await cheatsheet(live.champion_id) : null;
   const pnLive = live.active ? await patchNotesFor(live.champion_id) : null;
   if (stale()) return;
@@ -256,24 +293,21 @@ async function renderNow() {
   // i wymazywane w tej samej klatce przez pozniejsze innerHTML (audyt 2.09)
   let barHtml = "";
   let lobby = {active: false};
-  try {
-    lobby = await api("/lobby");
-  } catch (e) {
+  if (lobbyR.status === "fulfilled") {
+    lobby = lobbyR.value;
+  } else {
     barHtml += `<div class="live" style="border-color:#6B4E28;
       background:rgba(224,164,88,.07)"><span style="color:var(--warn)">⚠</span>
-      <div>Nie udało się odczytać champ selecta: ${esc(e.message)}</div></div>`;
+      <div>Nie udało się odczytać champ selecta: ${esc(lobbyR.reason && lobbyR.reason.message)}</div></div>`;
   }
-
-  try {
-    const sen = await api("/sentinel");
-    if (sen.open) barHtml = `
+  if (senR.status === "fulfilled" && senR.value.open) barHtml = `
       <div class="live" style="border-color:var(--gold)">
         <span style="color:var(--gold)">★</span>
         <div><b>Riot otworzył API Mayhema</b> — match-v5 zwraca gry z kolejki
         2400. Można robić backfill pełnych danych.</div></div>` + barHtml;
-  } catch (e) {}
 
   const inSelect = !!(lobby.active && lobby.targets && lobby.targets.length);
+  NOW_FAST = inSelect;
   const lobbyTrade = new Set(inSelect ? (lobby.trade_ids || []) : []);
   let targets;
   let patchMeta = null;
@@ -329,6 +363,9 @@ async function renderNow() {
 
   const pn = await patchNotesFor(b.champion_id);
   const notesAll = await patchNotesAll();
+  // (J) sciaga przy hero - w champ selekcie "grasz ta postacia 3. raz
+  // w zyciu" trzeba widziec PRZED pickiem, nie dopiero w panelu live
+  const heroCheat = await cheatsheet(b.champion_id);
   if (stale()) return;
   // (G/I) "notki" tylko, gdy champion MA blok w notkach Riota (kotwica);
   // bez bloku link szedl na poczatek artykulu i nic nie mowil (pytanie
@@ -356,6 +393,7 @@ async function renderNow() {
           orientacyjnie ${gamesLine}</div>
         ${balanceLine(bal[b.champion_id])}
         ${patchBlock(pn)}
+        ${cheatLines(heroCheat, true)}
       </div>
     </div>`;
 
@@ -869,17 +907,23 @@ async function renderLab() {
   // jednocyfrowe: to jest do oglądania, nie do wniosków ilościowych)
   let ag = null;
   try { ag = await api("/augments/stats"); } catch (e) {}
+  await patchNotesAll();
   if (ag && ag.augments && ag.augments.length) {
     const RAR = {0: "", 1: "gold", 2: "gold"};
     const RAR_TXT = {0: "Silver", 1: "Gold", 2: "Prismatic"};
-    const arows = ag.augments.slice(0, 30).map(a => `<tr>
+    // (J) augment zmieniony w tym patchu dostaje chip z werdyktem i liniami
+    // zmian w tooltipie (sekcja "ARAM: Mayhem" notek Riota)
+    const arows = ag.augments.slice(0, 30).map(a => {
+      const c = augChange(a.name);
+      return `<tr>
       <td><span class="chip ${RAR[a.rarity] || ""}">${esc(a.name || ("#" + a.id))}</span>
-        <small class="dim">${a.rarity != null ? RAR_TXT[a.rarity] : ""}</small></td>
+        <small class="dim">${a.rarity != null ? RAR_TXT[a.rarity] : ""}</small>${
+        c ? verdictChip(c.verdict, c.title) : ""}</td>
       <td class="r num">${a.games}</td>
       <td class="r num">${a.a_minus}</td>
       <td class="r num">${a.s_minus}</td>
       <td class="r num">${a.wins}</td>
-    </tr>`).join("");
+    </tr>`; }).join("");
     $("lab-body").insertAdjacentHTML("beforeend", `<div class="panel" style="margin-top:14px">
       <div class="eyebrow">Augmenty przy ocenach (opisowo)</div>
       <table><thead><tr><th>Augment</th><th class="r">Gier</th>
@@ -1042,8 +1086,9 @@ async function renderSystem() {
       <div class="panel"><div class="eyebrow">Ostatnia aktywność</div>${seen}${backupKv}${authKv}${balKv}</div>
       ${agentPanel}
       <div class="panel"><div class="eyebrow">Zebrane dane</div>${counts}
-        ${d.custom_games ? `<div class="kv"><span class="dim">w tym treningi
-          (custom, poza misją)</span><span class="dim">${d.custom_games}</span></div>` : ""}
+        ${d.non_mission_games ? `<div class="kv"><span class="dim">w tym poza misją
+          (inne tryby, Practice Tool; treningi custom: ${d.custom_games || 0})</span>
+          <span class="dim">${d.non_mission_games}</span></div>` : ""}
         <div class="kv" style="margin-top:12px"><span>Patch Data Dragon</span>
           <span>${esc(d.ddragon_patch || "—")}</span></div>
       </div>
@@ -1187,6 +1232,14 @@ function tick() {
 
 addEventListener("hashchange", route);
 $("lab-stat").addEventListener("change", renderLab);
-setInterval(() => { if (location.hash === "#/" || !location.hash) renderNow(); }, 4000);
+// (J) w champ selekcie odswiezamy co sekunde - /lobby jest cache'owane
+// (partia F), a plakietki wymiany nie moga czekac 4 s; poza champ selektem
+// zostaje siatka 4 s. Epoka renderu (NOW_EPOCH) pilnuje nakladania sie.
+let NOW_FAST = false, NOW_TICK = 0;
+setInterval(() => {
+  NOW_TICK += 1;
+  if (location.hash !== "#/" && location.hash) return;
+  if (NOW_FAST || NOW_TICK % 4 === 0) renderNow();
+}, 1000);
 setInterval(tick, 10000);
 (async () => { tick(); await ddragon(); route(); })();

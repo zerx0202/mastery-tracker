@@ -132,6 +132,10 @@ td.r,th.r{text-align:right}
 .patch-notes .buff{color:var(--ok)}
 .patch-notes .nerf{color:var(--warn)}
 .patch-notes b{color:var(--txt);font-weight:500}
+/* (J) porady Riota w sciadze: mocne (allytips) i slabe (enemytips) strony */
+.tips{font:12px/1.55 var(--mono);color:var(--dim);margin-top:8px}
+.tips .ok{color:var(--ok)}
+.tips .warn{color:var(--warn)}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px 22px}
 .kv{display:flex;justify-content:space-between;padding:7px 0;
     border-bottom:1px solid var(--line);font-size:13.5px}

@@ -105,7 +105,8 @@ def test_parse_notes_scopes_sections_and_reads_blocks():
 
 
 def test_parse_notes_garbage_is_empty():
-    assert patchnotes.parse_notes("<html>przebudowa</html>") == {"champions": {}, "mayhem": {}}
+    assert patchnotes.parse_notes("<html>przebudowa</html>") == {
+        "champions": {}, "mayhem": {}, "mayhem_augments": {}}
 
 
 def test_find_article_url_discovers_both_slug_formats():

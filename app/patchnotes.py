@@ -157,7 +157,7 @@ def parse_notes(html):
     """HTML artykulu -> {champions: {slug: {...}}, mayhem: {norm(nazwa): {...}}}.
     Puste 'champions' = przebudowa markupu albo patch bez zmian championow -
     caller traktuje to jak nieudany fetch (nie nadpisuje dobrych danych)."""
-    out = {"champions": {}, "mayhem": {}}
+    out = {"champions": {}, "mayhem": {}, "mayhem_augments": {}}
     sec = _section(html, "Champions")
     blocks = list(_BLOCK_RE.finditer(sec))
     for i, b in enumerate(blocks):
@@ -168,17 +168,21 @@ def parse_notes(html):
             "name": _text(b.group(2)),
             "summary": _text(ctx.group(1)) if ctx else "",
             "changes": changes, "verdict": verdict(changes)}
+    # sekcja trybu: "Champions" = balans championow w Mayhemie,
+    # "Augments" = zmiany augmentow (J) - te same wpisy <p><strong>Nazwa</strong>
     mayhem = _section(html, "ARAM: Mayhem")
     details = list(_DETAIL_RE.finditer(mayhem))
+    buckets = {"Champions": "mayhem", "Augments": "mayhem_augments"}
     for i, d in enumerate(details):
-        if _text(d.group(1)) != "Champions":
+        bucket = buckets.get(_text(d.group(1)))
+        if not bucket:
             continue
         part = mayhem[d.end():details[i + 1].start() if i + 1 < len(details) else len(mayhem)]
         for e in _ENTRY_RE.finditer(part):
             changes = [_parse_line(li.group(1), "Mayhem")
                        for li in _LI_RE.finditer(e.group(2))]
             if changes:
-                out["mayhem"][_norm(_text(e.group(1)))] = {
+                out[bucket][_norm(_text(e.group(1)))] = {
                     "name": _text(e.group(1)), "changes": changes,
                     "verdict": verdict(changes)}
     return out

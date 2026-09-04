@@ -10,7 +10,8 @@ import httpx
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 
-from . import augments, balance, db, features, model, patchnotes, scoring
+from . import (augments, balance, champinfo, db, features, model, patchnotes,
+               scoring)
 from .db import GRADE_RANK
 
 API_KEY = os.environ["RIOT_API_KEY"]
@@ -1061,14 +1062,16 @@ async def push_timeline(payload: dict):
 # fetchowac tej samej strony dwa razy
 _CHEAT_LOCKS = {}
 # wersja wpisu cache sciagi: cache per patch przezylby zmiane parsera do
-# nastepnego patcha (tiery augmentow, F6) - starszy wpis idzie do
-# jednorazowego odswiezenia
-_CHEAT_V = 2
+# nastepnego patcha (tiery augmentow, F6; porady i profil Riota, J) -
+# starszy wpis idzie do jednorazowego odswiezenia
+_CHEAT_V = 3
 
 
 # ---------------- (G) zmiany championa w biezacym patchu ----------------
 
 _NOTES_LOCK = asyncio.Lock()
+# wersja wpisu cache notek (jak _CHEAT_V): 2 = zmiany augmentow Mayhema (J)
+_NOTES_V = 2
 
 
 async def patch_notes_current():
@@ -1080,6 +1083,7 @@ async def patch_notes_current():
 
     def fresh(ent):
         return (ent and ent.get("patch") == short
+                and ent.get("v") == _NOTES_V
                 and (ent.get("ok")
                      or time.time() - ent.get("fetched_at", 0) < 3600))
 
@@ -1091,7 +1095,8 @@ async def patch_notes_current():
         if fresh(ent):
             return ent
         ent = {"patch": short, "fetched_at": int(time.time()), "ok": False,
-               "url": None, "champions": {}, "mayhem": {}}
+               "v": _NOTES_V, "url": None, "champions": {}, "mayhem": {},
+               "mayhem_augments": {}}
         if not short:
             ent["reason"] = "brak patcha Data Dragon"
         else:
@@ -1141,7 +1146,9 @@ async def patch_notes_all():
             verdicts[cid] = c["verdict"]
     return {"patch": ent.get("patch"), "ok": bool(ent.get("ok")),
             "url": ent.get("url"), "reason": ent.get("reason"),
-            "verdicts": verdicts}
+            "verdicts": verdicts,
+            # (J) zmiany augmentow Mayhema z sekcji trybu - chipy w Laboratorium
+            "augments": ent.get("mayhem_augments") or {}}
 
 
 @api.get("/patchnotes/{champion_id}")
@@ -1201,12 +1208,39 @@ async def cheatsheet(champion_id: int):
             return ent
         ent = {"champion_id": champion_id, "patch": short, "v": _CHEAT_V,
                "fetched_at": int(time.time()), "ok": False}
+        # (49) tier/skille/augmenty ze strony buildu; (J) porady Riota
+        # i profil stylu gry z Data Dragona i CDragona - trzy zrodla, kazde
+        # w osobnym try: padniecie jednego nie zabiera reszty sciagi
         try:
             r = await state["plain"].get(
                 balance.BUILD_URL.format(slug=key.lower()),
                 follow_redirects=True)
             if r.status_code == 200:
                 data = balance.parse_build(r.text)
+                if data:
+                    ent.update(data)
+                    ent["ok"] = True
+        except Exception:
+            pass
+        version = db.get_setting("ddragon_patch")
+        if version:
+            try:
+                r = await state["plain"].get(
+                    champinfo.DD_CHAMPION_URL.format(version=version, key=key),
+                    headers=patchnotes.HEADERS)
+                if r.status_code == 200:
+                    data = champinfo.parse_dd(r.json(), key)
+                    if data:
+                        ent.update(data)
+                        ent["ok"] = True
+            except Exception:
+                pass
+        try:
+            r = await state["plain"].get(
+                champinfo.CDRAGON_CHAMPION_URL.format(id=champion_id),
+                headers=patchnotes.HEADERS)
+            if r.status_code == 200:
+                data = champinfo.parse_cdragon(r.json())
                 if data:
                     ent.update(data)
                     ent["ok"] = True
@@ -1538,6 +1572,12 @@ async def system_health():
         custom = c.execute(
             "SELECT COUNT(*) c FROM match_player "
             "WHERE game_mode LIKE '%#_CUSTOM' ESCAPE '#'").fetchone()["c"]
+        # (J) "Mecze w bazie" liczy tez inne tryby i Practice Tool z historii
+        # LCU - licznik, zeby liczba nie udawala gier misji
+        modes = ", ".join(f"'{m}'" for m in db.MODE_QUEUES)
+        non_mission = c.execute(
+            f"SELECT COUNT(*) c FROM match_player WHERE game_mode IS NULL "
+            f"OR game_mode NOT IN ({modes})").fetchone()["c"]
         events = [dict(r) for r in c.execute(
             "SELECT ts, kind, detail FROM event_log ORDER BY ts DESC LIMIT 40")]
     return {
@@ -1562,6 +1602,7 @@ async def system_health():
         "balance_fetched_at": (db.get_json_setting("mayhem_balance")
                                or {}).get("fetched_at"),
         "custom_games": custom,
+        "non_mission_games": non_mission,
         # (E) czarna skrzynka agenta + watchdog "grano bez agenta"
         "agent_health": db.get_json_setting("agent_health"),
         "agent_gaps": await asyncio.to_thread(db.agent_activity_gaps),

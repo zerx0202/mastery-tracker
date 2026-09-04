@@ -71,9 +71,21 @@ sam: backend zna gry z ekranów końcowych, ocen i domkniętych pul
 (`/api/history/missing`), a agent przy bezczynnym kliencie dociąga brakujące
 pojedynczo po ID, przycięte do własnego uczestnika.
 
-Bezpowrotnie ginie tylko ocena pomeczowa: `champion-mastery-updates` istnieje
-wyłącznie w trakcie ekranu końcowego. Dlatego agent musi działać przy każdej
-sesji grania.
+Ocena pomeczowa ma dwa kanały na żywo (`champion-mastery-updates` w trakcie
+ekranu końcowego i zdarzenie WebSocket) i jeden kanał odzysku: snapshoty
+maestrii. Każdy snapshot niesie `milestoneGrades` — listę ocen bieżącego
+szczebla, także tych poniżej progu — więc przyrost tej listy między dwoma
+snapshotami to nowa ocena, a awans milestone'a to ocena ≥ progu (cenzurowana).
+Backfill dopasowuje ją do gry regułą 1:1 (k nowych ocen championa między
+snapshotami ↔ k jego gier zakończonych w tym przedziale; stare okno 2 h jako
+fallback; customy, Practice Tool i remake'i nie są kandydatami) i odpala się
+sam po każdym snapshocie, po każdej grze z historii i przy starcie. Agent
+nadal powinien działać przy każdej sesji — bez niego przepadają dane live
+i log zdarzeń, ale nie ocena. Podobnie gra, która weszła z historii zamiast
+z ekranu końcowego, dostaje po fakcie swoją pulę z champ selecta (ta sama
+reguła czasowa co na żywo), dzięki czemu predykcja sprzed gry rozstrzyga się
+sama. Zakładka System pokazuje, czy któraś gra misji została bez oceny albo
+bez puli — z listą ID.
 
 Drugą daną ulotną jest log zdarzeń Live Client (kille, zgony, wieże
 z timestampami): żyje razem z portem 2999 i znika z nim. Agent zapamiętuje
@@ -129,6 +141,13 @@ raportuje trafność i AUC z SE i CI95 (Hanley–McNeil). Próg z mniej niż
 predykcje nie wchodzą do scorecardu.
 
 Marker gotowości: `GET /api/model/readiness`.
+
+Ranking champ selecta liczy E(c) = Σ k(m) / p(c, m) po szczeblach od obecnego
+do celu, gdzie k(m) to liczba ocen, których na szczeblu jeszcze brakuje
+(bonus milestone po IV wymaga S- ×2; oceny już uzbierane na bieżącym szczeblu
+są odejmowane). Cel (`GOAL_MILESTONE`) idzie za misją przepustki: 4 = milestone
+IV, 5 = pierwszy bonus milestone. Pula champ selecta jest punktowana raz na
+(pula, snapshot, model), nie przy każdym odświeżeniu widoku.
 
 Model porządkowy oddaje wyjaśnienia za darmo: klik w wiersz w Ocenach rozbija
 predykcję na wkłady cech (waga × z-score, znak = kierunek ciągnięcia) dla obu
@@ -229,6 +248,10 @@ mnożniki balansu trybu, odrębne od zwykłego ARAM-a.
 | `ACCOUNT-V1` | Riot ID → PUUID, raz |
 | `MATCH-V5` | historia spoza Mayhema + sentinel (czy kolejka 2400 już otwarta) |
 | arammayhem.com | mnożniki balansu Mayhema per champion — wyłącznie wyświetlanie |
+| arammayhem.com (strona buildu) | ściąga: tier, winrate, priorytet skilli, top augmenty per tier — wyłącznie wyświetlanie |
+| Notki patcha Riota (leagueoflegends.com) | zmiany championa w bieżącym patchu z heurystycznym werdyktem buff/nerf, plus zmiany augmentów Mayhema; wiki blokuje serwery (Cloudflare) — wyłącznie wyświetlanie |
+| Data Dragon `pl_PL` + CommunityDragon | porady Riota o championie (mocne/słabe strony, po polsku) i profil stylu gry (obrażenia, wytrzymałość, CC, mobilność, użyteczność) — wyłącznie wyświetlanie |
+| CommunityDragon `kiwi.bin.json` | słownik augmentów Mayhema (id → nazwa, tier) — etykiety |
 
 ## Uruchomienie
 
@@ -258,11 +281,15 @@ W codziennym użyciu. Snapshoty przed i po grze plus dobowy cron bez klienta,
 oceny dwoma kanałami (surowce archiwizowane w `grade_raw`), pełny ekran
 końcowy z itemami, augmentami i tożsamościami graczy (`match_participant`),
 log zdarzeń live, snowball z priorytetem znajomych PUUID-ów, odzysk gier
-przeoczonych przez okno historii, predykcje zapisywane przed grą (Brier
+przeoczonych przez okno historii, odzysk ocen ze snapshotów i dopinanie pul
+do gier z historii (automatycznie), predykcje zapisywane przed grą (Brier
 w `/api/predictions/scorecard`), model porządkowy z walidacją LOO i kartą
-wyjaśnień, projekcja misji z symulacji, kafelek przepustek i misji
-z event-hubu, mnożniki balansu trybu przy hero i w panelu live, ściąga
-granego championa (tier, skille, augmenty), linki do notek patcha,
+wyjaśnień, krotność szczebla w E(c) (cel = bonus milestone), projekcja misji
+z symulacji, kafelek przepustek i misji z event-hubu, mnożniki balansu trybu
+przy hero i w panelu live, ściąga granego championa (tier, skille, augmenty
+per tier, porady i profil Riota), zmiany championa w bieżącym patchu inline
+z werdyktem buff/nerf i linkiem do bloku w notkach Riota, zmiany augmentów
+Mayhema w Laboratorium, czujki potoku bez fałszywych alarmów (z listami ID),
 podsumowanie splitu, panel live, kolejka dyskowa w agencie
 (odporna na odrzuty i kolizje), konsola LCU i liczniki bramek w Systemie,
 backup restic z tygodniową retencją, weryfikacją i meldunkiem wyniku,
