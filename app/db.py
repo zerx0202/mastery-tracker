@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS lobby (
     queue        TEXT,
     pool_kind    TEXT,
     updated_at   INTEGER NOT NULL,
-    trade_ids    TEXT
+    trade_ids    TEXT,
+    allies       TEXT
 );
 """
 
@@ -375,15 +376,16 @@ def diff(from_id, to_id):
 
 # ---------- lobby ----------
 
-def set_lobby(champion_ids, queue, pool_kind, ts, trade_ids=None):
+def set_lobby(champion_ids, queue, pool_kind, ts, trade_ids=None, allies=None):
     with connect() as con:
         con.execute(
             "INSERT OR REPLACE INTO lobby "
-            "(id, champion_ids, queue, pool_kind, updated_at, trade_ids) "
-            "VALUES (1, :ids, :queue, :pool_kind, :ts, :trade)",
+            "(id, champion_ids, queue, pool_kind, updated_at, trade_ids, allies) "
+            "VALUES (1, :ids, :queue, :pool_kind, :ts, :trade, :allies)",
             {"ids": json.dumps(champion_ids), "queue": queue,
              "pool_kind": pool_kind, "ts": ts,
-             "trade": json.dumps(sorted(trade_ids or []))})
+             "trade": json.dumps(sorted(trade_ids or [])),
+             "allies": json.dumps(allies or [])})
 
 
 def get_lobby():
@@ -397,6 +399,7 @@ def get_lobby():
         "pool_kind": row["pool_kind"],
         "updated_at": row["updated_at"],
         "trade_ids": json.loads(row["trade_ids"] or "[]"),
+        "allies": json.loads(row["allies"] or "[]"),
     }
 
 
@@ -1327,7 +1330,8 @@ CREATE TABLE IF NOT EXISTS champ_select_pool (
     match_id      TEXT,
     reroll_count  INTEGER,
     split_id      INTEGER,
-    trade_ids     TEXT
+    trade_ids     TEXT,
+    allies        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_pool_ts    ON champ_select_pool(ts DESC);
@@ -1355,13 +1359,16 @@ def init_pool():
         con.executescript(POOL_SCHEMA)
 
 
-def save_pool(champion_ids, queue, queue_id, pool_kind, ts, trade_ids=None):
+def save_pool(champion_ids, queue, queue_id, pool_kind, ts, trade_ids=None,
+              allies=None):
     """Zapisuje pule z champ selecta. Nie duplikuje, jesli ta sama pula
-    zostala juz zapisana i nie jest jeszcze przypisana do meczu."""
+    zostala juz zapisana i nie jest jeszcze przypisana do meczu. (K) allies
+    = sojusznicy z myTeam (JSON) - historia "kto byl ze mna" pod karte 9."""
     if not champion_ids:
         return None
     ids_json = json.dumps(sorted(champion_ids))
     trade_json = json.dumps(sorted(trade_ids or []))
+    allies_json = json.dumps(allies) if allies else None
     with connect() as con:
         last = con.execute(
             "SELECT id, champion_ids, trade_ids FROM champ_select_pool "
@@ -1374,16 +1381,20 @@ def save_pool(champion_ids, queue, queue_id, pool_kind, ts, trade_ids=None):
             if last["trade_ids"] != trade_json:
                 con.execute("UPDATE champ_select_pool SET trade_ids=? WHERE id=?",
                             (trade_json, last["id"]))
+            if allies_json:
+                con.execute("UPDATE champ_select_pool SET allies=? WHERE id=?",
+                            (allies_json, last["id"]))
             return last["id"]
         return con.execute("""
             INSERT INTO champ_select_pool
               (ts, queue, queue_id, pool_kind, champion_ids, pool_size, split_id,
-               trade_ids)
-            VALUES (:ts, :queue, :queue_id, :pool_kind, :ids, :size, :split, :trade)
+               trade_ids, allies)
+            VALUES (:ts, :queue, :queue_id, :pool_kind, :ids, :size, :split, :trade,
+                    :allies)
         """, {"ts": ts, "queue": queue, "queue_id": queue_id, "pool_kind": pool_kind,
               "ids": ids_json, "size": len(champion_ids),
               "split": current_split_id(),
-              "trade": trade_json}).lastrowid
+              "trade": trade_json, "allies": allies_json}).lastrowid
 
 
 def link_pool_to_match(match_id, champion_id, reroll_count, ts, max_age=14400):
@@ -2737,3 +2748,17 @@ def upgrade_backfill_grades():
     wiec 4 gry misji stracily ocene mimo sladu w snapshotach. Po pulach:
     dopieta pula nie jest warunkiem oceny, ale kolejnosc jest naturalna."""
     backfill_grades_from_snapshots(quiet=True)
+
+
+def upgrade_allies():
+    """(K) Sojusznicy z champ selecta (cellId, championId, puuid, nazwa,
+    hidden) jako JSON obok puli: w lobby dla UI na zywo, w champ_select_pool
+    jako historia "kto byl ze mna" pod karte 9 (puuid tylko przy UNHIDDEN,
+    sonda C1). Swieza baza ma kolumne w CREATE TABLE; ALTER jest dla baz
+    sprzed K. Na koncu pliku, bo champ_select_pool powstaje pozno w migrate()
+    - upgrade zdefiniowany wczesniej trafial na tabele, ktorej jeszcze nie ma."""
+    with connect() as con:
+        for table in ("lobby", "champ_select_pool"):
+            cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+            if cols and "allies" not in cols:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN allies TEXT")

@@ -278,6 +278,34 @@ class Server:
             f.unlink(missing_ok=True)
             log(f"dosylka z kolejki: {item['path']} ok", "ok")
 
+# (K, wariant a z sondy C2 4.09) notyfikacja oceny: zyje w sesji klienta
+# (przezywa ekran koncowy i lobby, ginie przy restarcie), trzyma TYLKO
+# ostatnia gre; sam GET, zadnego acka (decyzja czlowieka: bez zmiany stanu
+# klienta). Pola maja inne nazwy niz champion-mastery-updates.
+NOTIFICATIONS = "/lol-champion-mastery/v1/notifications"
+NOTIFICATION_KEYS = {
+    "playerGrade": "grade",
+    "championPointsGained": "pointsGained",
+    "championPointsGainedIndividualContribution": "pointsGainedIndividualContribution",
+    "championPointsBeforeGame": "pointsBeforeGame",
+    "championLevel": "level",
+    "championLevelUp": "hasLeveledUp",
+}
+
+
+def notification_to_update(n):
+    """Notyfikacja -> wpis w ksztalcie champion-mastery-updates (to czyta
+    db.save_grade); oryginalne pola zostaja, bo grade_raw archiwizuje calosc.
+    None, gdy to pusty szkielet po restarcie klienta (gameId 0, bez oceny)."""
+    if not isinstance(n, dict) or not n.get("gameId") or not n.get("playerGrade"):
+        return None
+    out = dict(n)
+    for src, dst in NOTIFICATION_KEYS.items():
+        if src in n:
+            out[dst] = n[src]
+    return out
+
+
 class Agent:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -289,6 +317,10 @@ class Agent:
         self.pre_snapshot_done = False
         self.history_bootstrapped = False
         self.ws_failures = 0
+        # (K) liczniki zdarzen z catch-all WS - do meldunku zdrowia: po
+        # restarcie MA BYC WIDAC, czy zdarzenia w ogole dochodza
+        self.ws_events = {"total": 0, "phase": 0, "champ_select": 0, "mastery": 0}
+        self._sess_fp = None       # odcisk sesji champ selecta (K)
         self.champ_ids = {}
         self.champ_keys_ci = {}    # klucz DD malymi literami -> (klucz, id)
         self.live_state = {}
@@ -336,13 +368,15 @@ class Agent:
                 break
         log(f"historia LCU: {total} przeslanych, {new} nowych", "ok")
 
-    async def send_pool(self, ids, mode, pool_kind, queue_id, trade_ids=None):
+    async def send_pool(self, ids, mode, pool_kind, queue_id, trade_ids=None,
+                        allies=None):
         await self.server.post("/lobby", {
             "champion_ids": sorted(set(ids)),
             "trade_ids": sorted({t for t in (trade_ids or []) if t}),
             "queue": mode,
             "pool_kind": pool_kind,
             "queue_id": queue_id,
+            "allies": allies or [],
         })
 
     async def sync_pass(self):
@@ -442,6 +476,23 @@ class Agent:
             log(f"blad zapisu oceny: {r['errors'][0]}", "warn")
         return True
 
+    async def recover_last_grade(self):
+        """(K, wariant a) Przy wykryciu klienta czytamy notyfikacje oceny
+        RAZ: gdy agent wstal PO grze, a klient nie byl restartowany, dokladna
+        ocena ostatniej gry wraca zamiast cenzurowanej ze snapshotu. Backend
+        deduplikuje po meczu (INSERT OR REPLACE po match_id + 'new' tylko dla
+        nowej), wiec powtorka nic nie psuje. Poza epizodem pomeczowym -
+        nie dotyka flag _grade_done."""
+        entry = notification_to_update(await self.lcu.get(NOTIFICATIONS))
+        if not entry:
+            return False
+        r = await self.server.post("/grade", {"updates": [entry]})
+        if r and r.get("new"):
+            log(f"ocena z notyfikacji: {entry['grade']} (champion "
+                f"{entry.get('championId')}, gra {entry.get('gameId')}) - odzyskana", "ok")
+            return True
+        return False
+
     async def capture_grade(self):
         """Jedna proba odczytu oceny z LCU. Zwraca True, gdy zlapana."""
         data = await self.lcu.get(MASTERY_UPDATES)
@@ -510,7 +561,8 @@ class Agent:
         queue, bad = self._queue_stats()
         await self.server.post("/agent/health", {
             "queue": queue, "bad": bad,
-            "ws_ok": self.ws_failures == 0}, timeout=10)
+            "ws_ok": self.ws_failures == 0,
+            "ws_events": dict(self.ws_events)}, timeout=10)
 
     async def health_report_loop(self):
         while True:
@@ -795,16 +847,39 @@ class Agent:
 
     async def handle_champ_select(self, sess):
         if not sess:
+            self._sess_fp = None
             if self.last_pool_key is not None:
                 log("wyjscie z champ selecta")
                 await self.send_pool([], None, None, 0)
                 self.last_pool_key = None
             return
 
+        # (K) catch-all WS dostarcza sesje przy kazdym tiku zegara - odcisk
+        # (lawka, przydzial, moja komorka) odsiewa powtorki ZANIM pojdzie
+        # GET /lol-gameflow i reszta obslugi
+        fp = (tuple(c.get("championId") for c in (sess.get("benchChampions") or [])),
+              tuple((p.get("cellId"), p.get("championId"), p.get("puuid"))
+                    for p in (sess.get("myTeam") or [])),
+              sess.get("localPlayerCellId"))
+        if fp == self._sess_fp:
+            return
+        self._sess_fp = fp
+
         flow = await self.lcu.get("/lol-gameflow/v1/session") or {}
         queue = (flow.get("gameData") or {}).get("queue") or {}
         mode = queue.get("gameMode") or (flow.get("map") or {}).get("gameMode") or "UNKNOWN"
         queue_id = queue.get("id") or 0
+
+        # (K, sonda C1 4.09) sojusznicy z myTeam pod karte 9: pelny puuid tylko
+        # przy nameVisibilityType UNHIDDEN, HIDDEN daje pusty puuid - UI ma
+        # to pokazac uczciwie; wrogowie przedmeczowo nie istnieja
+        me_cell = sess.get("localPlayerCellId")
+        allies = [{"cellId": p.get("cellId"), "championId": p.get("championId") or 0,
+                   "puuid": p.get("puuid") or "",
+                   "name": (f"{p.get('gameName')}#{p.get('tagLine')}"
+                            if p.get("gameName") else ""),
+                   "hidden": p.get("nameVisibilityType") == "HIDDEN"}
+                  for p in (sess.get("myTeam") or []) if p.get("cellId") != me_cell]
 
         # benchEnabled = pula losowana i ograniczona (ARAM, Mayhem, kolejne tryby)
         benched = bool(sess.get("benchEnabled"))
@@ -849,7 +924,7 @@ class Agent:
         # startswith nie pomyli "1,2|t:" z "1,23|t:"
         rotation = bool(self.last_pool_key) and self.last_pool_key.startswith(ids_key)
         self.last_pool_key = key
-        await self.send_pool(ids, mode, pool_kind, queue_id, trade_ids)
+        await self.send_pool(ids, mode, pool_kind, queue_id, trade_ids, allies)
         if rotation:
             log(f"[{mode}] rotacja z lawka: {len(trade_ids)} do wymiany", "dim")
         else:
@@ -1151,11 +1226,13 @@ class Agent:
                 f"wss://127.0.0.1:{self.lcu.port}/",
                 headers=self.lcu.headers, ssl=self.lcu.ssl, heartbeat=30)
             async with ws_ctx as ws:
-                # opcode 5 = subscribe
-                await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase"]))
-                await ws.send_str(json.dumps([5, "OnJsonApiEvent_lol-champ-select_v1_session"]))
-                await ws.send_str(json.dumps(
-                    [5, "OnJsonApiEvent_lol-end-of-game_v1_champion-mastery-updates"]))
+                # opcode 5 = subscribe. (K) CATCH-ALL zamiast trzech tematow:
+                # subskrypcje per-temat przechodzily handshake, ale zdarzenia
+                # NIE dochodzily (4 dni logow bez "ocena zlapana z WebSocketu",
+                # rotacje lawki na siatce pollingu 10 s) - znany kaprys LCU,
+                # biblioteki subskrybuja OnJsonApiEvent i filtruja po uri.
+                # Koszt: parsowanie kazdego zdarzenia klienta - tanie.
+                await ws.send_str(json.dumps([5, "OnJsonApiEvent"]))
                 log("WebSocket podlaczony", "ok")
                 if self.ws_failures:
                     await self.report_incident("ws_up")
@@ -1175,18 +1252,33 @@ class Agent:
                     event = payload[2]
                     if not isinstance(event, dict):
                         continue
-                    uri = event.get("uri", "")
-                    data = event.get("data")
-                    if uri.endswith("/gameflow-phase"):
-                        await self.handle_phase(data)
-                    elif uri.endswith("/champ-select/v1/session"):
-                        await self.handle_champ_select(data if isinstance(data, dict) else None)
-                    elif uri.endswith("/champion-mastery-updates"):
-                        # Ocena wypchnieta przez klienta w momencie powstania -
-                        # zero zgadywania fazy. Dziala tez, gdy petla dopytujaca
-                        # akurat nie biegnie (backend deduplikuje po meczu).
-                        if data and await self.submit_grade(data, "ws"):
-                            log("ocena zlapana z WebSocketu", "ok")
+                    await self.dispatch_ws(event.get("uri", ""), event.get("data"))
+
+    async def dispatch_ws(self, uri, data):
+        """(K) Rozdzielnia zdarzen z catch-all: liczy wszystko (meldunek
+        zdrowia), obsluguje trzy nasze uri. Zwraca True dla naszych.
+        Dokladne sciezki, nie sufiksy: stary warunek endswith(
+        "/champ-select/v1/session") NIGDY nie pasowal do
+        /lol-champ-select/v1/session (przed "champ-select" stoi "-", nie "/")
+        - rotacje z lawki nie mialy prawa przyjsc z WS, tylko z pollingu
+        (test partii K zlapal to na atrapie zdarzenia)."""
+        self.ws_events["total"] += 1
+        if uri == "/lol-gameflow/v1/gameflow-phase":
+            self.ws_events["phase"] += 1
+            await self.handle_phase(data)
+        elif uri == "/lol-champ-select/v1/session":
+            self.ws_events["champ_select"] += 1
+            await self.handle_champ_select(data if isinstance(data, dict) else None)
+        elif uri == "/lol-end-of-game/v1/champion-mastery-updates":
+            self.ws_events["mastery"] += 1
+            # Ocena wypchnieta przez klienta w momencie powstania - zero
+            # zgadywania fazy. Dziala tez, gdy petla dopytujaca akurat nie
+            # biegnie (backend deduplikuje po meczu).
+            if data and await self.submit_grade(data, "ws"):
+                log("ocena zlapana z WebSocketu", "ok")
+        else:
+            return False
+        return True
 
     async def run(self):
         async with aiohttp.ClientSession() as session:
@@ -1232,6 +1324,7 @@ class Agent:
                         await self.sync_history(self.cfg["history_pages_on_start"])
                     await self.sync_pass()
                     await self.sync_missions()
+                    await self.recover_last_grade()
 
                 try:
                     await self.ws_loop()

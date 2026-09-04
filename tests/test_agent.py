@@ -436,7 +436,10 @@ def test_report_health_counts_queue_files(tmp_path):
     posts = asyncio.run(run())
     path, payload = posts[0]
     assert path == "/agent/health"
-    assert payload == {"queue": 2, "bad": 1, "ws_ok": False}
+    assert (payload["queue"], payload["bad"], payload["ws_ok"]) == (2, 1, False)
+    # (K) liczniki zdarzen catch-all WS jada w tym samym meldunku
+    assert payload["ws_events"] == {"total": 0, "phase": 0, "champ_select": 0,
+                                    "mastery": 0}
 
 
 def test_incident_is_durable(tmp_path):

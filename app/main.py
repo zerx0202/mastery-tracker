@@ -484,8 +484,15 @@ async def lobby_targets(ids, queue):
 async def push_lobby(payload: dict):
     ids = [int(x) for x in payload.get("champion_ids", [])]
     trade = [int(x) for x in payload.get("trade_ids", []) if x]
+    # (K) sojusznicy z champ selecta - tylko znane pola, bez zaufania do
+    # ksztaltu z agenta
+    allies = [{"cellId": a.get("cellId"), "championId": int(a.get("championId") or 0),
+               "puuid": str(a.get("puuid") or ""), "name": str(a.get("name") or ""),
+               "hidden": bool(a.get("hidden"))}
+              for a in (payload.get("allies") or []) if isinstance(a, dict)]
     ts = int(time.time())
-    db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), ts, trade)
+    db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), ts, trade,
+                 allies)
     # tryb ostatniego lobby czyta /eog przy linkowaniu puli (normalizacja
     # offsetu championId w JADE) - dotad nikt go nie ZAPISYWAL, wiec cala
     # ochrona byla martwa (audyt 2.09)
@@ -496,7 +503,7 @@ async def push_lobby(payload: dict):
     if ids:
         pool_id = await asyncio.to_thread(
             db.save_pool, ids, payload.get("queue"), payload.get("queue_id"),
-            payload.get("pool_kind"), ts, trade)
+            payload.get("pool_kind"), ts, trade, allies)
         # agent wysyla kazda rotacje z lawka (ta sama unia -> ten sam pool_id);
         # event i predykcje sa per pula, nie per rotacja - inaczej event_log
         # puchnie, a predykcje sa liczone w kolko dla identycznych ids
@@ -535,6 +542,7 @@ async def read_lobby(max_age: int = 5400):
         "pool_kind": lob["pool_kind"],
         "champion_ids": lob["champion_ids"],
         "trade_ids": lob.get("trade_ids") or [],
+        "allies": lob.get("allies") or [],
         "prior": t.get("prior"),
         "summary": t.get("summary"),
         "patch": t.get("patch"),
@@ -1266,6 +1274,9 @@ async def agent_health(payload: dict):
         "queue": payload.get("queue"),
         "bad": payload.get("bad"),
         "ws_ok": bool(payload.get("ws_ok")),
+        # (K) liczniki zdarzen catch-all WS - dowod, ze zdarzenia dochodza
+        "ws_events": (payload.get("ws_events")
+                      if isinstance(payload.get("ws_events"), dict) else None),
     })
     return {"stored": True}
 

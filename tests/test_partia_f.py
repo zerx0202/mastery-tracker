@@ -72,6 +72,9 @@ def test_score_rows_exposes_rung_count_for_ui():
     assert lead["champion_id"] == 1                  # 10 gier < 30 gier
     assert (lead["next_grade"], lead["next_need"], lead["next_have"]) == ("S-", 2, 1)
     assert lead["expected_games"] == 10 and lead["steps_remaining"] == 1
+    # (K) "ocen do celu": lider ma 1 (druga S- na bonus), champion na III ma
+    # 2 szczeble, ale 3 oceny (III->IV x1, IV->bonus x2)
+    assert lead["grades_remaining"] == 1 and rows[1]["grades_remaining"] == 3
 
 
 def test_mission_projection_counts_required_grades(fresh_db, monkeypatch):

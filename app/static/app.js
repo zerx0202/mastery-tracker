@@ -315,9 +315,14 @@ async function renderNow() {
   if (inSelect) {
     targets = lobby.targets;
     patchMeta = lobby.patch;
+    // (K) sojusznicy z champ selecta: UNHIDDEN z nazwa, HIDDEN uczciwie
+    // jako "(ukryty)" - puuid pod karte 9 leci z agenta razem z pula
+    const al = lobby.allies || [];
+    const alTxt = al.length ? ` · sojusznicy: ${al.map(a => a.hidden
+      ? "(ukryty)" : esc((a.name || "?").split("#")[0])).join(", ")}` : "";
     barHtml += `<div class="live"><span class="dot"></span>
       <div><b>${esc(lobby.queue || "Champ select")}</b> —
-      ${lobby.champion_ids.length} w puli, odczyt sprzed ${lobby.age}s</div></div>`;
+      ${lobby.champion_ids.length} w puli, odczyt sprzed ${lobby.age}s${alTxt}</div></div>`;
     if (stale()) return;
     $("live-bar").innerHTML = barHtml;
   } else {
@@ -411,8 +416,8 @@ async function renderNow() {
   $("cards").innerHTML = `<table class="pool-table">
     <thead><tr>
       <th style="width:44px"></th><th>Champion</th>
-      <th class="r" style="width:74px">Zostało</th>
-      <th style="width:72px">Trzeba</th>
+      <th class="r" style="width:92px" title="ile ocen ≥ progu brakuje do celu (nie szczebli)">Ocen do celu</th>
+      <th style="width:110px" title="najbliższy szczebel: ocena → milestone">Trzeba</th>
       <th class="r" style="width:88px">Twoje gry</th>
       <th class="r" style="width:100px">Maestria</th>
       <th class="r" style="width:92px">Ostatnio</th>
@@ -425,9 +430,11 @@ async function renderNow() {
         <td class="rank-cell">${i + 2}</td>
         <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(t.key, t.champion_id)}" alt="">
           ${esc(t.name)}${verdictChip((notesAll.verdicts || {})[t.champion_id])}${poolBadges(t, lobbyTrade, inSelect)}</div></td>
-        <td class="r num">${t.steps_remaining}</td>
+        <td class="r num" title="${t.steps_remaining} ${t.steps_remaining === 1 ? "szczebel" : "szczebli"} do celu">${
+          t.grades_remaining ?? t.steps_remaining}</td>
         <td><span class="chip ${t.next_grade === "S-" ? "gold" : ""}">${
-          esc(t.next_grade || "?")}${t.next_need > 1 ? " ×" + t.next_need : ""}</span></td>
+          esc(t.next_grade || "?")}${t.next_need > 1 ? " ×" + t.next_need : ""}</span>
+          <small class="dim">→ ${msName(t.milestone)}</small></td>
         <td class="r num" style="${own ? "" : "color:var(--faint)"}">${own || "—"}</td>
         <td class="r num" style="color:var(--dim)">${fmt(t.points)}</td>
         <td class="r num" style="color:var(--dim)">${
@@ -1074,7 +1081,11 @@ async function renderSystem() {
         <span style="color:${ah.bad ? "var(--warn)" : "inherit"}">${ah.bad ?? "—"}</span></div>
       <div class="kv"><span>WebSocket</span>
         <span style="color:${ah.ws_ok ? "var(--ok)" : "var(--warn)"}">${
-        ah.ws_ok ? "połączony" : "polling"}</span></div>`
+        ah.ws_ok ? "połączony" : "polling"}</span></div>
+      ${ah.ws_events ? `<div class="kv"><span>Zdarzenia WS od startu</span>
+        <span style="color:${ah.ws_events.total ? "inherit" : "var(--warn)"}">${
+        ah.ws_events.total} · champ select ${ah.ws_events.champ_select} · fazy ${
+        ah.ws_events.phase} · oceny ${ah.ws_events.mastery}</span></div>` : ""}`
       : `<div class="msg dim">brak meldunku — agent w tej wersji jeszcze
          nie startował</div>`}
   </div>`;

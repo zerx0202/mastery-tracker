@@ -163,6 +163,10 @@ def score_rows(rows, ladder, rates, prior, goal):
         r["next_threshold"] = (nxt or {}).get("threshold")
         r["next_need"] = (nxt or {}).get("need")
         r["next_have"] = (nxt or {}).get("have")
+        # ile OCEN >= progu jeszcze brakuje do celu (nie szczebli): przy celu
+        # bonus 1 champion na III ma 2 szczeble, ale 3 oceny S- - "zostalo 2"
+        # czytalo sie jak "2 gry" (pytanie czlowieka 4.09)
+        r["grades_remaining"] = sum(s.get("remaining", 1) for s in steps)
 
         own = sum(s.get("own_games", 0) for s in steps)
         r["own_games_on_champ"] = own
