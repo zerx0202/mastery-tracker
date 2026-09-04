@@ -664,7 +664,7 @@ async def history_lcu(payload: dict):
     karmia player_stat i match_participant jak przy eog (partia D: own_slice
     wyrzucal ten material bezpowrotnie)."""
     games = payload.get("games") or []
-    my = db.get_cached_puuid(f"{MY_NAME}#{MY_TAG}")
+    my = db.my_lcu_puuid()
     new = 0
     errors = []
     for g in games:
@@ -1195,14 +1195,14 @@ async def players(puuids: str = ""):
     """Wspolna historia z graczami po puuid - pasek champ selecta i panel
     live (sojusznicy z K), wiersz oceny (znajomi z innych gier)."""
     ids = [p for p in puuids.split(",") if len(p) == 36]
-    my = db.get_cached_puuid(f"{MY_NAME}#{MY_TAG}")
+    my = db.my_lcu_puuid()
     return await asyncio.to_thread(db.players_summary, ids, my)
 
 
 @api.get("/players/recurring")
 async def players_recurring(min_games: int = 2):
     """Rejestr powtarzajacych sie graczy (Laboratorium)."""
-    my = db.get_cached_puuid(f"{MY_NAME}#{MY_TAG}")
+    my = db.my_lcu_puuid()
     return {"players": await asyncio.to_thread(db.recurring_players, my, min_games)}
 
 
@@ -1386,7 +1386,7 @@ async def grades_explain(match_id: str):
     # (E) pozycja na tle 10 graczy TEGO meczu - kontekst, nie diagnoza
     out["match_pct"] = await asyncio.to_thread(db.match_percentiles, match_id)
     # (M, karta 9) znajomi w tym meczu: widziani w INNYCH meczach
-    my = db.get_cached_puuid(f"{MY_NAME}#{MY_TAG}")
+    my = db.my_lcu_puuid()
     with db.connect() as c:
         others = [r["puuid"] for r in c.execute(
             "SELECT puuid FROM match_participant WHERE match_id=?", (match_id,))]

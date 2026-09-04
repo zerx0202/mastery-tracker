@@ -1114,6 +1114,32 @@ def save_player_names(pairs, ts=None):
     return len(rows)
 
 
+def my_lcu_puuid():
+    """(N, 4.09) MOJ puuid w formacie KLIENTA. puuid_cache trzyma puuid
+    z ACCOUNT-V1 - zaszyfrowany per klucz API (78 znakow) - a bloki eog,
+    historia LCU i champ select uzywaja surowego puuid (36 znakow). To dwa
+    rozne identyfikatory tego samego konta: od partii D wlasny wiersz
+    z odzysku P6 byl wybierany po puuid z API (fallback na pierwszego
+    uczestnika, is_local nigdy z tej sciezki), a karta 9 po deployu M byla
+    pusta. Zrodlo: ustawienie my_lcu_puuid uczone z bloku eog
+    (isLocalPlayer w save_match_participants); fallback: najczestszy puuid
+    slotu z wierszami is_local. Do Riot API nadal idzie puuid z cache."""
+    p = get_setting("my_lcu_puuid")
+    if p:
+        return p
+    with connect() as con:
+        row = con.execute("""
+            SELECT mp.puuid, COUNT(*) n FROM match_participant mp
+            JOIN player_stat ps ON ps.match_id = mp.match_id
+                               AND ps.participant_no = mp.participant_no
+            WHERE ps.is_local = 1 GROUP BY mp.puuid
+            ORDER BY n DESC LIMIT 1""").fetchone()
+    if not row:
+        return None
+    set_setting("my_lcu_puuid", row["puuid"])
+    return row["puuid"]
+
+
 def _riot_name(p):
     """Nazwa z bloku eog: Riot ID, a bez niego stara nazwa przywolywacza."""
     gn, tag = p.get("riotIdGameName"), p.get("riotIdTagLine")
@@ -1144,6 +1170,9 @@ def save_match_participants(block, match_id):
             rows.append({"match_id": match_id, "participant_no": n,
                          "puuid": puuid, "team_id": team_id})
             names.append((puuid, _riot_name(p)))
+            # (N) jedyne pewne zrodlo mojego puuid w formacie klienta
+            if p.get("isLocalPlayer") and len(puuid) == 36:
+                set_setting("my_lcu_puuid", puuid)
     if not rows:
         return 0
     with connect() as con:

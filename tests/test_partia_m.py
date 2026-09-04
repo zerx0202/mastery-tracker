@@ -85,10 +85,22 @@ def test_names_from_lcu_full_game_and_lobby_allies(fresh_db):
         assert con.execute("SELECT COUNT(*) c FROM player_name").fetchone()["c"] == 3
 
 
+def test_my_lcu_puuid_learned_from_eog_or_derived(fresh_db):
+    assert db.my_lcu_puuid() is None
+    # (N) puuid z ACCOUNT-V1 (zaszyfrowany, 78 znakow) NIE jest kluczem do
+    # danych klienta - nawet zapisany w cache nie ma tu nic do powiedzenia
+    db.cache_puuid("Test#EUW", "y" * 78, NOW)
+    assert db.my_lcu_puuid() is None
+    _game("EUW1_1", 1, 1, NOW, [(MY, "Ja#1", 100, 45), (A, "Zed#EUW", 100, 238)])
+    assert db.my_lcu_puuid() == MY                       # nauczony z isLocalPlayer
+    db.set_setting("my_lcu_puuid", "")
+    assert db.my_lcu_puuid() == MY                       # wyprowadzony z is_local
+    assert db.get_setting("my_lcu_puuid") == MY          # i utrwalony
+
+
 def test_players_endpoints(fresh_db):
     client = TestClient(app, raise_server_exceptions=False)
-    assert client.get("/api/players?puuids=" + A).json() == {}     # puuid wlasny nieznany
-    db.cache_puuid("Test#EUW", MY, NOW)                             # conftest: Test#EUW
+    assert client.get("/api/players?puuids=" + A).json() == {}     # "ja" jeszcze nieznany
     _game("EUW1_1", 1, 1, NOW, [(MY, "Ja#1", 100, 45), (A, "Zed#EUW", 100, 238)])
     out = client.get("/api/players?puuids=" + A + ",smiec").json()
     assert out[A]["with"] == 1 and out[A]["name"] == "Zed#EUW"

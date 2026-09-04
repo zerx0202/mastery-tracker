@@ -9,7 +9,6 @@ martwego last_queue_mode (ochrona offsetu JADE w /eog) i bezwarunkowego
 filtra w /grades/history. Snowball: druga obserwacja tej samej gry od
 INNEGO gracza przestaje przepadac (snowball_pair). Odzysk P6: pelny obiekt
 gry karmi player_stat i match_participant zamiast wyrzucac 9/10 materialu."""
-import time
 
 from fastapi.testclient import TestClient
 
@@ -231,8 +230,9 @@ def _full_game(gid=9):
 
 
 def test_full_game_recovery_feeds_stats_and_participants(fresh_db):
-    ts = int(time.time())
-    db.cache_puuid("Test#EUW", MY, ts)     # conftest: MY_RIOT_NAME=Test/EUW
+    # (N) wlasny wiersz idzie po puuid w formacie KLIENTA (my_lcu_puuid),
+    # nie po zaszyfrowanym puuid z ACCOUNT-V1 w puuid_cache
+    db.set_setting("my_lcu_puuid", MY)
     client = TestClient(app, raise_server_exceptions=False)
     r = client.post("/api/history/lcu", json={"games": [_full_game(9)]})
     assert r.status_code == 200 and r.json()["new"] == 1
