@@ -84,7 +84,7 @@ def test_pipeline_sanity_counts(fresh_db):
     # missing_games: ocena-sierota EUW1_66 to zarazem znana gra bez statystyk;
     # eog_bez_oceny=0, bo jedyny eog (EUW1_1) ma swoja ocene
     assert p == {"orphan_grades": 1, "eog_no_participants": 1,
-                 "stale_pools": 1, "pools_unlinked_game": 0,
+                 "stale_pools": 1, "games_unlinked_pool": 0,
                  "missing_games": 1, "eog_bez_oceny": 0,
                  "timeline_missing": 0}
 

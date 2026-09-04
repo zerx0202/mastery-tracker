@@ -235,21 +235,26 @@ def test_pipeline_separates_dodge_from_unlinked_game(fresh_db):
     now = int(time.time())
     old = now - 90000
     with db.connect() as con:
-        # dodge: stara pula bez zadnej gry w poblizu - informacyjnie
+        # dodge: stara pula, po ktorej byla tylko gra Classic - informacyjnie
         insert_row(con, "champ_select_pool", ts=old, champion_ids="[1]",
-                   pool_size=1)
-        # przeciek: pula, po ktorej w 2 h byla gra nieprzypisana do zadnej puli
+                   pool_size=1, queue_id=2400)
+        insert_row(con, "match_player", match_id="EUW1_2", champion_id=1,
+                   duration=1500, game_mode="CLASSIC", queue_id=420,
+                   game_creation=(old + 1800) * 1000)
+        # przeciek: gra MISJI bez puli, choc pula jej kolejki byla tuz przed
         insert_row(con, "champ_select_pool", ts=old - 50000, champion_ids="[2]",
-                   pool_size=1)
+                   pool_size=1, queue_id=2400)
         insert_row(con, "match_player", match_id="EUW1_3", champion_id=2,
-                   duration=1200, game_creation=(old - 50000 + 600) * 1000)
+                   duration=1200, game_mode="KIWI", queue_id=2400,
+                   game_creation=(old - 50000 + 600) * 1000)
         # gra przypisana do puli nie jest przeciekiem
         insert_row(con, "champ_select_pool", ts=old - 80000, champion_ids="[3]",
                    pool_size=1, match_id="EUW1_4")
         insert_row(con, "match_player", match_id="EUW1_4", champion_id=3,
-                   duration=1200, game_creation=(old - 80000 + 600) * 1000)
+                   duration=1200, game_mode="KIWI", queue_id=2400,
+                   game_creation=(old - 80000 + 600) * 1000)
     p = db.pipeline_sanity()
-    assert p["stale_pools"] == 2 and p["pools_unlinked_game"] == 1
+    assert p["stale_pools"] == 2 and p["games_unlinked_pool"] == 1
 
 
 # ---------- (6) augmenty per tier ----------

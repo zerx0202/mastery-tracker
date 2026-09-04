@@ -141,6 +141,8 @@ def test_tabs_switch_views(page):
     page.click('nav a[href="#/split"]')
     page.wait_for_selector("#v-split:not([hidden])")
     assert page.is_hidden("#v-grades")
+    # (H) Split w ukladzie deck: drabinka w bocznej kolumnie
+    page.wait_for_selector('#v-split .deck aside .panel:has-text("Drabinka")')
     # aktywna zakladka dostaje klase "on"
     assert "on" in page.get_attribute('nav a[href="#/split"]', "class")
 

@@ -1404,6 +1404,53 @@ def link_pool_to_match(match_id, champion_id, reroll_count, ts, max_age=14400):
     return row["id"]
 
 
+def _orphan_pool_matches(con, max_age=14400):
+    """(H) Gry trybu misji bez przypietej puli, dla ktorych istnieje
+    kandydatka: ostatnia niezlinkowana pula tej samej kolejki z okna max_age
+    przed startem gry - ta sama regula co link_pool_to_match na zywo.
+    Zrodlo problemu: link_pool_to_match wola wylacznie /eog, wiec gra, ktorej
+    koniec agent przegapil (weszla z historii albo odzysku P6), zostawiala
+    pule bez meczu, a predykcja sprzed gry wisiala w nieskonczonosc
+    (kopia 4.09: Ezreal 31.08 z okna "grano bez agenta"). Tryb i czas gry
+    jak w czujce ocen: Practice Tool i Classic po dodge'u Mayhema to nie
+    przeciek. Zwraca [(match_id, champion_id, pool_id)]."""
+    modes = ", ".join(f"'{m}'" for m in MODE_QUEUES)
+    games = con.execute(f"""
+        SELECT m.match_id, m.champion_id, m.queue_id,
+               m.game_creation / 1000 AS start
+        FROM match_player m
+        WHERE m.game_mode IN ({modes}) AND m.game_creation IS NOT NULL
+          AND COALESCE(m.duration, 999999) >= {REMAKE_MAX_S}
+          AND m.match_id NOT IN (SELECT match_id FROM champ_select_pool
+                                 WHERE match_id IS NOT NULL)
+        ORDER BY m.game_creation""").fetchall()
+    out, taken = [], set()
+    for g in games:
+        row = con.execute("""
+            SELECT id FROM champ_select_pool
+            WHERE match_id IS NULL AND ts BETWEEN ? AND ?
+              AND (queue_id IS NULL OR queue_id = ?)
+            ORDER BY ts DESC LIMIT 1""",
+            (g["start"] - max_age, g["start"] + 60, g["queue_id"])).fetchone()
+        if row and row["id"] not in taken:
+            taken.add(row["id"])
+            out.append((g["match_id"], g["champion_id"], row["id"]))
+    return out
+
+
+def link_orphan_pools(max_age=14400):
+    """Dopina zalegle pule do gier z historii/odzysku (patrz
+    _orphan_pool_matches); picked_id = champion z match_player, przez co
+    prediction_pairs rozstrzyga predykcje samo. Idempotentne."""
+    with connect() as con:
+        pairs = _orphan_pool_matches(con, max_age)
+        for match_id, champion_id, pool_id in pairs:
+            con.execute(
+                "UPDATE champ_select_pool SET picked_id=?, match_id=? WHERE id=?",
+                (champion_id, match_id, pool_id))
+    return len(pairs)
+
+
 def median_final_pool_size():
     """Mediana FINALNYCH pul kartowych. Walidacja 1.09: tabela miesza stany
     czesciowe (naplyw kart, 2-6 championow) i pule "full" (173) - filtr:
@@ -1822,24 +1869,17 @@ def pipeline_sanity():
         stale_pools = con.execute(
             "SELECT COUNT(*) c FROM champ_select_pool "
             "WHERE match_id IS NULL AND ts < ?", (cutoff,)).fetchone()["c"]
-        # prawdziwy przeciek pul: po champ selekcie byla gra, ktorej
-        # link_pool_to_match nie dokleil do ZADNEJ puli; po dodge'u gry nie
-        # ma, wiec dodge tu nie wpada
-        pools_unlinked_game = con.execute("""
-            SELECT COUNT(*) c FROM champ_select_pool p
-            WHERE p.match_id IS NULL AND p.ts < ?
-              AND EXISTS (
-                SELECT 1 FROM match_player m
-                WHERE m.game_creation / 1000 BETWEEN p.ts AND p.ts + 7200
-                  AND m.match_id NOT IN (SELECT match_id FROM champ_select_pool
-                                         WHERE match_id IS NOT NULL))""",
-            (cutoff,)).fetchone()["c"]
+        # prawdziwy przeciek pul: gra MISJI bez przypietej puli, choc pula
+        # z jej kolejki byla tuz przed nia (pierwsza wersja liczyla pule
+        # z DOWOLNA gra w 2 h - Practice Tool i Classic po dodge'u Mayhema
+        # dawaly 9 falszywych alarmow, produkcja 4.09)
+        games_unlinked_pool = len(_orphan_pool_matches(con))
         eog_no_grade = con.execute(
             _eog_no_grade_sql("COUNT(*) c")).fetchone()["c"]
     return {"orphan_grades": orphan_grades,
             "eog_no_participants": eog_no_participants,
             "stale_pools": stale_pools,
-            "pools_unlinked_game": pools_unlinked_game,
+            "games_unlinked_pool": games_unlinked_pool,
             "eog_bez_oceny": eog_no_grade,
             # (P6) odzyskiwalne przez agenta - niezerowe topnieje samo
             "missing_games": len(missing_own_games(1000)),
@@ -2598,3 +2638,10 @@ def upgrade_ladder_split_key():
             DROP TABLE milestone_ladder;
             ALTER TABLE milestone_ladder_new RENAME TO milestone_ladder;
         """)
+
+
+def upgrade_link_orphan_pools():
+    """(H) Jednorazowe dopiecie zaleglych pul przy starcie - potem robi to
+    /history/lcu przy kazdej nowej grze. Idempotentne, na pustej bazie
+    testowej nic nie robi. Na koncu pliku: potrzebuje pelnego schematu."""
+    link_orphan_pools()

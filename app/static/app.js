@@ -733,21 +733,30 @@ async function renderSplit() {
       </div>`;
   }
 
-  $("split-body").innerHTML = `
-    <div class="cols2" style="margin-top:20px">
+  // (H) uklad deck jak na TERAZ: trzy panele roznej wysokosci nie balansuja
+  // sie w dwoch kolumnach; drabinka idzie do bocznej kolumny, statystyki
+  // i wykres marks do glownej
+  const distHtml = `
       <div class="panel">
         <div class="eyebrow">Rozkład championów</div>
         ${bars}
+      </div>`;
+  $("split-body").innerHTML = `
+    <div class="deck" style="margin-top:20px">
+      <div>
+        ${recapHtml ? `<div class="grid2">${distHtml}${recapHtml}</div>` : distHtml}
+        <div id="split-chart"></div>
       </div>
-      ${recapHtml}
-      <div class="panel">
-        <div class="eyebrow">Drabinka wymagań</div>
-        ${ladder || '<div class="sub">jeszcze nieznana</div>'}
-        <div class="kv" style="margin-top:14px"><span>Marks of Mastery zdobyte łącznie</span>
-          <span>${d.marks_total}</span></div>
-        <div class="kv"><span>Championów na celu (${msName(d.goal - 1)})</span><span>${d.at_goal}</span></div>
-        <div class="kv"><span>Śledzone od</span><span>${since}</span></div>
-      </div>
+      <aside>
+        <div class="panel">
+          <div class="eyebrow">Drabinka wymagań</div>
+          ${ladder || '<div class="sub">jeszcze nieznana</div>'}
+          <div class="kv" style="margin-top:14px"><span>Marks of Mastery zdobyte łącznie</span>
+            <span>${d.marks_total}</span></div>
+          <div class="kv"><span>Championów na celu (${msName(d.goal - 1)})</span><span>${d.at_goal}</span></div>
+          <div class="kv"><span>Śledzone od</span><span>${since}</span></div>
+        </div>
+      </aside>
     </div>`;
 
 
@@ -783,7 +792,7 @@ async function renderSplit() {
   const xB = i2 => PAD + plotW * (i2 + 0.5) / dayBars.length;
   const yB = v => H - PAD - (H - 2 * PAD) * v / vMax;
 
-  $("split-body").insertAdjacentHTML("beforeend", `
+  $("split-chart").insertAdjacentHTML("beforeend", `
     <div class="panel" style="margin-top:14px">
       <div class="panel-label">Marks dziennie ·
         <span class="dim">łącznie +${total} od ${fmtD(dayBars[0].k)} ·
@@ -949,7 +958,7 @@ async function renderSystem() {
   const PIPE_ALARM = {orphan_grades: "Oceny bez meczu",
     eog_no_participants: "Ekrany bez tożsamości",
     eog_bez_oceny: "Ekrany gier misji BEZ oceny (kanał ocen!)",
-    pools_unlinked_game: "Pule z nieprzypisaną grą"};
+    games_unlinked_pool: "Gry misji bez przypiętej puli (predykcja wisi)"};
   const PIPE_INFO = {stale_pools: "Pule bez gry (dodge / remake / trening)",
     missing_games: "Gry bez statystyk — agent odzyska sam",
     timeline_missing: "Gry bez timeline — agent dociąga sam"};

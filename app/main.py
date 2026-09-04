@@ -662,6 +662,12 @@ async def history_lcu(payload: dict):
         await asyncio.to_thread(db.log_event, "history_lcu",
                                 {"received": len(games), "new": new})
     if new:
+        # (H) gry z historii/odzysku nie przechodza przez /eog, wiec ich pula
+        # zostawala bez meczu, a predykcja sprzed gry wisiala bez wyniku
+        linked = await asyncio.to_thread(db.link_orphan_pools)
+        if linked:
+            await asyncio.to_thread(db.log_event, "pool_link_backfill",
+                                    {"linked": linked})
         # Trening po ocenie strzela ZA WCZESNIE w potoku: grade laduje
         # ~30 s przed wierszem match_player (ten powstaje dopiero tutaj),
         # a training_rows JOIN-uje oba - swieza ocena wchodzila do modelu
