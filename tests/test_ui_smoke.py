@@ -73,6 +73,16 @@ def _seed():
         "tier": "A", "win_rate": 51.2,
         "augments": ["Eureka", "High Roller", "Recursion"],
         "skill_sequence": "Q W E Q Q R", "skill_priority": "Q > E > W"}})
+    # (G) notki patcha z cache - bez seeda backend testowy poszedlby po
+    # prawdziwy artykul Riota; Veigar ma blok, reszta seeda "bez zmian"
+    db.set_json_setting("patch_notes", {
+        "patch": "16.16", "fetched_at": now, "ok": True,
+        "url": "https://www.leagueoflegends.com/en-us/news/game-updates/patch-26-16-notes",
+        "champions": {"veigar": {
+            "name": "Veigar", "summary": "Veigar needs help.", "verdict": "buff",
+            "changes": [{"ability": "Q - Baleful Strike", "label": "Cooldown",
+                         "before": "8s", "after": "7s", "kind": "buff", "flag": None}]}},
+        "mayhem": {}})
     with db.connect() as con:
         insert_row(con, "match_player", match_id="EUW1_500", game_mode="KIWI",
                    queue_id=2400, duration=1200,
@@ -153,14 +163,19 @@ def test_pass_tile_renders(page):
 
 
 def test_hero_links_to_patch_notes(page):
-    # (41) wiki nazywa strony marketingowo (V26.16), ddragon wewnetrznie
-    # (16.16.1) - link musi przemapowac numer i dokleic kotwice championa
-    # baner tez ma .patch-link (bez kotwicy) - celujemy w link przy nazwie
+    # (41 -> G) "notki" przy nazwie prowadza do bloku championa w notkach
+    # Riota (kotwica #patch-<slug> tylko, gdy champion ma blok; inaczej sam
+    # artykul); wiki zostala fallbackiem bez notek w cache. Baner tez ma
+    # .patch-link (bez kotwicy) - celujemy w link przy nazwie
     a = page.wait_for_selector("#hero .who a.patch-link")
     href = a.get_attribute("href")
     assert re.fullmatch(
-        r"https://wiki\.leagueoflegends\.com/en-us/V26\.16#(Veigar|Alistar|Lux)",
-        href), href
+        r"https://www\.leagueoflegends\.com/en-us/news/game-updates/"
+        r"patch-26-16-notes(#patch-veigar)?", href), href
+    # blok zmian renderuje sie zawsze: z liniami (Veigar) albo "bez zmian"
+    block = page.wait_for_selector("#hero .patch-notes")
+    txt = block.inner_text()
+    assert "Patch 16.16" in txt and ("buff" in txt or "bez zmian" in txt), txt
 
 
 def test_hero_shows_mayhem_balance_line(page):

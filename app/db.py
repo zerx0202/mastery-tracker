@@ -1,4 +1,5 @@
 import json
+import re
 import os
 import sqlite3
 import time
@@ -207,6 +208,19 @@ def champion_classes():
 def champion_count():
     with connect() as con:
         return con.execute("SELECT COUNT(*) c FROM champion").fetchone()["c"]
+
+
+def champion_lookup():
+    """(G) Mapy do dopasowania zrodel zewnetrznych: slug = klucz DD lowercase
+    (id="patch-aurelionsol" w notkach Riota) i nazwa znormalizowana (sekcje
+    trybow w notkach nazywaja championow tekstem, np. Kog'Maw)."""
+    def norm(x):
+        return re.sub(r"[^a-z0-9]", "", (x or "").lower())
+    with connect() as con:
+        rows = con.execute("SELECT id, name, key FROM champion").fetchall()
+    return {"slug": {r["key"].lower(): r["id"] for r in rows if r["key"]},
+            "norm": {**{norm(r["name"]): r["id"] for r in rows if r["name"]},
+                     **{norm(r["key"]): r["id"] for r in rows if r["key"]}}}
 
 
 def champion_key(champion_id):
@@ -1761,18 +1775,28 @@ def data_gates():
     ]
 
 
-# (A6/F3) jedyna czujka na smierc kanalu ocen: ekran koncowy jest, oceny nie
-# ma. Rosnaca liczba = patch Riota zabil kanal albo epizod pomeczowy przegrywa
-# wyscig - a ocena to jedyna strata bezpowrotna calego systemu. Customy
-# (KIWI_CUSTOM) z definicji nie maja oceny (queueRewards wylaczone, sonda C5),
-# wiec nie sa przeciekiem; ekran bez wiersza meczu liczymy ostroznie, bo trybu
-# nie znamy.
-_EOG_NO_GRADE_SQL = """
+# Ponizej tylu sekund gra to remake/void - Riot nie daje za nia oceny ani
+# maestrii (remake konczy sie ok. 3-3.5 min).
+REMAKE_MAX_S = 300
+
+
+def _eog_no_grade_sql(cols):
+    """(A6/F3) jedyna czujka na smierc kanalu ocen: ekran koncowy jest, oceny
+    nie ma. Rosnaca liczba = patch Riota zabil kanal albo epizod pomeczowy
+    przegrywa wyscig - a ocena to jedyna strata bezpowrotna calego systemu.
+    Liczymy WYLACZNIE gry trybu misji: customy (queueRewards wylaczone, sonda
+    C5) i tryby wykluczone (JADE) nie maja oceny z definicji - pierwsza
+    wersja odsiewala tylko customy i na produkcji zostal JADE 350 s
+    (EUW1_7969869213, 4.09). Ekran bez wiersza meczu liczymy ostroznie, bo
+    trybu nie znamy."""
+    modes = ", ".join(f"'{m}'" for m in MODE_QUEUES)
+    return f"""
     SELECT {cols} FROM eog_raw e
     LEFT JOIN grade_observation g ON g.match_id = e.match_id
     LEFT JOIN match_player m ON m.match_id = e.match_id
     WHERE g.match_id IS NULL
-      AND (m.game_mode IS NULL OR m.game_mode NOT LIKE '%#_CUSTOM' ESCAPE '#')"""
+      AND (m.game_mode IS NULL OR m.game_mode IN ({modes}))
+      AND COALESCE(m.duration, 999999) >= {REMAKE_MAX_S}"""
 
 
 def pipeline_sanity():
@@ -1811,7 +1835,7 @@ def pipeline_sanity():
                                          WHERE match_id IS NOT NULL))""",
             (cutoff,)).fetchone()["c"]
         eog_no_grade = con.execute(
-            _EOG_NO_GRADE_SQL.format(cols="COUNT(*) c")).fetchone()["c"]
+            _eog_no_grade_sql("COUNT(*) c")).fetchone()["c"]
     return {"orphan_grades": orphan_grades,
             "eog_no_participants": eog_no_participants,
             "stale_pools": stale_pools,
@@ -1828,7 +1852,7 @@ def eog_without_grade_ids(limit=5):
     czy to remake sprzed minuty, czy kanal ocen martwy od tygodnia."""
     with connect() as con:
         return [r["match_id"] for r in con.execute(
-            _EOG_NO_GRADE_SQL.format(cols="e.match_id")
+            _eog_no_grade_sql("e.match_id")
             + " ORDER BY e.captured_at DESC, e.match_id LIMIT ?", (limit,))]
 
 

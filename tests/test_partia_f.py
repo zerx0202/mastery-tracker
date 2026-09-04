@@ -214,6 +214,16 @@ def test_pipeline_ignores_customs_and_names_eog_without_grade(fresh_db):
         # ekran bez wiersza meczu: trybu nie znamy, liczymy ostroznie
         insert_row(con, "eog_raw", match_id="EUW1_9", game_id=9,
                    payload=b"x", captured_at=now)
+        # tryb wykluczony (JADE, produkcja 4.09) i remake w trybie misji -
+        # bez oceny z definicji, nie przeciek
+        insert_row(con, "match_player", match_id="EUW1_10", champion_id=12,
+                   duration=350, game_mode="JADE")
+        insert_row(con, "eog_raw", match_id="EUW1_10", game_id=10,
+                   payload=b"x", captured_at=now)
+        insert_row(con, "match_player", match_id="EUW1_11", champion_id=14,
+                   duration=200, game_mode="KIWI")
+        insert_row(con, "eog_raw", match_id="EUW1_11", game_id=11,
+                   payload=b"x", captured_at=now)
     assert db.pipeline_sanity()["eog_bez_oceny"] == 2
     assert db.eog_without_grade_ids() == ["EUW1_8", "EUW1_9"]
     client = TestClient(app, raise_server_exceptions=False)

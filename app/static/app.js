@@ -136,8 +136,54 @@ function cheatLines(cs) {
       <span style="font-size:12px;text-align:right;max-width:62%">${augs}</span></div>` : "")}`;
 }
 
+/* (G) Zmiany championa w biezacym patchu - inline z werdyktem, zamiast
+   linku do calego patcha (uwaga czlowieka 3.09). Zrodlo, parser, heurystyka
+   werdyktu i decyzja "wylacznie wyswietlanie": app/patchnotes.py. Cache
+   per patch po stronie backendu; tu pamiec na czas zycia strony. */
+const NOTES = {};
+let NOTES_ALL = null;
+async function patchNotesFor(cid) {
+  if (!cid) return null;
+  if (NOTES[cid] && NOTES[cid].ok) return NOTES[cid];
+  try { NOTES[cid] = await api("/patchnotes/" + cid); } catch (e) { return null; }
+  return NOTES[cid];
+}
+async function patchNotesAll() {
+  if (NOTES_ALL === null || !NOTES_ALL.ok) {
+    try { NOTES_ALL = await api("/patchnotes"); } catch (e) { NOTES_ALL = {}; }
+  }
+  return NOTES_ALL;
+}
+const escq = s => esc(s).replaceAll('"', "&quot;");
+const VERDICT_PL = {buff: ["▲ buff", "ok"], nerf: ["▼ nerf", "warn"],
+                    mixed: ["▲▼ mieszane", "warn"], adjust: ["~ zmiany", ""]};
+function verdictChip(v) {
+  const t = VERDICT_PL[v];
+  return t ? `<span class="chip ${t[1]}" style="margin-left:6px">${t[0]}</span>` : "";
+}
+function patchBlock(pn) {
+  if (!pn || !pn.ok) return "";
+  const ch = pn.champion, mh = pn.mayhem;
+  if (!ch && !mh) return `<div class="patch-notes"><span class="dim">Patch ${
+    esc(pn.patch)}: bez zmian tego championa</span></div>`;
+  const val = v => esc(v).replace(/ \/ /g, "/");
+  const fmt = c => `${c.flag ? `<b>${esc(c.flag.toUpperCase())}</b> ` : ""}${
+    c.ability && c.ability !== "Mayhem" ? esc(c.ability) + " · " : ""}${esc(c.label)}${
+    c.before != null ? ` ${val(c.before)} → <b>${val(c.after)}</b>` : `: ${esc(c.after)}`}`;
+  const lines = [];
+  if (ch) {
+    ch.changes.slice(0, 5).forEach(c => lines.push(`<div class="${c.kind}">${fmt(c)}</div>`));
+    if (ch.changes.length > 5) lines.push(`<div class="dim">+${ch.changes.length - 5} dalszych</div>`);
+  }
+  if (mh) mh.changes.slice(0, 3).forEach(c => lines.push(`<div class="${c.kind}">Mayhem · ${fmt(c)}</div>`));
+  const v = ch ? ch.verdict : mh.verdict;
+  return `<div class="patch-notes"><div>Patch ${esc(pn.patch)}${verdictChip(v)}${
+    ch && ch.summary ? ` <span class="dim" title="${escq(ch.summary)}">ⓘ uzasadnienie Riota</span>` : ""
+  }</div>${lines.join("")}</div>`;
+}
+
 /* ---------- TERAZ ---------- */
-function livePanel(d, bal, cheat) {
+function livePanel(d, bal, cheat, pn) {
   const cmp = (key, higher) => {
     const now = d.now[key], ref = (d.reference.hit || {})[key];
     if (ref == null) return {cls: "", note: "brak odniesienia"};
@@ -174,6 +220,7 @@ function livePanel(d, bal, cheat) {
     </div>
     ${d.milestone != null ? rail(d.milestone, GOAL, d.need, d.need_count, d.need_have) : ""}
     ${balanceLine(bal && bal[d.champion_id])}
+    ${patchBlock(pn)}
     ${cheatLines(cheat)}
     <div style="margin-top:14px">${rows}</div>
     <div class="tagline">Złoto liczone z ubytków stanu — obejmuje kowadła
@@ -200,8 +247,9 @@ async function renderNow() {
   try { live = await api("/live"); } catch (e) {}
   const bal = await modeBalance();
   const cheat = live.active ? await cheatsheet(live.champion_id) : null;
+  const pnLive = live.active ? await patchNotesFor(live.champion_id) : null;
   if (stale()) return;
-  $("live-panel") && ($("live-panel").innerHTML = live.active ? livePanel(live, bal, cheat) : "");
+  $("live-panel") && ($("live-panel").innerHTML = live.active ? livePanel(live, bal, cheat, pnLive) : "");
 
   // pasek live-bar skladamy w JEDNEJ zmiennej i ustawiamy raz na koncu -
   // baner sentinela i blad champ selecta byly wstawiane wczesnie
@@ -279,7 +327,12 @@ async function renderNow() {
         patchMeta.games === 1 ? "gry" : "gier"} — normy i model liczone głównie na
         poprzednim patchu, a patch zmienia też mnożniki balansu trybu.</div>` : "";
 
-  const patchNotes = patchUrl(patchMeta && patchMeta.short, b.name);
+  const pn = await patchNotesFor(b.champion_id);
+  const notesAll = await patchNotesAll();
+  if (stale()) return;
+  // (G) "notki" prowadza do bloku championa w notkach Riota; wiki zostaje
+  // fallbackiem, gdy notek nie ma (nowy patch, awaria fetchu)
+  const patchNotes = (pn && pn.anchor_url) || patchUrl(patchMeta && patchMeta.short, b.name);
 
   $("hero").innerHTML = patchBanner + `
     <div class="hero">
@@ -298,6 +351,7 @@ async function renderNow() {
         <div class="range dim" style="margin-top:4px;font-size:11.5px">
           orientacyjnie ${gamesLine}</div>
         ${balanceLine(bal[b.champion_id])}
+        ${patchBlock(pn)}
       </div>
     </div>`;
 
@@ -328,7 +382,7 @@ async function renderNow() {
       <tr>
         <td class="rank-cell">${i + 2}</td>
         <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(t.key, t.champion_id)}" alt="">
-          ${esc(t.name)}${poolBadges(t, lobbyTrade, inSelect)}</div></td>
+          ${esc(t.name)}${verdictChip((notesAll.verdicts || {})[t.champion_id])}${poolBadges(t, lobbyTrade, inSelect)}</div></td>
         <td class="r num">${t.steps_remaining}</td>
         <td><span class="chip ${t.next_grade === "S-" ? "gold" : ""}">${
           esc(t.next_grade || "?")}${t.next_need > 1 ? " ×" + t.next_need : ""}</span></td>
@@ -680,7 +734,7 @@ async function renderSplit() {
   }
 
   $("split-body").innerHTML = `
-    <div class="grid2" style="margin-top:20px">
+    <div class="cols2" style="margin-top:20px">
       <div class="panel">
         <div class="eyebrow">Rozkład championów</div>
         ${bars}
@@ -968,7 +1022,7 @@ async function renderSystem() {
   let pred = {};
   try { pred = await api("/predictions/scorecard"); } catch (e) {}
   $("system-body").innerHTML = gapBanner + `
-    <div class="sys-cols" style="margin-top:20px">
+    <div class="cols2" style="margin-top:20px">
       <div class="panel"><div class="eyebrow">Ostatnia aktywność</div>${seen}${backupKv}${authKv}${balKv}</div>
       ${agentPanel}
       <div class="panel"><div class="eyebrow">Zebrane dane</div>${counts}

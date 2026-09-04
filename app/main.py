@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 
-from . import augments, balance, db, features, model, scoring
+from . import augments, balance, db, features, model, patchnotes, scoring
 from .db import GRADE_RANK
 
 API_KEY = os.environ["RIOT_API_KEY"]
@@ -1042,6 +1042,109 @@ _CHEAT_LOCKS = {}
 # nastepnego patcha (tiery augmentow, F6) - starszy wpis idzie do
 # jednorazowego odswiezenia
 _CHEAT_V = 2
+
+
+# ---------------- (G) zmiany championa w biezacym patchu ----------------
+
+_NOTES_LOCK = asyncio.Lock()
+
+
+async def patch_notes_current():
+    """Notki biezacego patcha z cache w settings; przy zmianie patcha jeden
+    fetch listingu game-updates + artykulu (slug odkrywany z listingu - format
+    zmienil sie w 2026), nieudany fetch ponawiany po godzinie. Zrodlo, parser
+    i granica uzycia (wylacznie wyswietlanie): app/patchnotes.py."""
+    short = patch_meta()["short"]
+
+    def fresh(ent):
+        return (ent and ent.get("patch") == short
+                and (ent.get("ok")
+                     or time.time() - ent.get("fetched_at", 0) < 3600))
+
+    ent = db.get_json_setting("patch_notes")
+    if fresh(ent):
+        return ent
+    async with _NOTES_LOCK:
+        ent = db.get_json_setting("patch_notes")
+        if fresh(ent):
+            return ent
+        ent = {"patch": short, "fetched_at": int(time.time()), "ok": False,
+               "url": None, "champions": {}, "mayhem": {}}
+        if not short:
+            ent["reason"] = "brak patcha Data Dragon"
+        else:
+            try:
+                r = await state["plain"].get(
+                    patchnotes.NEWS_URL, headers=patchnotes.HEADERS,
+                    follow_redirects=True)
+                url = (patchnotes.find_article_url(r.text, short)
+                       if r.status_code == 200 else None)
+                if not url:
+                    ent["reason"] = f"listing HTTP {r.status_code}: brak artykulu {short}"
+                else:
+                    r2 = await state["plain"].get(
+                        url, headers=patchnotes.HEADERS, follow_redirects=True)
+                    data = (patchnotes.parse_notes(r2.text)
+                            if r2.status_code == 200 else {"champions": {}, "mayhem": {}})
+                    # bramka jak przy balansie: zero championow to przebudowa
+                    # markupu (albo patch bez zmian) - nie udajemy sukcesu
+                    if data["champions"]:
+                        ent.update(data)
+                        ent.update(url=url, ok=True)
+                    else:
+                        ent["reason"] = f"artykul HTTP {r2.status_code}: parser 0 championow"
+            except Exception as e:
+                ent["reason"] = f"{type(e).__name__}: {e}"[:200]
+        await asyncio.to_thread(db.set_json_setting, "patch_notes", ent)
+        await asyncio.to_thread(
+            db.log_event, "patchnotes_refresh" if ent["ok"] else "patchnotes_failed",
+            {"patch": short, "champions": len(ent["champions"]),
+             "reason": ent.get("reason")})
+        return ent
+
+
+@api.get("/patchnotes")
+async def patch_notes_all():
+    """Werdykt per champion - plakietki w puli champ selecta."""
+    ent = await patch_notes_current()
+    look = await asyncio.to_thread(db.champion_lookup)
+    verdicts = {}
+    for slug, c in (ent.get("champions") or {}).items():
+        cid = look["slug"].get(slug)
+        if cid:
+            verdicts[cid] = c["verdict"]
+    for key, c in (ent.get("mayhem") or {}).items():
+        cid = look["norm"].get(key)
+        if cid and cid not in verdicts:
+            verdicts[cid] = c["verdict"]
+    return {"patch": ent.get("patch"), "ok": bool(ent.get("ok")),
+            "url": ent.get("url"), "reason": ent.get("reason"),
+            "verdicts": verdicts}
+
+
+@api.get("/patchnotes/{champion_id}")
+async def patch_notes_for(champion_id: int):
+    ent = await patch_notes_current()
+    key = await asyncio.to_thread(db.champion_key, champion_id)
+    slug = (key or "").lower()
+    champ = (ent.get("champions") or {}).get(slug)
+    look = await asyncio.to_thread(db.champion_lookup)
+    mayhem = next((c for k, c in (ent.get("mayhem") or {}).items()
+                   if look["norm"].get(k) == champion_id), None)
+    url = ent.get("url")
+    return {"patch": ent.get("patch"), "ok": bool(ent.get("ok")),
+            "url": url, "reason": ent.get("reason"),
+            "anchor_url": f"{url}#patch-{slug}" if url and champ else url,
+            "champion": champ, "mayhem": mayhem}
+
+
+@write_api.post("/patchnotes/refresh")
+async def patch_notes_refresh():
+    await asyncio.to_thread(db.set_json_setting, "patch_notes", {})
+    ent = await patch_notes_current()
+    return {"ok": bool(ent.get("ok")), "patch": ent.get("patch"),
+            "champions": len(ent.get("champions") or {}),
+            "reason": ent.get("reason")}
 
 
 @api.get("/cheatsheet/{champion_id}")
