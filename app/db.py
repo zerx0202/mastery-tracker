@@ -645,12 +645,16 @@ def save_lcu_participants(g, match_id, my_puuid=None):
     parts = g.get("participants") or []
     if len(parts) <= 1:
         return 0
+    # (O) boty w formacie v4 poznajemy po tagu BOT - bez tozsamosci i nazwy
     ident = {i["participantId"]: (i.get("player") or {}).get("puuid")
-             for i in (g.get("participantIdentities") or [])}
+             for i in (g.get("participantIdentities") or [])
+             if (i.get("player") or {}).get("tagLine") != "BOT"}
     # (M) nazwy z formatu v4: player.gameName#tagLine (summonerName bywa pusty)
     names = []
     for i in g.get("participantIdentities") or []:
         pl = i.get("player") or {}
+        if pl.get("tagLine") == "BOT":
+            continue
         nm = (f"{pl.get('gameName')}#{pl.get('tagLine')}" if pl.get("gameName")
               else pl.get("summonerName") or "")
         names.append((pl.get("puuid"), nm))
@@ -1165,7 +1169,10 @@ def save_match_participants(block, match_id):
         for p in team.get("players") or []:
             n += 1
             puuid = p.get("puuid")
-            if not puuid:
+            # (O) boty z trybow z botami MAJA puuid i nazwe ("Jade_Taric
+            # bot#BOT") - do karty 9 nie wchodza; slot w numeracji zostaje,
+            # bo player_stat liczy ich tak samo
+            if not puuid or p.get("botPlayer"):
                 continue
             rows.append({"match_id": match_id, "participant_no": n,
                          "puuid": puuid, "team_id": team_id})
@@ -2945,3 +2952,17 @@ def upgrade_backfill_mitigated():
                 WHERE ps.match_id = match_player.match_id AND ps.is_local = 1
                   AND ps.stat_key = 'damageSelfMitigated' LIMIT 1)
             WHERE dmg_mitigated IS NULL""")
+
+
+def upgrade_drop_bots():
+    """(O) Jednorazowe sprzatanie botow zapisanych przed filtrem botPlayer
+    (zrzut czlowieka 4.09: "Jade_Taric bot#BOT" z 5 grami przeciw w karcie 9).
+    Bot ma tag BOT - po nim kasujemy tozsamosci i nazwe. Idempotentne."""
+    with connect() as con:
+        bots = [r["puuid"] for r in con.execute(
+            "SELECT puuid FROM player_name WHERE name LIKE '%#BOT'")]
+        if not bots:
+            return
+        ph = ",".join("?" * len(bots))
+        con.execute(f"DELETE FROM match_participant WHERE puuid IN ({ph})", bots)
+        con.execute(f"DELETE FROM player_name WHERE puuid IN ({ph})", bots)
