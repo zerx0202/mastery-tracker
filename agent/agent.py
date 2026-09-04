@@ -1268,6 +1268,13 @@ class Agent:
         - rotacje z lawki nie mialy prawa przyjsc z WS, tylko z pollingu
         (test partii K zlapal to na atrapie zdarzenia)."""
         self.ws_events["total"] += 1
+        # (Q) ktore uri z rodziny end-of-game/mastery LCU w ogole publikuje:
+        # pelna gra 4.09 dala 2676 zdarzen, champ select 20, fazy 6, oceny 0
+        # - ocena przyszla z pollingu, wiec nasze uri oceny moze nie istniec
+        if "end-of-game" in uri or "mastery" in uri:
+            seen = self.ws_events.setdefault("uris", {})
+            if uri in seen or len(seen) < 30:
+                seen[uri] = seen.get(uri, 0) + 1
         if uri == "/lol-gameflow/v1/gameflow-phase":
             self.ws_events["phase"] += 1
             await self.handle_phase(data)

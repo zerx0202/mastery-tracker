@@ -200,9 +200,16 @@ function patchBlock(pn) {
   if (!ch && !mh) return `<div class="patch-notes"><span class="dim">Patch ${
     esc(pn.patch)}: bez zmian tego championa</span></div>`;
   const val = v => esc(v).replace(/ \/ /g, "/");
-  const fmt = c => `${c.flag ? `<b>${esc(c.flag.toUpperCase())}</b> ` : ""}${
-    c.ability && c.ability !== "Mayhem" ? esc(c.ability) + " · " : ""}${esc(c.label)}${
-    c.before != null ? ` ${val(c.before)} → <b>${val(c.after)}</b>` : `: ${esc(c.after)}`}`;
+  // (Q) nawiasy Riota ("Halved for Magic Damage", "in Arena") to w grze szum
+  // - zostaja tylko, gdy cala zmiana siedzi w nawiasie
+  const strip = v => String(v).replace(/\s*\([^)]*\)/g, "").trim();
+  const fmt = c => {
+    let b = c.before, a = c.after;
+    if (b != null && strip(b) !== strip(a)) { b = strip(b); a = strip(a); }
+    return `${c.flag ? `<b>${esc(c.flag.toUpperCase())}</b> ` : ""}${
+      c.ability && c.ability !== "Mayhem" ? esc(c.ability) + " · " : ""}${esc(c.label)}${
+      b != null ? ` ${val(b)} → <b>${val(a)}</b>` : `: ${esc(a)}`}`;
+  };
   const lines = [];
   if (ch) {
     ch.changes.slice(0, 5).forEach(c => lines.push(`<div class="${c.kind}">${fmt(c)}</div>`));
@@ -210,9 +217,9 @@ function patchBlock(pn) {
   }
   if (mh) mh.changes.slice(0, 3).forEach(c => lines.push(`<div class="${c.kind}">Mayhem · ${fmt(c)}</div>`));
   const v = ch ? ch.verdict : mh.verdict;
-  return `<div class="patch-notes"><div>Patch ${esc(pn.patch)}${verdictChip(v)}${
-    ch && ch.summary ? ` <span class="dim" title="${escq(ch.summary)}">ⓘ uzasadnienie Riota</span>` : ""
-  }</div>${lines.join("")}</div>`;
+  // (Q) bez "uzasadnienia Riota": w grze liczy sie werdykt buff/nerf, nie powod
+  return `<div class="patch-notes"><div>Patch ${esc(pn.patch)}${verdictChip(v)}</div>${
+    lines.join("")}</div>`;
 }
 
 /* (M, karta 9) Wspolna historia z graczami po puuid - cache na czas zycia
@@ -232,13 +239,23 @@ async function playersFor(puuids) {
   puuids.forEach(p => { if (PLAYERS[p]) out[p] = PLAYERS[p]; });
   return out;
 }
-function allyLine(a, info) {
+/* (Q) sojusznik jako zeton: ikona championa, nazwa, wspolna historia
+   ("razem 4 · 4/0" = gry razem · W/L z mojej perspektywy) albo "nowy";
+   dotad szary drobny tekst w jednej linii (zrzut 4.09: slabo widoczni) */
+function allyChip(a, info) {
+  const img = `<img onerror="this.src=BLANK" src="${icon(a.key, a.championId)}" alt="">`;
   const name = a.hidden ? "(ukryty)" : esc((a.name || "?").split("#")[0]);
-  if (!info || !info.games) return name;
-  const w = info.with ? ` razem ${info.with}× (${info.wins_with}W/${info.with - info.wins_with}L)` : "";
-  const ag = info.against ? ` przeciw ${info.against}× (${info.wins_against}W/${info.against - info.wins_against}L)` : "";
-  return `${name}<span class="dim">${w}${ag}</span>`;
+  let hist = "";
+  if (!a.hidden) {
+    const parts = [];
+    if (info && info.with) parts.push(`razem ${info.with} · ${info.wins_with}/${info.with - info.wins_with}`);
+    if (info && info.against) parts.push(`przeciw ${info.against} · ${info.wins_against}/${info.against - info.wins_against}`);
+    hist = parts.length ? `<b>${parts.join(", ")}</b>` : `<span class="dim">nowy</span>`;
+  }
+  return `<span class="ally">${img}<span>${name}</span>${hist}</span>`;
 }
+const allyChips = (allies, mates) =>
+  `<span class="allies">${allies.map(a => allyChip(a, (mates || {})[a.puuid])).join("")}</span>`;
 
 /* ---------- TERAZ ---------- */
 function livePanel(d, bal, cheat, pn, allies, mates) {
@@ -279,8 +296,8 @@ function livePanel(d, bal, cheat, pn, allies, mates) {
     ${d.milestone != null ? rail(d.milestone, GOAL, d.need, d.need_count, d.need_have) : ""}
     ${balanceLine(bal && bal[d.champion_id])}
     ${patchBlock(pn)}
-    ${allies && allies.length ? `<div class="range dim" style="margin-top:4px;font-size:11.5px">
-      Sojusznicy: ${allies.map(a => allyLine(a, (mates || {})[a.puuid])).join(" · ")}</div>` : ""}
+    ${allies && allies.length ? `<div class="kv" style="align-items:center"><span>Sojusznicy</span>
+      ${allyChips(allies, mates)}</div>` : ""}
     ${cheatLines(cheat)}
     <div style="margin-top:14px">${rows}</div>
     <div class="tagline">Złoto liczone z ubytków stanu — obejmuje kowadła
@@ -351,11 +368,10 @@ async function renderNow() {
     patchMeta = lobby.patch;
     // (K) sojusznicy z champ selecta: UNHIDDEN z nazwa, HIDDEN uczciwie
     // jako "(ukryty)" - puuid pod karte 9 leci z agenta razem z pula
-    const alTxt = allies.length ? ` · sojusznicy: ${
-      allies.map(a => allyLine(a, mates[a.puuid])).join(", ")}` : "";
+    const alHtml = allies.length ? `<div style="margin-top:8px">${allyChips(allies, mates)}</div>` : "";
     barHtml += `<div class="live"><span class="dot"></span>
       <div><b>${esc(lobby.queue || "Champ select")}</b> —
-      ${lobby.champion_ids.length} w puli, odczyt sprzed ${lobby.age}s${alTxt}</div></div>`;
+      ${lobby.champion_ids.length} w puli, odczyt sprzed ${lobby.age}s${alHtml}</div></div>`;
     if (stale()) return;
     $("live-bar").innerHTML = barHtml;
   } else {
@@ -1148,7 +1164,11 @@ async function renderSystem() {
       ${ah.ws_events ? `<div class="kv"><span>Zdarzenia WS od startu</span>
         <span style="color:${ah.ws_events.total ? "inherit" : "var(--warn)"}">${
         ah.ws_events.total} · champ select ${ah.ws_events.champ_select} · fazy ${
-        ah.ws_events.phase} · oceny ${ah.ws_events.mastery}</span></div>` : ""}`
+        ah.ws_events.phase} · oceny ${ah.ws_events.mastery}</span></div>${
+        ah.ws_events.uris && Object.keys(ah.ws_events.uris).length ? `<div class="kv">
+        <span>URI eog/mastery z WS</span><span style="font-size:11px">${
+        Object.entries(ah.ws_events.uris).map(([u, n]) => `${esc(u.replace("/lol-", ""))} ×${n}`).join(" · ")
+        }</span></div>` : ""}` : ""}`
       : `<div class="msg dim">brak meldunku — agent w tej wersji jeszcze
          nie startował</div>`}
   </div>`;

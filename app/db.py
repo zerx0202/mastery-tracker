@@ -1160,11 +1160,18 @@ def init_match_participant():
         con.executescript(MATCH_PARTICIPANT_SCHEMA)
 
 
+def _bot_name(name):
+    """(Q) Boty z trybow z botami nazywaja sie "<cos> bot" ("Jade_Nasus bot",
+    "Annie Bot") i bywaja BEZ tagu: zrzut 4.09 pokazal bota, ktory przeszedl
+    przez filtry po tagu BOT (O/P) i wrocil do karty 9 z 5 grami przeciw."""
+    return (name or "").split("#")[0].strip().lower().endswith(" bot")
+
+
 def _bot_identity(pl):
     """(P) Bot z pelnej gry LCU: tag BOT i "bot" w nazwie - sam tag to za
-    malo, czlowiek tez moze go miec (przeglad 4.09)."""
-    name = (pl.get("gameName") or pl.get("summonerName") or "").lower()
-    return pl.get("tagLine") == "BOT" and "bot" in name
+    malo, czlowiek tez moze go miec (przeglad 4.09); (Q) albo nazwa bota."""
+    name = pl.get("gameName") or pl.get("summonerName") or ""
+    return (pl.get("tagLine") == "BOT" and "bot" in name.lower()) or _bot_name(name)
 
 
 def save_match_participants(block, match_id):
@@ -1182,7 +1189,7 @@ def save_match_participants(block, match_id):
             # (O) boty z trybow z botami MAJA puuid i nazwe ("Jade_Taric
             # bot#BOT") - do karty 9 nie wchodza; slot w numeracji zostaje,
             # bo player_stat liczy ich tak samo
-            if not puuid or p.get("botPlayer"):
+            if not puuid or p.get("botPlayer") or _bot_name(_riot_name(p)):
                 continue
             rows.append({"match_id": match_id, "participant_no": n,
                          "puuid": puuid, "team_id": team_id})
@@ -2971,7 +2978,8 @@ def upgrade_drop_bots():
     moze go miec) - po tym kasujemy tozsamosci i nazwe. Idempotentne."""
     with connect() as con:
         bots = [r["puuid"] for r in con.execute(
-            "SELECT puuid FROM player_name WHERE name LIKE '%bot%#BOT'")]
+            "SELECT puuid FROM player_name WHERE name LIKE '%bot%#BOT' "
+            "OR name LIKE '% bot' OR name LIKE '% bot#%'")]
         if not bots:
             return
         ph = ",".join("?" * len(bots))

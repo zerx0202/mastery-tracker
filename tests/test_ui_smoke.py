@@ -219,3 +219,17 @@ def test_grade_row_expands_and_collapses(page):
     page.wait_for_selector("tr.explain-row")
     row.click()
     page.wait_for_selector("tr.explain-row", state="detached")
+
+
+def test_champ_select_bar_shows_ally_chips(page):
+    # (Q) sojusznicy jako zetony z ikona i historia zamiast szarego tekstu;
+    # nowy gracz dostaje "nowy", ukryty "(ukryty)"
+    now = int(time.time())
+    db.set_lobby([45, 12, 99], "KIWI", "limited", now, trade_ids=[12], allies=[
+        {"cellId": 1, "championId": 12, "puuid": "a" * 36, "name": "Zed#EUW", "hidden": False},
+        {"cellId": 3, "championId": 99, "puuid": "", "name": "", "hidden": True}])
+    page.reload()
+    chips = page.wait_for_selector("#live-bar .allies")
+    txt = chips.inner_text()
+    assert "Zed" in txt and "nowy" in txt and "(ukryty)" in txt, txt
+    assert page.locator("#live-bar .ally img").count() == 2

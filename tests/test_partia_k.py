@@ -142,7 +142,8 @@ def test_dispatch_ws_routes_and_counts(tmp_path):
             [{"grade": "A", "championId": 53, "gameId": 5, "pointsGained": 400}]) is True
         assert any(p[0] == "/grade" for p in a.server.posts)
         assert await a.dispatch_ws("/lol-chat/v1/conversations", {"x": 1}) is False
-        assert a.ws_events == {"total": 4, "phase": 1, "champ_select": 1, "mastery": 1}
+        assert a.ws_events == {"total": 4, "phase": 1, "champ_select": 1, "mastery": 1,
+                               "uris": {"/lol-end-of-game/v1/champion-mastery-updates": 1}}
         # meldunek zdrowia niesie liczniki
         await a.report_health()
         health = [p for p in a.server.posts if p[0] == "/agent/health"][-1][1]
