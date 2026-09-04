@@ -86,7 +86,7 @@ def test_pipeline_sanity_counts(fresh_db):
     assert p == {"orphan_grades": 1, "eog_no_participants": 1,
                  "stale_pools": 1, "games_unlinked_pool": 0,
                  "missing_games": 1, "eog_bez_oceny": 0,
-                 "timeline_missing": 0}
+                 "games_without_grade": 0, "timeline_missing": 0}
 
 
 # ---------- P7: priorytet snowballa ----------

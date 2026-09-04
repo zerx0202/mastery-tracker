@@ -304,6 +304,14 @@ async def snapshot():
     await asyncio.to_thread(db.learn_ladder, data, ts)
     await asyncio.to_thread(db.log_event, "snapshot",
                             {"snapshot_id": sid, "champions": len(data)}, ts)
+    # (I) kazdy snapshot moze domykac ocene, ktorej agent nie zlapal na zywo
+    # - odzysk byl reczny i przez 5 dni nikt go nie odpalil; blad odzysku
+    # nie ma prawa polozyc snapshotu
+    try:
+        await asyncio.to_thread(db.backfill_grades_from_snapshots, 7200, True)
+    except Exception as e:
+        await asyncio.to_thread(db.log_event, "grade_backfill_fail",
+                                {"error": f"{type(e).__name__}: {e}"[:200]}, ts)
     out = {"snapshot_id": sid, "taken_at": ts, "champions": len(data)}
     if new_split:
         out["split_reset"] = new_split
@@ -668,6 +676,14 @@ async def history_lcu(payload: dict):
         if linked:
             await asyncio.to_thread(db.log_event, "pool_link_backfill",
                                     {"linked": linked})
+        # (I) gra z historii to czesto gra bez ekranu koncowego - jej ocena
+        # czeka w snapshotach; odzysk przed treningiem, zeby weszla do modelu
+        try:
+            await asyncio.to_thread(db.backfill_grades_from_snapshots, 7200, True)
+        except Exception as e:
+            await asyncio.to_thread(db.log_event, "grade_backfill_fail",
+                                    {"error": f"{type(e).__name__}: {e}"[:200]},
+                                    int(time.time()))
         # Trening po ocenie strzela ZA WCZESNIE w potoku: grade laduje
         # ~30 s przed wierszem match_player (ten powstaje dopiero tutaj),
         # a training_rows JOIN-uje oba - swieza ocena wchodzila do modelu
@@ -1535,8 +1551,10 @@ async def system_health():
         "pipeline": await asyncio.to_thread(db.pipeline_sanity),
         # (F3) sam licznik "ekrany bez oceny" nie mowi, KTORE gry - a to
         # rozstrzyga miedzy remake'iem a martwym kanalem ocen
-        "pipeline_detail": {"eog_bez_oceny": await asyncio.to_thread(
-            db.eog_without_grade_ids)},
+        "pipeline_detail": {
+            "eog_bez_oceny": await asyncio.to_thread(db.eog_without_grade_ids),
+            "games_without_grade": await asyncio.to_thread(
+                db.games_without_grade_ids)},
         "last_backup": db.get_json_setting("last_backup"),
         # (A6) czujki: zdrowie klucza Riot i wiek mnoznikow balansu -
         # progi koloru naklada front, tu czysty odczyt

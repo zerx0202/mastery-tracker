@@ -330,9 +330,13 @@ async function renderNow() {
   const pn = await patchNotesFor(b.champion_id);
   const notesAll = await patchNotesAll();
   if (stale()) return;
-  // (G) "notki" prowadza do bloku championa w notkach Riota; wiki zostaje
-  // fallbackiem, gdy notek nie ma (nowy patch, awaria fetchu)
-  const patchNotes = (pn && pn.anchor_url) || patchUrl(patchMeta && patchMeta.short, b.name);
+  // (G/I) "notki" tylko, gdy champion MA blok w notkach Riota (kotwica);
+  // bez bloku link szedl na poczatek artykulu i nic nie mowil (pytanie
+  // czlowieka 4.09) - linia "bez zmian tego championa" wystarcza; bez
+  // notek w cache (nowy patch, awaria fetchu) zostaje fallback na wiki
+  const patchNotes = (pn && pn.ok)
+    ? (pn.champion ? pn.anchor_url : null)
+    : patchUrl(patchMeta && patchMeta.short, b.name);
 
   $("hero").innerHTML = patchBanner + `
     <div class="hero">
@@ -958,18 +962,21 @@ async function renderSystem() {
   const PIPE_ALARM = {orphan_grades: "Oceny bez meczu",
     eog_no_participants: "Ekrany bez tożsamości",
     eog_bez_oceny: "Ekrany gier misji BEZ oceny (kanał ocen!)",
+    games_without_grade: "Gry misji bez żadnej oceny (od startu śledzenia)",
     games_unlinked_pool: "Gry misji bez przypiętej puli (predykcja wisi)"};
   const PIPE_INFO = {stale_pools: "Pule bez gry (dodge / remake / trening)",
     missing_games: "Gry bez statystyk — agent odzyska sam",
     timeline_missing: "Gry bez timeline — agent dociąga sam"};
-  const noGrade = (d.pipeline_detail || {}).eog_bez_oceny || [];
   const pipeRow = (k, label, alarm) => {
     const n = (d.pipeline || {})[k];
     if (n == null) return "";
     const color = alarm ? (n ? "var(--warn)" : "var(--ok)") : "var(--dim)";
-    const ids = (k === "eog_bez_oceny" && n && noGrade.length)
+    // lista ID pod licznikiem, gdy backend ja daje - sam licznik nie mowi,
+    // ktora gra i czy to remake sprzed minuty, czy martwy kanal
+    const det = (d.pipeline_detail || {})[k] || [];
+    const ids = (alarm && n && det.length)
       ? `<div class="kv" style="border:none;padding-top:0"><span class="dim"
-           style="font-size:11.5px">${noGrade.map(esc).join(", ")}</span></div>` : "";
+           style="font-size:11.5px">${det.map(esc).join(", ")}</span></div>` : "";
     return `<div class="kv"><span>${label}</span>
       <span style="color:${color}">${n}</span></div>${ids}`;
   };

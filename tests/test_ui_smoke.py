@@ -73,15 +73,18 @@ def _seed():
         "tier": "A", "win_rate": 51.2,
         "augments": ["Eureka", "High Roller", "Recursion"],
         "skill_sequence": "Q W E Q Q R", "skill_priority": "Q > E > W"}})
-    # (G) notki patcha z cache - bez seeda backend testowy poszedlby po
-    # prawdziwy artykul Riota; Veigar ma blok, reszta seeda "bez zmian"
+    # (G/I) notki patcha z cache - bez seeda backend testowy poszedlby po
+    # prawdziwy artykul Riota; blok ma kazdy champion seeda, bo "notki"
+    # pokazuja sie tylko przy bloku, a hero wybiera ranking
     db.set_json_setting("patch_notes", {
         "patch": "16.16", "fetched_at": now, "ok": True,
         "url": "https://www.leagueoflegends.com/en-us/news/game-updates/patch-26-16-notes",
-        "champions": {"veigar": {
-            "name": "Veigar", "summary": "Veigar needs help.", "verdict": "buff",
-            "changes": [{"ability": "Q - Baleful Strike", "label": "Cooldown",
-                         "before": "8s", "after": "7s", "kind": "buff", "flag": None}]}},
+        "champions": {slug: {
+            "name": name, "summary": f"{name} needs help.", "verdict": "buff",
+            "changes": [{"ability": "Q", "label": "Cooldown", "before": "8s",
+                         "after": "7s", "kind": "buff", "flag": None}]}
+            for slug, name in (("veigar", "Veigar"), ("alistar", "Alistar"),
+                               ("lux", "Lux"))},
         "mayhem": {}})
     with db.connect() as con:
         insert_row(con, "match_player", match_id="EUW1_500", game_mode="KIWI",
@@ -173,11 +176,10 @@ def test_hero_links_to_patch_notes(page):
     href = a.get_attribute("href")
     assert re.fullmatch(
         r"https://www\.leagueoflegends\.com/en-us/news/game-updates/"
-        r"patch-26-16-notes(#patch-veigar)?", href), href
-    # blok zmian renderuje sie zawsze: z liniami (Veigar) albo "bez zmian"
+        r"patch-26-16-notes#patch-(veigar|alistar|lux)", href), href
     block = page.wait_for_selector("#hero .patch-notes")
     txt = block.inner_text()
-    assert "Patch 16.16" in txt and ("buff" in txt or "bez zmian" in txt), txt
+    assert "Patch 16.16" in txt and "buff" in txt, txt
 
 
 def test_hero_shows_mayhem_balance_line(page):

@@ -1696,11 +1696,37 @@ def upgrade_grades():
                 con.execute(f"ALTER TABLE grade_observation ADD COLUMN {name} {ddl}")
 
 
-def backfill_grades_from_snapshots(window=7200):
+def backfill_grades_from_snapshots(window=7200, quiet=False):
     """Odzyskuje oceny z historii snapshotow: przyrost tablicy grades_earned
     to nowa ocena, awans milestone'a to ocena >= progu (tablica sie zeruje).
-    Doklejamy mecz po championie i bliskosci czasowej."""
+
+    Dopasowanie meczu (partia I, 4.09): najpierw regula 1:1 - k nowych ocen
+    championa miedzy dwoma snapshotami i dokladnie k jego gier zakonczonych
+    w tym przedziale to pary w kolejnosci czasu (prototyp na kopii: 58
+    zdarzen, zero konfliktow z istniejacymi ocenami, 4 odzyskane gry, dwie
+    z ery snapshotow dobowych - 10 i 34 h od konca gry, poza kazdym oknem).
+    Gdy liczby sie nie zgadzaja - stare okno: najblizsza gra zakonczona do
+    `window` s przed snapshotem. Kandydatami sa tylko gry, ktore MOGA dac
+    ocene: bez customow, Practice Toola i remake'ow (17-sekundowy Practice
+    Tool tym samym championem zabieralby ocene prawdziwej grze).
+    Od 4.09 odpalane automatycznie (po snapshocie, po /history/lcu, przy
+    starcie) - quiet=True wycisza zdarzenie, gdy nic nie doszlo, zeby
+    dziennik nie puchl. Do 4.09 wylacznie recznie (ostatnio 29.08) - stad
+    cztery zgubione oceny na produkcji."""
     import time as _t
+
+    empty = {"events": 0, "added": 0, "skipped_existing": 0, "unmatched": 0,
+             "unique": 0}
+    with connect() as con:
+        snaps = [dict(r) for r in con.execute(
+            "SELECT id, taken_at FROM snapshot ORDER BY taken_at")]
+    # ponizej dwoch snapshotow nie ma czego porownywac - wychodzimy ZANIM
+    # dotkniemy drabinki i splitu (current_split_id zaklada wiersz splitu,
+    # a to odpala sie w migrate() na kazdej swiezej bazie)
+    if len(snaps) < 2:
+        if not quiet:
+            log_event("grade_backfill", dict(empty), int(_t.time()))
+        return empty
 
     ladder = get_ladder()
 
@@ -1712,80 +1738,101 @@ def backfill_grades_from_snapshots(window=7200):
         return min(req.keys(), key=lambda g: GRADE_RANK.get(g, 99))
 
     with connect() as con:
-        snaps = [dict(r) for r in con.execute(
-            "SELECT id, taken_at FROM snapshot ORDER BY taken_at")]
         matches = [dict(r) for r in con.execute(
             "SELECT match_id, champion_id, game_creation, duration "
-            "FROM match_player WHERE game_creation IS NOT NULL")]
+            "FROM match_player WHERE game_creation IS NOT NULL "
+            "AND COALESCE(duration, 0) >= ? "
+            "AND COALESCE(game_mode, '') NOT LIKE '%#_CUSTOM' ESCAPE '#' "
+            "AND COALESCE(game_mode, '') != 'PRACTICETOOL'",
+            (REMAKE_MAX_S,))]
 
     by_champ = {}
     for m in matches:
         by_champ.setdefault(m["champion_id"], []).append(m)
 
-    def find_match(cid, ts):
-        """Mecz tym championem zakonczony przed snapshotem, najblizszy w czasie."""
+    def end_of(m):
+        # koniec z game_creation + duration jest WCZESNIEJSZY niz prawdziwy
+        # (ekran ladowania nie wchodzi w duration) - snapshot z ocena zawsze
+        # lezy po nim, wiec gorna granica przedzialu nie potrzebuje luzu
+        return (m["game_creation"] or 0) / 1000 + (m["duration"] or 0)
+
+    def closest_in_window(cid, ts):
         best, best_gap = None, None
         for m in by_champ.get(cid, []):
-            end = (m["game_creation"] or 0) / 1000 + (m["duration"] or 0)
-            gap = ts - end
+            gap = ts - end_of(m)
             if 0 <= gap <= window and (best_gap is None or gap < best_gap):
                 best, best_gap = m, gap
         return best
 
-    events = []
-    prev = {}
+    # zdarzenia zgrupowane per (przedzial miedzy snapshotami, champion)
+    groups = []
+    prev, prev_ts = {}, None
     with connect() as con:
         for s in snaps:
             cur = {r["champion_id"]: (json.loads(r["grades_earned"] or "[]"), r["milestone"])
                    for r in con.execute(
                        "SELECT champion_id, grades_earned, milestone FROM mastery "
                        "WHERE snapshot_id=?", (s["id"],))}
-            for cid, (grades, ms) in cur.items():
-                old_g, old_ms = prev.get(cid, (None, None))
-                if old_ms is None:
-                    continue
-                if len(grades) > len(old_g):
-                    for g in grades[len(old_g):]:
-                        events.append((s["taken_at"], cid, g, None, 0))
-                elif ms > old_ms:
-                    events.append((s["taken_at"], cid, None, threshold_for(old_ms), 1))
-            prev = cur
+            if prev_ts is not None:
+                for cid, (grades, ms) in cur.items():
+                    old_g, old_ms = prev.get(cid, (None, None))
+                    if old_ms is None:
+                        continue
+                    if len(grades) > len(old_g):
+                        evs = [(g, None, 0) for g in grades[len(old_g):]]
+                    elif ms > old_ms:
+                        evs = [(None, threshold_for(old_ms), 1)]
+                    else:
+                        continue
+                    groups.append((prev_ts, s["taken_at"], cid, evs))
+            prev, prev_ts = cur, s["taken_at"]
 
-    added = skipped = unmatched = 0
+    added = skipped = unmatched = events = unique = 0
     now = int(_t.time())
-    for ts, cid, grade, threshold, censored in events:
-        m = find_match(cid, ts)
-        if not m:
-            unmatched += 1
-            continue
-        row = {
-            "match_id": m["match_id"],
-            "game_id": int(m["match_id"].split("_")[-1]),
-            "champion_id": cid,
-            "grade": grade or f">={threshold}" if (grade or threshold) else "?",
-            "score": None, "points_gained": None, "points_contrib": None,
-            "points_before": None, "level_after": None, "leveled_up": None,
-            "tokens_earned": None, "token_after": None,
-            "observed_at": ts, "split_id": current_split_id(),
-            "source": "snapshot_diff", "censored": censored,
-            "threshold": threshold, "confidence": "window",
-        }
-        cols = list(row.keys())
-        with connect() as con:
-            exists = con.execute("SELECT 1 FROM grade_observation WHERE match_id=?",
-                                 (row["match_id"],)).fetchone()
-            if exists:
-                skipped += 1
+    for p_ts, ts, cid, evs in groups:
+        events += len(evs)
+        cands = sorted((m for m in by_champ.get(cid, [])
+                        if p_ts - 60 < end_of(m) <= ts), key=end_of)
+        if len(cands) == len(evs):
+            pairs, rule = list(zip(cands, evs, strict=True)), "unique"
+        else:
+            pairs, rule = [(closest_in_window(cid, ts), ev) for ev in evs], "window"
+        for m, (grade, threshold, censored) in pairs:
+            if not m:
+                unmatched += 1
                 continue
-            con.execute(
-                "INSERT INTO grade_observation (" + ", ".join(cols) + ") VALUES ("
-                + ", ".join(f":{c}" for c in cols) + ")", row)
-            added += 1
+            row = {
+                "match_id": m["match_id"],
+                "game_id": int(m["match_id"].split("_")[-1]),
+                "champion_id": cid,
+                "grade": grade or (f">={threshold}" if threshold else "?"),
+                "score": None, "points_gained": None, "points_contrib": None,
+                "points_before": None, "level_after": None, "leveled_up": None,
+                "tokens_earned": None, "token_after": None,
+                "observed_at": ts, "split_id": current_split_id(),
+                "source": "snapshot_diff", "censored": censored,
+                "threshold": threshold, "confidence": rule,
+            }
+            cols = list(row.keys())
+            with connect() as con:
+                exists = con.execute(
+                    "SELECT 1 FROM grade_observation WHERE match_id=?",
+                    (row["match_id"],)).fetchone()
+                if exists:
+                    skipped += 1
+                    continue
+                con.execute(
+                    "INSERT INTO grade_observation (" + ", ".join(cols) + ") VALUES ("
+                    + ", ".join(f":{c}" for c in cols) + ")", row)
+                added += 1
+                unique += rule == "unique"
 
-    log_event("grade_backfill", {"added": added, "skipped": skipped,
-                                 "unmatched": unmatched, "events": len(events)}, now)
-    return {"events": len(events), "added": added,
-            "skipped_existing": skipped, "unmatched": unmatched}
+    if added or not quiet:
+        log_event("grade_backfill", {"added": added, "skipped": skipped,
+                                     "unmatched": unmatched, "events": events,
+                                     "unique": unique}, now)
+    return {"events": events, "added": added, "skipped_existing": skipped,
+            "unmatched": unmatched, "unique": unique}
 
 
 def data_gates():
@@ -1855,7 +1902,8 @@ def pipeline_sanity():
     Jeden napis "wszystko powyzej zera to przeciek" przy 28 dodge'ach
     wygladal jak awaria (zrzut z produkcji, 3.09)."""
     import time as _t
-    cutoff = int(_t.time()) - 86400
+    now = int(_t.time())
+    cutoff = now - 86400
     with connect() as con:
         orphan_grades = con.execute("""
             SELECT COUNT(*) c FROM grade_observation g
@@ -1876,11 +1924,17 @@ def pipeline_sanity():
         games_unlinked_pool = len(_orphan_pool_matches(con))
         eog_no_grade = con.execute(
             _eog_no_grade_sql("COUNT(*) c")).fetchone()["c"]
+        # (I) gra misji bez ZADNEJ oceny - czujka wyzej wymaga ekranu
+        # koncowego, wiec gra przegapiona przez agenta w calosci (bez eog)
+        # byla dla niej niewidzialna (Ezreal 31.08, kopia 4.09)
+        games_without_grade = con.execute(
+            _games_no_grade_sql("COUNT(*) c"), (now - GRADE_GRACE_S,)).fetchone()["c"]
     return {"orphan_grades": orphan_grades,
             "eog_no_participants": eog_no_participants,
             "stale_pools": stale_pools,
             "games_unlinked_pool": games_unlinked_pool,
             "eog_bez_oceny": eog_no_grade,
+            "games_without_grade": games_without_grade,
             # (P6) odzyskiwalne przez agenta - niezerowe topnieje samo
             "missing_games": len(missing_own_games(1000)),
             # timelines: jak wyzej, druga reka petli odzysku
@@ -1894,6 +1948,37 @@ def eog_without_grade_ids(limit=5):
         return [r["match_id"] for r in con.execute(
             _eog_no_grade_sql("e.match_id")
             + " ORDER BY e.captured_at DESC, e.match_id LIMIT ?", (limit,))]
+
+
+# Swieza gra dostaje tyle sekund na ocene, zanim czujka ja policzy: ocena
+# przychodzi w sekundach po koncu, ale wiersz meczu z historii moze ja
+# wyprzedzic o chwile - bez luzu licznik migalby jedynka po kazdej grze.
+GRADE_GRACE_S = 1800
+
+
+def _games_no_grade_sql(cols):
+    """(I) Gry trybu misji bez zadnej oceny od startu sledzenia (pierwszy
+    snapshot): pelnej dlugosci, bez customow (jak czujka ekranow). To jest
+    wlasciwa miara kompletnosci kanalu ocen - czujka ekranow diagnozuje
+    smierc kanalu przy zywym agencie, ta pokazuje kazda dziure."""
+    modes = ", ".join(f"'{m}'" for m in MODE_QUEUES)
+    return f"""
+    SELECT {cols} FROM match_player m
+    LEFT JOIN grade_observation g ON g.match_id = m.match_id
+    WHERE g.match_id IS NULL AND m.game_mode IN ({modes})
+      AND m.game_creation IS NOT NULL
+      AND COALESCE(m.duration, 999999) >= {REMAKE_MAX_S}
+      AND m.game_creation / 1000 >= (SELECT MIN(taken_at) FROM snapshot)
+      AND m.game_creation / 1000 + COALESCE(m.duration, 0) <= ?"""
+
+
+def games_without_grade_ids(limit=5):
+    import time as _t
+    with connect() as con:
+        return [r["match_id"] for r in con.execute(
+            _games_no_grade_sql("m.match_id")
+            + " ORDER BY m.game_creation DESC LIMIT ?",
+            (int(_t.time()) - GRADE_GRACE_S, limit))]
 
 
 def model_status(min_games=40):
@@ -2645,3 +2730,10 @@ def upgrade_link_orphan_pools():
     /history/lcu przy kazdej nowej grze. Idempotentne, na pustej bazie
     testowej nic nie robi. Na koncu pliku: potrzebuje pelnego schematu."""
     link_orphan_pools()
+
+
+def upgrade_backfill_grades():
+    """(I) Odzysk ocen ze snapshotow przy starcie - dotad wylacznie recznie,
+    wiec 4 gry misji stracily ocene mimo sladu w snapshotach. Po pulach:
+    dopieta pula nie jest warunkiem oceny, ale kolejnosc jest naturalna."""
+    backfill_grades_from_snapshots(quiet=True)
