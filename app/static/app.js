@@ -28,17 +28,22 @@ const icon = (k, cid) => k
 const esc = s => String(s ?? "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
 
 const ROMAN = ["I", "II", "III", "IV"];
+// szczeble po IV to "bonus milestone'y" (nazewnictwo Riota): cel 5 = bonus 1
+const msName = i => ROMAN[i] || ("bonus " + (i - ROMAN.length + 1));
 let GOAL = 4;
 
 /* ---------- szyna milestone ---------- */
-function rail(milestone, goal, nextGrade) {
+function rail(milestone, goal, nextGrade, need, have) {
   const cells = [];
   for (let i = 0; i < goal; i++) {
     const cls = i < milestone ? "done" : (i === milestone ? "next" : "");
-    cells.push(`<div class="chev ${cls}">${ROMAN[i] || i + 1}</div>`);
+    cells.push(`<div class="chev ${cls}">${msName(i)}</div>`);
   }
+  // krotnosc szczebla (bonus milestone: S- x2) + oceny juz uzbierane
+  const count = need > 1
+    ? ` ×${need}` + (have ? ` <span class="dim">(masz ${have})</span>` : "") : "";
   const legend = nextGrade
-    ? `Do <b>${ROMAN[milestone] || milestone + 1}</b> trzeba oceny <b>${esc(nextGrade)}</b>`
+    ? `Do <b>${msName(milestone)}</b> trzeba oceny <b>${esc(nextGrade)}${count}</b>`
     : "";
   return `<div class="rail">${cells.join("")}</div>
           <div class="rail-legend">${legend}</div>`;
@@ -108,14 +113,27 @@ async function cheatsheet(cid) {
 
 function cheatLines(cs) {
   if (!cs || !cs.ok) return "";
+  // (F6) JSON-LD strony sortuje pryzmatyczne na wierzch, wiec plaskie
+  // "top 5" to zawsze same pryzmatyczne (rzadsze z natury) - tiery idą
+  // osobno, po 3 z kazdego; plaska lista zostaje fallbackiem dla cache
+  // sprzed tej zmiany i przebudowy strony
+  const bt = cs.augments_by_tier;
+  const tierRows = bt ? ["Prismatic", "Gold", "Silver"].map(t => {
+    const list = (bt[t] || []).slice(0, 3);
+    if (!list.length) return "";
+    const names = list.map(a => `<span title="${
+      a.win_rate != null ? a.win_rate + "% WR" : ""}">${esc(a.name)}</span>`).join(" · ");
+    return `<div class="kv"><span>Augmenty · ${t}</span>
+      <span style="font-size:12px;text-align:right;max-width:62%">${names}</span></div>`;
+  }).join("") : "";
   const augs = (cs.augments || []).slice(0, 5).map(esc).join(" · ");
   return `
     <div class="kv"><span>Mayhem tier</span>
       <span>${esc(cs.tier || "?")}${cs.win_rate ? ` · ${cs.win_rate}% WR` : ""}</span></div>
     ${cs.skill_priority ? `<div class="kv"><span>Skille</span>
       <span class="num" title="${esc(cs.skill_sequence || "")}">${esc(cs.skill_priority)}</span></div>` : ""}
-    ${augs ? `<div class="kv"><span>Top augmenty</span>
-      <span style="font-size:12px;text-align:right;max-width:62%">${augs}</span></div>` : ""}`;
+    ${tierRows || (augs ? `<div class="kv"><span>Top augmenty</span>
+      <span style="font-size:12px;text-align:right;max-width:62%">${augs}</span></div>` : "")}`;
 }
 
 /* ---------- TERAZ ---------- */
@@ -154,7 +172,7 @@ function livePanel(d, bal, cheat) {
       <div style="margin-left:auto" class="chip gold">${
         d.need ? "trzeba " + esc(d.need) : "brak progu"}</div>
     </div>
-    ${d.milestone != null ? rail(d.milestone, GOAL, d.need) : ""}
+    ${d.milestone != null ? rail(d.milestone, GOAL, d.need, d.need_count, d.need_have) : ""}
     ${balanceLine(bal && bal[d.champion_id])}
     ${cheatLines(cheat)}
     <div style="margin-top:14px">${rows}</div>
@@ -241,7 +259,7 @@ async function renderNow() {
   if (!targets.length) {
     $("hero").innerHTML = `<div class="hero empty"><div class="empty-state">
       <h3>Nic do zrobienia w tej puli</h3>
-      <div>Żaden z dostępnych championów nie zbliża do milestone ${GOAL}.</div>
+      <div>Żaden z dostępnych championów nie zbliża do szczebla ${msName(GOAL - 1)}.</div>
       </div></div>`;
     $("cards").innerHTML = ""; $("cards-label").textContent = "";
     return;
@@ -273,7 +291,7 @@ async function renderNow() {
         <div class="who"><span class="rank-badge lead">1</span><img onerror="this.src=BLANK" src="${icon(b.key, b.champion_id)}"
           alt="">${esc(b.name)}${patchNotes ? ` <a class="patch-link" href="${patchNotes}"
           target="_blank" rel="noopener" title="zmiany championa w tym patchu">notki</a>` : ""}</div>
-        ${rail(b.milestone, GOAL, b.next_grade)}
+        ${rail(b.milestone, GOAL, b.next_grade, b.next_need, b.next_have)}
         ${inSelect && poolBadges(b, lobbyTrade, inSelect)
           ? `<div style="margin-top:7px;margin-left:-8px">${poolBadges(b, lobbyTrade, inSelect)}</div>` : ""}
         <div class="range" style="margin-top:8px">${modelNote(b)}</div>
@@ -313,7 +331,7 @@ async function renderNow() {
           ${esc(t.name)}${poolBadges(t, lobbyTrade, inSelect)}</div></td>
         <td class="r num">${t.steps_remaining}</td>
         <td><span class="chip ${t.next_grade === "S-" ? "gold" : ""}">${
-          esc(t.next_grade || "?")}</span></td>
+          esc(t.next_grade || "?")}${t.next_need > 1 ? " ×" + t.next_need : ""}</span></td>
         <td class="r num" style="${own ? "" : "color:var(--faint)"}">${own || "—"}</td>
         <td class="r num" style="color:var(--dim)">${fmt(t.points)}</td>
         <td class="r num" style="color:var(--dim)">${
@@ -339,7 +357,7 @@ async function renderSide() {
     const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1;
     const bars = Object.entries(dist).map(([ms, n]) => `
       <div class="bar-row" style="grid-template-columns:88px 1fr 34px">
-        <span>${ms >= sp.goal ? "cel" : (+ms === 0 ? "brak" : ROMAN[ms - 1] + " ukończ.")}</span>
+        <span>${ms >= sp.goal ? "cel" : (+ms === 0 ? "brak" : msName(ms - 1) + " ukończ.")}</span>
         <div class="bar"><i class="${ms >= sp.goal ? "ok" : ""}"
           style="width:${100 * n / total}%"></i></div>
         <span style="text-align:right">${n}</span>
@@ -625,14 +643,14 @@ async function renderSplit() {
   const max = Math.max(...Object.values(dist), 1);
   const bars = Object.entries(dist).map(([ms, n]) => `
     <div class="bar-row">
-      <span>${ms >= d.goal ? "cel" : (+ms === 0 ? "brak" : ROMAN[ms - 1] + " ukończony")}</span>
+      <span>${ms >= d.goal ? "cel" : (+ms === 0 ? "brak" : msName(ms - 1) + " ukończony")}</span>
       <div class="bar"><i class="${ms >= d.goal ? "ok" : ""}"
         style="width:${100 * n / max}%"></i></div>
       <span style="text-align:right">${n}</span>
     </div>`).join("");
 
   const ladder = Object.entries(d.ladder || {}).map(([m, s]) => `
-    <div class="kv"><span>${+m === 0 ? "start" : ROMAN[m - 1]} → ${ROMAN[+m] || +m + 1}</span>
+    <div class="kv"><span>${+m === 0 ? "start" : msName(m - 1)} → ${msName(+m)}</span>
       <span>${Object.keys(s.require_grades)[0]} ×${s.games} · ${s.reward_marks} marks</span>
     </div>`).join("");
 
@@ -673,7 +691,7 @@ async function renderSplit() {
         ${ladder || '<div class="sub">jeszcze nieznana</div>'}
         <div class="kv" style="margin-top:14px"><span>Marks of Mastery zdobyte łącznie</span>
           <span>${d.marks_total}</span></div>
-        <div class="kv"><span>Championów z ukończonym IV (cel misji)</span><span>${d.at_goal}</span></div>
+        <div class="kv"><span>Championów na celu (${msName(d.goal - 1)})</span><span>${d.at_goal}</span></div>
         <div class="kv"><span>Śledzone od</span><span>${since}</span></div>
       </div>
     </div>`;
@@ -870,16 +888,32 @@ async function renderSystem() {
         g.have}/${g.need}</span>
     </div>`;
   }).join("");
-  // (P8) potok: kazda niezerowa liczba to przeciek ktoregos kanalu
-  const PIPE_PL = {orphan_grades: "Oceny bez meczu",
+  // (P8/F3) potok w dwoch grupach: ALARM = realny przeciek (czerwone przy
+  // >0), INFO = poprawne dzialanie albo zaleglosc, ktora agent dociaga sam
+  // (dodge, custom, odzysk). Jeden napis "wszystko powyzej zera to przeciek"
+  // przy 28 dodge'ach wygladal jak awaria.
+  const PIPE_ALARM = {orphan_grades: "Oceny bez meczu",
     eog_no_participants: "Ekrany bez tożsamości",
-    stale_pools: "Pule bez meczu >24 h",
-    eog_bez_oceny: "Ekrany BEZ oceny (kanał ocen!)",
-    missing_games: "Gry bez statystyk (agent odzyska)",
-    timeline_missing: "Gry bez timeline (agent dociąga)"};
-  const pipe = Object.entries(d.pipeline || {}).map(([k, n]) =>
-    `<div class="kv"><span>${PIPE_PL[k] || k}</span>
-     <span style="color:${n ? "var(--warn)" : "var(--ok)"}">${n}</span></div>`).join("");
+    eog_bez_oceny: "Ekrany gier misji BEZ oceny (kanał ocen!)",
+    pools_unlinked_game: "Pule z nieprzypisaną grą"};
+  const PIPE_INFO = {stale_pools: "Pule bez gry (dodge / remake / trening)",
+    missing_games: "Gry bez statystyk — agent odzyska sam",
+    timeline_missing: "Gry bez timeline — agent dociąga sam"};
+  const noGrade = (d.pipeline_detail || {}).eog_bez_oceny || [];
+  const pipeRow = (k, label, alarm) => {
+    const n = (d.pipeline || {})[k];
+    if (n == null) return "";
+    const color = alarm ? (n ? "var(--warn)" : "var(--ok)") : "var(--dim)";
+    const ids = (k === "eog_bez_oceny" && n && noGrade.length)
+      ? `<div class="kv" style="border:none;padding-top:0"><span class="dim"
+           style="font-size:11.5px">${noGrade.map(esc).join(", ")}</span></div>` : "";
+    return `<div class="kv"><span>${label}</span>
+      <span style="color:${color}">${n}</span></div>${ids}`;
+  };
+  const pipe = Object.entries(PIPE_ALARM).map(([k, l]) => pipeRow(k, l, true)).join("")
+    + `<div class="kv" style="border:none;padding:12px 0 2px"><span class="dim"
+         style="font-size:11px;letter-spacing:.08em;text-transform:uppercase">informacyjnie</span></div>`
+    + Object.entries(PIPE_INFO).map(([k, l]) => pipeRow(k, l, false)).join("");
   // (A6) "ostatni sukces 12 dni temu, bo nikt nie gral" wygladal identycznie
   // jak zdrowie - stad prog wieku takze przy ok:true
   const bk = d.last_backup;
@@ -934,7 +968,7 @@ async function renderSystem() {
   let pred = {};
   try { pred = await api("/predictions/scorecard"); } catch (e) {}
   $("system-body").innerHTML = gapBanner + `
-    <div class="grid2" style="margin-top:20px">
+    <div class="sys-cols" style="margin-top:20px">
       <div class="panel"><div class="eyebrow">Ostatnia aktywność</div>${seen}${backupKv}${authKv}${balKv}</div>
       ${agentPanel}
       <div class="panel"><div class="eyebrow">Zebrane dane</div>${counts}
@@ -947,8 +981,9 @@ async function renderSystem() {
         <div class="tagline">Bramki otwierają się same z napływem gier —
           definicje i decyzje w pamięci projektu.</div></div>
       <div class="panel"><div class="eyebrow">Zdrowie potoku</div>${pipe}
-        <div class="tagline">Wszystko powyżej zera oznacza przeciekający
-          kanał danych.</div></div>
+        <div class="tagline">Na czerwono tylko to, co wymaga reakcji. Dolne
+          liczniki to normalne działanie (dodge, custom) albo zaległości,
+          które agent dociąga sam.</div></div>
     </div>
     <div class="panel" style="margin-top:16px">
       <div class="eyebrow">Model</div>

@@ -18,6 +18,11 @@ PLATFORM = os.environ.get("RIOT_PLATFORM", "euw1")
 REGION = os.environ.get("RIOT_REGION", "europe")
 MY_NAME = os.environ["MY_RIOT_NAME"]
 MY_TAG = os.environ["MY_RIOT_TAG"]
+# Cel misji: 4 = milestone IV (misja przepustki "Reach Mastery Milestone 4",
+# jednorazowa, domknieta 1.09); 5 = pierwszy bonus milestone (misja "Earn a
+# Bonus Milestone" odslania sie PO IV i wymaga S- x2 na championie juz na IV).
+# Decyzja 3.09: optymalizujemy BXP, wiec cel idzie za misja przepustki - sama
+# liczba w .env, krotnosc szczebla kod czyta z drabinki (scoring._rung).
 GOAL = int(os.environ.get("GOAL_MILESTONE", "4"))
 DEFAULT_MODE = os.environ.get("DEFAULT_MODE") or None
 EXCLUDED_MODES = tuple(
@@ -445,6 +450,27 @@ async def get_weights():
 
 # ---------------- lobby ----------------
 
+# (F5) scoring puli champ selecta: /lobby jest odpytywane co 4 s, a targets()
+# liczy za kazdym razem czestosci, gotowosc modelu, popularnosc i inferencje
+# per champion - w krotkim oknie champ selecta lista i plakietki nie nadazaly.
+# Pula, snapshot i model zmieniaja sie rzadko, wiec wynik liczymy raz na ich
+# krotke (push_lobby grzeje cache przy predykcjach sprzed gry). Sciezka bazy
+# w kluczu: swiat testu (fresh_db) i przywrocona kopia nie moga dostac
+# cudzego wyniku.
+_LOBBY_CACHE = {}
+
+
+async def lobby_targets(ids, queue):
+    key = (tuple(sorted(int(i) for i in ids)), queue, str(db.DB_PATH),
+           db.latest_snapshot_id(),
+           (db.get_json_setting("grade_model") or {}).get("trained_at"))
+    if _LOBBY_CACHE.get("key") == key:
+        return _LOBBY_CACHE["t"]
+    t = await targets(limit=200, ids=",".join(str(i) for i in key[0]), mode=queue)
+    _LOBBY_CACHE["key"], _LOBBY_CACHE["t"] = key, t
+    return t
+
+
 @write_api.post("/lobby")
 async def push_lobby(payload: dict):
     ids = [int(x) for x in payload.get("champion_ids", [])]
@@ -473,8 +499,7 @@ async def push_lobby(payload: dict):
             # predykcje PRZED gra - jedyny test modelu, ktorego nie da sie
             # oszukac; wynik doklei sie sam przez link_pool_to_match
             try:
-                t = await targets(limit=200, ids=",".join(map(str, ids)),
-                                  mode=payload.get("queue"))
+                t = await lobby_targets(ids, payload.get("queue"))
                 n = await asyncio.to_thread(
                     db.save_pool_predictions, pool_id, t.get("targets", []), ts)
                 state["last_predictions"] = n
@@ -493,8 +518,7 @@ async def read_lobby(max_age: int = 5400):
     age = int(time.time()) - lob["updated_at"]
     if age > max_age:
         return {"active": False, "age": age, "targets": []}
-    ids = ",".join(str(i) for i in lob["champion_ids"])
-    t = await targets(limit=200, ids=ids, mode=lob["queue"])
+    t = await lobby_targets(lob["champion_ids"], lob["queue"])
     return {
         "active": True,
         "age": age,
@@ -1014,6 +1038,10 @@ async def push_timeline(payload: dict):
 # (49) blokada per champion - dwa rownolegle GET-y (hero + live) nie moga
 # fetchowac tej samej strony dwa razy
 _CHEAT_LOCKS = {}
+# wersja wpisu cache sciagi: cache per patch przezylby zmiane parsera do
+# nastepnego patcha (tiery augmentow, F6) - starszy wpis idzie do
+# jednorazowego odswiezenia
+_CHEAT_V = 2
 
 
 @api.get("/cheatsheet/{champion_id}")
@@ -1027,6 +1055,7 @@ async def cheatsheet(champion_id: int):
 
     def fresh(ent):
         return (ent and ent.get("patch") == short
+                and ent.get("v") == _CHEAT_V
                 and (ent.get("ok")
                      or time.time() - ent.get("fetched_at", 0) < 3600))
 
@@ -1045,7 +1074,7 @@ async def cheatsheet(champion_id: int):
         ent = store.get(str(champion_id))
         if fresh(ent):
             return ent
-        ent = {"champion_id": champion_id, "patch": short,
+        ent = {"champion_id": champion_id, "patch": short, "v": _CHEAT_V,
                "fetched_at": int(time.time()), "ok": False}
         try:
             r = await state["plain"].get(
@@ -1241,7 +1270,7 @@ async def split_progress():
         "distribution": dict(sorted(dist.items())),
         "champions": len(rows),
         "marks_total": marks,
-        "at_goal": dist.get(GOAL, 0),
+        "at_goal": sum(n for ms, n in dist.items() if ms >= GOAL),
         "ladder": ladder,
         "split": db.list_splits()[:1],
         "tracking_since": first,
@@ -1395,6 +1424,10 @@ async def system_health():
         "events": events,
         "gates": await asyncio.to_thread(db.data_gates),
         "pipeline": await asyncio.to_thread(db.pipeline_sanity),
+        # (F3) sam licznik "ekrany bez oceny" nie mowi, KTORE gry - a to
+        # rozstrzyga miedzy remake'iem a martwym kanalem ocen
+        "pipeline_detail": {"eog_bez_oceny": await asyncio.to_thread(
+            db.eog_without_grade_ids)},
         "last_backup": db.get_json_setting("last_backup"),
         # (A6) czujki: zdrowie klucza Riot i wiek mnoznikow balansu -
         # progi koloru naklada front, tu czysty odczyt
@@ -1484,13 +1517,18 @@ async def read_live():
 
     # jaki prog obowiazuje na tym championie
     sid = db.latest_snapshot_id()
-    need, milestone = None, None
+    need, milestone, need_count, need_have = None, None, None, None
     if sid and live["champion_id"]:
         for r in db.snapshot_rows(sid):
             if r["champion_id"] == live["champion_id"]:
                 milestone = r["milestone"]
                 nxt = json.loads(r["next_grades"] or "null")
                 need = scoring.cheapest_grade(nxt)
+                # krotnosc szczebla (bonus milestone: S- x2) i oceny juz
+                # uzbierane - szyna pokazuje "S- x2 (masz 1)", nie samo "S-"
+                need_count = int((nxt or {}).get(need) or 1) if need else None
+                need_have = scoring._have(
+                    json.loads(r["grades_earned"] or "[]"), need)
                 break
 
     ref = await asyncio.to_thread(
@@ -1510,6 +1548,7 @@ async def read_live():
         "champion": live["champion"], "champion_id": live["champion_id"],
         "key": key,
         "milestone": milestone, "need": need,
+        "need_count": need_count, "need_have": need_have,
         "game_time": live["game_time"], "minutes": round(mins, 1),
         "kills": live["kills"], "deaths": live["deaths"], "assists": live["assists"],
         "level": live["level"],

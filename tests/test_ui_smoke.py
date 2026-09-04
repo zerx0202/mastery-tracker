@@ -69,7 +69,7 @@ def _seed():
     # dopiero PO starcie serwera - lifespan robi migrate(), a init_live
     # celowo DROP-uje live_game
     db.set_json_setting("cheatsheet", {"99": {
-        "champion_id": 99, "patch": "16.16", "fetched_at": now, "ok": True,
+        "champion_id": 99, "patch": "16.16", "fetched_at": now, "ok": True, "v": 2,
         "tier": "A", "win_rate": 51.2,
         "augments": ["Eureka", "High Roller", "Recursion"],
         "skill_sequence": "Q W E Q Q R", "skill_priority": "Q > E > W"}})

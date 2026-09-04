@@ -71,6 +71,14 @@ _LD_AUG_RE = re.compile(
     r'(\{"@context":"https://schema\.org","@type":"ItemList",'
     r'"name":"Best Augments for [^<]*?\})</script>')
 _SKILL_RE = re.compile(r"Skill Sequence: ((?:[QWER] )+[QWER])")
+# (F6) karta augmentu: tier w klasie text-rarity-* + title z nazwa. Naglowek
+# sekcji ma te sama klase, ale nie ma title - stad wymog `" title=` tuz za
+# klasa. JSON-LD wyzej to lista splaszczona i posortowana tierami
+# (pryzmatyczne na pozycjach 1-6), wiec "top 5" z niej to zawsze same
+# pryzmatyczne - rzadsze z natury; sonda strony buildu 3.09.
+_CARD_RE = re.compile(r'text-rarity-(prismatic|gold|silver)" title="([^"]+)"')
+_WR_RE = re.compile(r"Win rate: <span[^>]*>([\d.]+)%")
+TIERS = {"prismatic": "Prismatic", "gold": "Gold", "silver": "Silver"}
 
 
 def parse_build(html):
@@ -100,6 +108,18 @@ def parse_build(html):
         # priorytet maksowania: liczba punktow malejaco, remis = wczesniejszy
         basics.sort(key=lambda s: (-seq.count(s), seq.index(s)))
         out["skill_priority"] = " > ".join(basics)
+    # augmenty per tier w kolejnosci strony (ranking serwisu); win rate
+    # szukamy wylacznie do nastepnej karty, zeby nie przeciekl od sasiada
+    cards = list(_CARD_RE.finditer(html))
+    by_tier = {}
+    for i, c in enumerate(cards):
+        end = cards[i + 1].start() if i + 1 < len(cards) else len(html)
+        wr = _WR_RE.search(html, c.end(), end)
+        by_tier.setdefault(TIERS[c.group(1)], []).append(
+            {"name": _html.unescape(c.group(2)),
+             "win_rate": float(wr.group(1)) if wr else None})
+    if by_tier:
+        out["augments_by_tier"] = {t: v[:6] for t, v in by_tier.items()}
     return out
 
 

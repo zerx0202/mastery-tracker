@@ -123,6 +123,10 @@ td.r,th.r{text-align:right}
 
 /* ---- panele ---- */
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+/* (F2) System: panele o skrajnie roznych wysokosciach w sztywnej siatce
+   zostawialy czarne dziury - kolumny CSS pakuja je bez luk, panel w calosci */
+.sys-cols{column-count:2;column-gap:16px}
+.sys-cols>.panel{break-inside:avoid;-webkit-column-break-inside:avoid;margin-bottom:16px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px 22px}
 .kv{display:flex;justify-content:space-between;padding:7px 0;
     border-bottom:1px solid var(--line);font-size:13.5px}
@@ -152,6 +156,7 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
 @media (max-width:760px){
   .hero{grid-template-columns:1fr;gap:18px}
   .grid2{grid-template-columns:1fr}
+  .sys-cols{column-count:1}
   nav .inner{padding:0 16px;overflow-x:auto}
   main{padding:24px 16px 60px}
 }

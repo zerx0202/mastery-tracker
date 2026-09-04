@@ -28,6 +28,7 @@ setki gier) to wplyw rzedu 1/n na jedna ceche - pomijalny, ale jesli
 metryki kiedys wygladaja podejrzanie dobrze, zaczac szukac tutaj.
 """
 
+import json
 import math
 import statistics
 import time
@@ -450,7 +451,9 @@ def mission_projection(goal, mode=None, runs=1000, pool_size=None,
     najpierw trafic. Liczone w tle po treningu, czytane w kafelku.
     runs=1000: przy 300 i seed=None kafelek jitterowal o szum MC po kazdym
     treningu i ruch o kilka gier mogl uchodzic za sygnal (przeglad 2.09,
-    W6); regula interpretacji: ruch mediany < ~5 gier to nadal szum."""
+    W6); regula interpretacji: ruch mediany < ~5 gier to nadal szum.
+    Krotnosc szczebla (bonus milestone: S- x2) jak w scoring: sukces
+    dopisuje ocene, awans dopiero po skompletowaniu wymogu."""
     import random
 
     from . import scoring
@@ -462,8 +465,18 @@ def mission_projection(goal, mode=None, runs=1000, pool_size=None,
         return None
     rates_all = champion_rates(mode)
     rates, prior = rates_all["champions"], rates_all["prior"]
-    base = {r["champion_id"]: r["milestone"] for r in snapshot_rows(sid)
-            if r["milestone"] < goal}
+
+    def rung(ms):
+        return scoring._rung(ladder.get(ms))          # (prog, krotnosc)
+
+    # stan startowy: milestone + oceny juz uzbierane na biezacym szczeblu
+    base = {}
+    for r in snapshot_rows(sid):
+        if r["milestone"] >= goal:
+            continue
+        grade, _need = rung(r["milestone"])
+        earned = json.loads(r.get("grades_earned") or "[]")
+        base[r["champion_id"]] = (r["milestone"], scoring._have(earned, grade))
     if len(base) < 2:
         return None
     pool_size = pool_size or median_final_pool_size()
@@ -477,25 +490,30 @@ def mission_projection(goal, mode=None, runs=1000, pool_size=None,
         p, _th, _n = scoring._p_step(cid, step, rates, prior)
         return p or 0.05
 
-    def exp_games(cid, ms):
+    def exp_games(cid, ms, have):
         total = 0.0
         for m in range(ms, goal):
-            total += 1.0 / max(p_of(cid, m), 1e-6)
+            _grade, need = rung(m)
+            left = max(1, need - have) if m == ms else need
+            total += left / max(p_of(cid, m), 1e-6)
         return total
 
     results = []
     for _ in range(runs):
-        st = dict(base)
+        st = {c: list(v) for c, v in base.items()}    # [milestone, uzbierane]
         games = 0
         done = False
         while games < max_games and not done:
             pool = rnd.sample(ids, min(pool_size, len(ids)))
-            best = min(pool, key=lambda c: exp_games(c, st[c]))
+            best = min(pool, key=lambda c: exp_games(c, st[c][0], st[c][1]))
             games += 1
-            if rnd.random() < p_of(best, st[best]):
-                st[best] += 1
-                if st[best] >= goal:
-                    done = True
+            if rnd.random() < p_of(best, st[best][0]):
+                st[best][1] += 1
+                if st[best][1] >= rung(st[best][0])[1]:
+                    st[best][0] += 1
+                    st[best][1] = 0
+                    if st[best][0] >= goal:
+                        done = True
         results.append(games if done else max_games)
     results.sort()
     n = len(results)

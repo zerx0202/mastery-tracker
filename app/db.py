@@ -1761,10 +1761,28 @@ def data_gates():
     ]
 
 
+# (A6/F3) jedyna czujka na smierc kanalu ocen: ekran koncowy jest, oceny nie
+# ma. Rosnaca liczba = patch Riota zabil kanal albo epizod pomeczowy przegrywa
+# wyscig - a ocena to jedyna strata bezpowrotna calego systemu. Customy
+# (KIWI_CUSTOM) z definicji nie maja oceny (queueRewards wylaczone, sonda C5),
+# wiec nie sa przeciekiem; ekran bez wiersza meczu liczymy ostroznie, bo trybu
+# nie znamy.
+_EOG_NO_GRADE_SQL = """
+    SELECT {cols} FROM eog_raw e
+    LEFT JOIN grade_observation g ON g.match_id = e.match_id
+    LEFT JOIN match_player m ON m.match_id = e.match_id
+    WHERE g.match_id IS NULL
+      AND (m.game_mode IS NULL OR m.game_mode NOT LIKE '%#_CUSTOM' ESCAPE '#')"""
+
+
 def pipeline_sanity():
-    """(P8) Dziury w potoku - kazda z tych liczb powinna byc ~0; niezerowa
-    znaczy, ze ktorys kanal danych przecieka i warto spojrzec wczesniej
-    niz po fakcie."""
+    """(P8) Dziury w potoku, w dwoch grupach (F3, 3.09). ALARMOWE - kazda
+    niezerowa liczba to realny przeciek: ocena bez meczu, ekran bez
+    tozsamosci, ekran gry misji bez oceny, pula z nieprzypisana gra.
+    INFORMACYJNE - pula bez zadnej gry to dodge/remake/trening (poprawne
+    dzialanie), a brakujace statystyki i timeline'y agent dociaga sam.
+    Jeden napis "wszystko powyzej zera to przeciek" przy 28 dodge'ach
+    wygladal jak awaria (zrzut z produkcji, 3.09)."""
     import time as _t
     cutoff = int(_t.time()) - 86400
     with connect() as con:
@@ -1780,22 +1798,38 @@ def pipeline_sanity():
         stale_pools = con.execute(
             "SELECT COUNT(*) c FROM champ_select_pool "
             "WHERE match_id IS NULL AND ts < ?", (cutoff,)).fetchone()["c"]
-        # (A6) jedyna czujka na smierc kanalu ocen: ekran koncowy jest,
-        # oceny nie ma. Rosnaca liczba = patch Riota zabil kanal albo
-        # epizod pomeczowy przegrywa wyscig - a ocena to jedyna strata
-        # bezpowrotna calego systemu
-        eog_no_grade = con.execute("""
-            SELECT COUNT(*) c FROM eog_raw e
-            LEFT JOIN grade_observation g ON g.match_id = e.match_id
-            WHERE g.match_id IS NULL""").fetchone()["c"]
+        # prawdziwy przeciek pul: po champ selekcie byla gra, ktorej
+        # link_pool_to_match nie dokleil do ZADNEJ puli; po dodge'u gry nie
+        # ma, wiec dodge tu nie wpada
+        pools_unlinked_game = con.execute("""
+            SELECT COUNT(*) c FROM champ_select_pool p
+            WHERE p.match_id IS NULL AND p.ts < ?
+              AND EXISTS (
+                SELECT 1 FROM match_player m
+                WHERE m.game_creation / 1000 BETWEEN p.ts AND p.ts + 7200
+                  AND m.match_id NOT IN (SELECT match_id FROM champ_select_pool
+                                         WHERE match_id IS NOT NULL))""",
+            (cutoff,)).fetchone()["c"]
+        eog_no_grade = con.execute(
+            _EOG_NO_GRADE_SQL.format(cols="COUNT(*) c")).fetchone()["c"]
     return {"orphan_grades": orphan_grades,
             "eog_no_participants": eog_no_participants,
             "stale_pools": stale_pools,
+            "pools_unlinked_game": pools_unlinked_game,
             "eog_bez_oceny": eog_no_grade,
             # (P6) odzyskiwalne przez agenta - niezerowe topnieje samo
             "missing_games": len(missing_own_games(1000)),
             # timelines: jak wyzej, druga reka petli odzysku
             "timeline_missing": len(missing_timelines(1000))}
+
+
+def eog_without_grade_ids(limit=5):
+    """Ktore gry misji maja ekran koncowy bez oceny - sam licznik nie mowi,
+    czy to remake sprzed minuty, czy kanal ocen martwy od tygodnia."""
+    with connect() as con:
+        return [r["match_id"] for r in con.execute(
+            _EOG_NO_GRADE_SQL.format(cols="e.match_id")
+            + " ORDER BY e.captured_at DESC, e.match_id LIMIT ?", (limit,))]
 
 
 def model_status(min_games=40):

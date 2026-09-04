@@ -68,34 +68,45 @@ def p_for(cid, milestone, champ_rates, prior, ladder):
     return p or 0.05
 
 
-# ---------- strategie ----------
+def need_for(milestone, ladder):
+    """Krotnosc szczebla (bonus milestone IV->5: S- x2) - ta sama sciezka
+    co scoring._rung; nieznany szczebel = 1."""
+    return scoring._rung(ladder.get(milestone))[1]
 
-def pick_closest(pool, ms, rates, prior, ladder):
+
+# ---------- strategie ----------
+# have = oceny juz uzbierane na biezacym szczeblu (symulacja je prowadzi);
+# uzywa go tylko strategia licząca koszt, reszta patrzy na milestone i p.
+
+def pick_closest(pool, ms, rates, prior, ladder, have=None):
     """Najblizej celu; przy remisie najwyzsze p."""
     return max(pool, key=lambda c: (ms[c], p_for(c, ms[c], rates, prior, ladder)))
 
 
-def pick_best_odds(pool, ms, rates, prior, ladder):
+def pick_best_odds(pool, ms, rates, prior, ladder, have=None):
     """Najwieksza szansa przebicia biezacego szczebla."""
     return max(pool, key=lambda c: p_for(c, ms[c], rates, prior, ladder))
 
 
-def pick_breadth(pool, ms, rates, prior, ladder):
+def pick_breadth(pool, ms, rates, prior, ladder, have=None):
     """Najnizszy milestone - budowanie szerokiej bazy tanimi A-."""
     return min(pool, key=lambda c: (ms[c], -p_for(c, ms[c], rates, prior, ladder)))
 
 
-def pick_expected(pool, ms, rates, prior, ladder):
-    """Najmniejsza oczekiwana liczba gier do celu dla tego championa."""
+def pick_expected(pool, ms, rates, prior, ladder, have=None):
+    """Najmniejsza oczekiwana liczba gier do celu dla tego championa
+    (brakujace oceny / p na kazdym szczeblu, jak scoring.expected_games)."""
     def cost(c):
         total = 0.0
         for m in range(ms[c], GOAL):
-            total += 1.0 / max(p_for(c, m, rates, prior, ladder), 1e-6)
+            need = need_for(m, ladder)
+            left = max(1, need - (have or {}).get(c, 0)) if m == ms[c] else need
+            total += left / max(p_for(c, m, rates, prior, ladder), 1e-6)
         return total
     return min(pool, key=cost)
 
 
-def pick_random(pool, ms, rates, prior, ladder):
+def pick_random(pool, ms, rates, prior, ladder, have=None):
     return random.choice(pool)
 
 
@@ -127,14 +138,19 @@ def simulate(strategy, milestones, rates, prior, pool_size, ladder,
     results = []
     for _ in range(runs):
         ms = dict(milestones)
+        have = dict.fromkeys(champs, 0)     # oceny uzbierane na biezacym szczeblu
         for game in range(1, MAX_GAMES + 1):
             pool = (sampler(champs, pool_size) if sampler
                     else random.sample(champs, min(pool_size, len(champs))))
             pool = [c for c in pool if ms[c] < GOAL]
             if not pool:
                 continue
-            c = strategy(pool, ms, rates, prior, ladder)
+            c = strategy(pool, ms, rates, prior, ladder, have)
             if random.random() < p_for(c, ms[c], rates, prior, ladder):
+                have[c] += 1
+                if have[c] < need_for(ms[c], ladder):
+                    continue
+                have[c] = 0
                 ms[c] += 1
                 if ms[c] >= GOAL:
                     results.append(game)

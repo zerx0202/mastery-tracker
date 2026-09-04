@@ -36,7 +36,7 @@ def test_parse_build_garbage_gives_empty():
 def test_cheatsheet_endpoint_serves_fresh_cache(fresh_db):
     # ddragon_patch nieustawiony -> short=None; wpis z patch=None jest swiezy
     db.set_json_setting("cheatsheet", {"45": {
-        "champion_id": 45, "patch": None, "fetched_at": 1, "ok": True,
+        "champion_id": 45, "patch": None, "fetched_at": 1, "ok": True, "v": 2,
         "tier": "S", "win_rate": 55.5, "augments": ["Eureka"],
         "skill_priority": "Q > E > W"}})
     client = TestClient(app, raise_server_exceptions=False)
