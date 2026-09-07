@@ -1079,7 +1079,8 @@ async function renderSystem() {
     const done = g.have >= g.need;
     const w = Math.min(100, 100 * g.have / g.need);
     return `<div class="bar-row" style="grid-template-columns:1fr 80px 58px">
-      <span style="font-size:12.5px">${esc(g.label)}</span>
+      <span style="font-size:12.5px">${esc(g.label)}${g.note
+        ? `<div class="dim" style="font-size:10.5px">${esc(g.note)}</div>` : ""}</span>
       <div class="bar"><i class="${done ? "ok" : ""}" style="width:${w}%"></i></div>
       <span style="text-align:right;color:${done ? "var(--ok)" : "var(--dim)"}">${
         g.have}/${g.need}</span>

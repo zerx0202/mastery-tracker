@@ -2040,7 +2040,11 @@ def backfill_grades_from_snapshots(window=7200, quiet=False):
 def data_gates():
     """(P4) Liczniki bramek danych ze STAN.md - "sprawdzać liczniki" ma
     znaczyc "spojrzec na System", nie "policzyc recznie w bazie". Progi sa
-    orientacyjne (~), definicje bramek zyja w STAN.md - tu tylko odczyt."""
+    orientacyjne (~), definicje bramek zyja w STAN.md - tu tylko odczyt.
+    (R) Bramka wykonana dostaje NOWY prog i notke z werdyktem - stary prog
+    swiecil "otwarte" bez konca (7.09: 63/40 i 83/60 po analizach z 4.09);
+    Brier liczy pary z next_p, bo to czestosci steruja E(c) (4.09: 21 par,
+    z tego 3 z next_p), model-p ma osobny odczyt w kalibracji."""
     s_rank = GRADE_RANK["S-"]
     with connect() as con:
         exact = con.execute(
@@ -2055,19 +2059,27 @@ def data_gates():
             SELECT COUNT(*) c FROM grade_observation g
             JOIN match_player m ON m.match_id = g.match_id""").fetchone()["c"]
     resolved, _pending = prediction_pairs()
+    rates_pairs = sum(1 for r in resolved if r.get("next_p") is not None)
     return [
         {"key": "s_minus", "label": "Model S- (dokładne pozytywy)",
-         "have": s_pos, "need": 5},
-        {"key": "brier", "label": "Brier interpretowalny (pary predykcji)",
-         "have": len(resolved), "need": 20},
+         "have": s_pos, "need": 5,
+         "note": "próg wiarygodności modelu S- (poniżej 5 pozytywów = niewiarygodny)"},
+        {"key": "brier", "label": "Brier E(c) (pary z next_p)",
+         "have": rates_pairs, "need": 20,
+         "note": f"wszystkie pary: {len(resolved)}; odczyt na kopii, model-p osobno"},
         {"key": "fatigue", "label": "Hipoteza zmęczenia (dokładne oceny)",
-         "have": exact, "need": 40},
+         "have": exact, "need": 80,
+         "note": "powtórka: 4.09 przy 43 brak sygnału (tools/fatigue_analysis.py)"},
         {"key": "eventdata", "label": "Rewizja eventdata (gry z logiem)",
-         "have": eventdata, "need": 50},
+         "have": eventdata, "need": 50,
+         "note": "pierwsza analiza timingu (tools/timing_analysis.py) albo kasacja zbierania"},
         {"key": "class_feats", "label": "Cechy klasowe (obserwacje)",
-         "have": usable, "need": 60},
+         "have": usable, "need": 100,
+         "note": "powtórka: 4.09 przy 63 taken_z odrzucone, mitigated pokrycie 40 % "
+                 "(tools/class_features_test.py)"},
         {"key": "big_review", "label": "Rewizja duża: ranking/CUSUM/kalibracja",
-         "have": usable, "need": 100},
+         "have": usable, "need": 100,
+         "note": "(46) ranking, CUSUM, kNN, kalibracja pul (44b) — na kopii"},
     ]
 
 
