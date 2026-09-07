@@ -1994,7 +1994,7 @@ def backfill_grades_from_snapshots(window=7200, quiet=False):
     for p_ts, ts, cid, evs in groups:
         events += len(evs)
         cands = sorted((m for m in by_champ.get(cid, [])
-                        if p_ts - 60 < end_of(m) <= ts), key=end_of)
+                        if p_ts - SNAPSHOT_SLACK_S < end_of(m) <= ts), key=end_of)
         if len(cands) == len(evs):
             pairs, rule = list(zip(cands, evs, strict=True)), "unique"
         else:
@@ -2086,6 +2086,14 @@ def data_gates():
 # Ponizej tylu sekund gra to remake/void - Riot nie daje za nia oceny ani
 # maestrii (remake konczy sie ok. 3-3.5 min).
 REMAKE_MAX_S = 300
+
+# (S, kopia 7.09) Luz kandydata backfillu wzgledem poprzedniego snapshotu:
+# koniec "na papierze" (game_creation + duration) nie liczy ekranu
+# ladowania (~1-2 min), a ocena dochodzi jeszcze kilka sekund po koncu.
+# Przy luzie 60 s gra Blitzcranka z 2.09 (papierowy koniec 21:19, snapshot
+# 21:21 bez oceny) wypadala z przedzialu i szla jako "unmatched" - przy
+# realnie zgubionej ocenie backfill by jej nie odzyskal.
+SNAPSHOT_SLACK_S = 300
 
 
 def _eog_no_grade_sql(cols):
