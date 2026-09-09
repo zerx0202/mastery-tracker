@@ -204,7 +204,7 @@ def test_system_shows_gates_and_pipeline(page):
     # (P4/P8) zakladka System: liczniki bramek i zdrowie potoku
     page.click('nav a[href="#/system"]')
     panel = page.wait_for_selector('#v-system .panel:has-text("Bramki danych")')
-    assert "/80" in panel.inner_text()          # (R) powtorka zmeczenia przy 80
+    assert "/120" in panel.inner_text()         # (T) powtorka zmeczenia przy 120
     page.wait_for_selector('#v-system .kv:has-text("Oceny bez meczu")')
     page.wait_for_selector('#v-system .kv:has-text("Ostatni backup")')
     # (42) konsola LCU renderuje sie z polem sciezki i przyciskiem

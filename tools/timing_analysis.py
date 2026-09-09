@@ -29,6 +29,11 @@ import os
 import random
 import sqlite3
 import sys
+from pathlib import Path
+
+# (T) jak w pozostalych narzedziach: uruchamiane jako `python tools/x.py`
+# ma sys.path[0] = tools/, wiec bez tego `from app.model import` pada
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 GATE = 50
 WINDOW_S = 900
@@ -95,6 +100,13 @@ def _perm_p(xs, ys, rnd):
     return (hits + 1) / (PERMS + 1)
 
 
+def my_game_name(con):
+    """gameName z ostatniego wpisu puuid_cache ("Nazwa#TAG" -> "Nazwa")."""
+    row = con.execute(
+        "SELECT riot_id FROM puuid_cache ORDER BY rowid DESC LIMIT 1").fetchone()
+    return (row["riot_id"] or "").split("#")[0] if row else ""
+
+
 def load_samples(con, me):
     """Profil + sukces per gra; dopasowanie oceny po championie i czasie."""
     logs = con.execute(
@@ -137,10 +149,17 @@ def main(db_path=None, force=False, me=None):
               "patrzec na wynik przed progiem (--force = sam smoke parsowania)")
         return 2
 
-    me = me or os.environ.get("MY_RIOT_FULL") or ""
+    # (T, bramka 9.09) Live Client podaje w eventach samo gameName (bez
+    # #tagu): przy pustym `me` nic nie pasowalo, wszystkie metryki wychodzily
+    # 0.000 i "brak sygnalu" bylo artefaktem. Domyslnie nazwa z puuid_cache.
+    me = me or os.environ.get("MY_RIOT_FULL") or my_game_name(con)
     samples, unmatched = load_samples(con, me)
     print(f"gier w logu: {n}, z dopasowana ocena: {len(samples)}, "
-          f"bez dopasowania: {unmatched}")
+          f"bez dopasowania: {unmatched} (gracz: {me or '?'})")
+    if samples and not any(p["deaths_total"] for p, _ in samples):
+        print("BLAD: w zadnej grze nie rozpoznano gracza w eventach - "
+              "podaj MY_RIOT_FULL=<gameName>; werdyktu nie ma")
+        return 3
     if force and n < GATE:
         for prof, y in samples[:10]:
             print(f"  y={y} {prof}")

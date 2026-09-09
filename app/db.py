@@ -2066,20 +2066,25 @@ def data_gates():
          "note": "próg wiarygodności modelu S- (poniżej 5 pozytywów = niewiarygodny)"},
         {"key": "brier", "label": "Brier E(c) (pary z next_p)",
          "have": rates_pairs, "need": 20,
-         "note": f"wszystkie pary: {len(resolved)}; odczyt na kopii, model-p osobno"},
+         "note": f"wszystkie pary: {len(resolved)}; odczyty 4.09/7.09/9.09 bez korekt "
+                 "(Z 0,93–1,12), następny przy ~60 parach"},
         {"key": "fatigue", "label": "Hipoteza zmęczenia (dokładne oceny)",
-         "have": exact, "need": 80,
-         "note": "powtórka: 4.09 przy 43 brak sygnału (tools/fatigue_analysis.py)"},
+         "have": exact, "need": 120,
+         "note": "powtórki 4.09 (43) i 9.09 (80): brak sygnału; rozgrzewka na granicy "
+                 "(rezyd. p 0,031, surowa 0,059) — tools/fatigue_analysis.py"},
         {"key": "eventdata", "label": "Rewizja eventdata (gry z logiem)",
-         "have": eventdata, "need": 50,
-         "note": "pierwsza analiza timingu (tools/timing_analysis.py) albo kasacja zbierania"},
+         "have": eventdata, "need": 100,
+         "note": "9.09 przy 67: deaths_5_10 r −0,35, p 0,0125 = SYGNAŁ na granicy; "
+                 "zbieranie zostaje, cecha do modelu przy pokryciu ≥ 90 % — "
+                 "tools/timing_analysis.py"},
         {"key": "class_feats", "label": "Cechy klasowe (obserwacje)",
-         "have": usable, "need": 100,
-         "note": "powtórka: 4.09 przy 63 taken_z odrzucone, mitigated pokrycie 40 % "
-                 "(tools/class_features_test.py)"},
+         "have": usable, "need": 150,
+         "note": "powtórki 4.09 (63) i 9.09 (100): taken_z odrzucone, mitigated pokrycie "
+                 "63 % < 90 % — tools/class_features_test.py"},
         {"key": "big_review", "label": "Rewizja duża: ranking/CUSUM/kalibracja",
-         "have": usable, "need": 100,
-         "note": "(46) ranking, CUSUM, kNN, kalibracja pul (44b) — na kopii"},
+         "have": usable, "need": 200,
+         "note": "9.09 przy 100: (46) odrzucona, kNN gorszy (+18 % log-loss), CUSUM "
+                 "stabilny, 44b next_p bez rozrzutu (0,4–0,6) — tools/big_review.py"},
     ]
 
 
