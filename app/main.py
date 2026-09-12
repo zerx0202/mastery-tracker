@@ -361,11 +361,26 @@ def patch_meta(mode=None):
 @api.get("/targets")
 async def targets(limit: int = 30, only: str | None = None,
                   ids: str | None = None, mode: str | None = None):
-    sid = db.latest_snapshot_id()
+    # (U, przeglad) ostatnia dobra odpowiedz tylko dla wywolan dashboardu:
+    # klucz z ids (lobby_targets, nowa unia przy kazdej rotacji lawki) rosl
+    # bez konca, a champ select ma wlasny fallback w /lobby
+    if ids:
+        return await _targets(limit, only, ids, mode)
+    return await _with_fallback(f"targets:{limit}:{only}:{mode}",
+                                lambda: _targets(limit, only, ids, mode))
+
+
+async def _targets(limit, only, ids, mode):
+    # (U) snapshot i drabinka w watku - synchroniczny connect() z busy_timeout
+    # 10 s na petli zdarzen zamrazal caly serwer przy zapisie po grze
+    def base():
+        sid = db.latest_snapshot_id()
+        if sid is None:
+            return None, None, []
+        return sid, db.get_ladder(), list(db.snapshot_rows(sid))
+    sid, ladder, rows = await asyncio.to_thread(base)
     if sid is None:
         raise HTTPException(400, "Brak snapshotow - zrob POST /snapshot")
-
-    ladder = db.get_ladder()
     use_mode = mode or DEFAULT_MODE
 
     wanted_ids = None
@@ -379,7 +394,7 @@ async def targets(limit: int = 30, only: str | None = None,
     rates, prior = rates_all["champions"], rates_all["prior"]
 
     out = []
-    for r in db.snapshot_rows(sid):
+    for r in rows:
         name = r["name"] or str(r["champion_id"])
         if wanted_ids is not None and r["champion_id"] not in wanted_ids:
             continue
@@ -405,7 +420,7 @@ async def targets(limit: int = 30, only: str | None = None,
 
     # progi "co trafic" dla kilku pierwszych - to jest odpowiedz na pytanie
     # "co mam zrobic", ktorej sama liczba gier nie daje
-    md = db.get_json_setting("grade_model")
+    md = await asyncio.to_thread(db.get_json_setting, "grade_model")
     ready = await asyncio.to_thread(model.readiness)
     own_counts = await asyncio.to_thread(model.own_games_map, use_mode)
     pop = await asyncio.to_thread(db.champion_sb_popularity)
@@ -469,10 +484,36 @@ async def get_weights():
 _LOBBY_CACHE = {}
 
 
+# (U) Odczyty dashboardu przy zablokowanej bazie: rollback journal + zapis po
+# grze / kopia pliku w backupie daja czytelnikom SQLITE_BUSY po 10 s (log
+# 10.09: /lobby, /targets, /live 500 "database is locked" i pusta tabela
+# w champ selekcie). Ostatnia dobra odpowiedz z flaga stale zamiast 500.
+def _remember(key, value):
+    state.setdefault("last_good", {})[key] = value
+    return value
+
+
+# Decyzja (przeglad U): busy_timeout czytelnikow zostaje 10 s (jedno
+# connect() dla wszystkich); stale przychodzi wiec po wyczerpaniu czekania,
+# nie zamiast niego - krotszy limit dla dashboardu to osobna robota.
+async def _with_fallback(key, fn):
+    try:
+        return _remember(key, await fn())
+    except Exception as e:
+        cached = state.get("last_good", {}).get(key)
+        if cached is None or "locked" not in str(e).lower():
+            raise
+        return {**cached, "stale": True}
+
+
 async def lobby_targets(ids, queue):
+    # (U, przeglad) klucz cache liczony w watku: dwa connect() na petli
+    # zdarzen przy KAZDYM /lobby (co 1 s w champ selekcie) to byla dokladnie
+    # sciezka z logu 10.09, ktorej pierwsza wersja partii U nie przeniosla
+    sid, md = await asyncio.to_thread(
+        lambda: (db.latest_snapshot_id(), db.get_json_setting("grade_model") or {}))
     key = (tuple(sorted(int(i) for i in ids)), queue, str(db.DB_PATH),
-           db.latest_snapshot_id(),
-           (db.get_json_setting("grade_model") or {}).get("trained_at"))
+           sid, md.get("trained_at"))
     if _LOBBY_CACHE.get("key") == key:
         return _LOBBY_CACHE["t"]
     t = await targets(limit=200, ids=",".join(str(i) for i in key[0]), mode=queue)
@@ -494,13 +535,21 @@ async def push_lobby(payload: dict):
     # a REPLACE wiersza lobby kasowal ich razem z nia - panel live tracil
     # karte 9 na cala gre (przeglad 4.09). Sojusznicy zyja do nastepnego
     # champ selecta; puste ids zeruja tylko cele.
-    if not ids and not allies:
-        prev = db.get_lobby()
-        if prev and prev.get("allies"):
-            allies = prev["allies"]
     ts = int(time.time())
-    db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), ts, trade,
-                 allies)
+
+    def store():
+        # (U, przeglad) get/set lobby w watku: INSERT OR REPLACE na petli
+        # zdarzen czekal na EXCLUSIVE do 10 s przy backupie / zapisie po grze,
+        # a agent strzela w /lobby przy kazdej rotacji lawki
+        chosen = allies
+        if not ids and not allies:
+            prev = db.get_lobby()
+            if prev and prev.get("allies"):
+                chosen = prev["allies"]
+        db.set_lobby(ids, payload.get("queue"), payload.get("pool_kind"), ts, trade,
+                     chosen)
+        return chosen
+    allies = await asyncio.to_thread(store)
     # (M) sojusznik UNHIDDEN zasila slownik nazw - "kto to" jeszcze przed gra
     await asyncio.to_thread(db.save_player_names,
                             [(a["puuid"], a["name"]) for a in allies
@@ -540,7 +589,11 @@ async def push_lobby(payload: dict):
 
 @api.get("/lobby")
 async def read_lobby(max_age: int = 5400):
-    lob = db.get_lobby()
+    return await _with_fallback("lobby", lambda: _read_lobby(max_age))
+
+
+async def _read_lobby(max_age):
+    lob = await asyncio.to_thread(db.get_lobby)
     if not lob:
         return {"active": False, "targets": []}
     age = int(time.time()) - lob["updated_at"]
@@ -795,7 +848,8 @@ async def receive_missions(payload: dict):
 
 @api.get("/missions")
 async def read_missions():
-    return db.get_json_setting("missions_state") or {"missions": []}
+    return (await asyncio.to_thread(db.get_json_setting, "missions_state")
+            or {"missions": []})
 
 
 @api.get("/recap")
@@ -821,12 +875,12 @@ async def read_pass():
     """Stan przepustki + tempo grania + oczekiwane gry lidera rankingu
     (zapisywane przy kazdym /targets) - front sklada z tego zegar
     i przelacznik rezimu (3+19+32)."""
-    st = db.get_json_setting("pass_state") or {}
+    st = await asyncio.to_thread(db.get_json_setting, "pass_state") or {}
     return {
         **st,
         "tempo": await asyncio.to_thread(db.recent_tempo, DEFAULT_MODE, 7),
         "best_expected": state.get("last_best_expected"),
-        "projection": db.get_json_setting("mission_projection"),
+        "projection": await asyncio.to_thread(db.get_json_setting, "mission_projection"),
     }
 
 
@@ -953,7 +1007,7 @@ async def balance_refresh():
 @api.get("/balance")
 async def get_balance():
     """(48) Ostatnio pobrane mnozniki balansu trybu, klucze = champion_id."""
-    return db.get_json_setting("mayhem_balance") or {}
+    return await asyncio.to_thread(db.get_json_setting, "mayhem_balance") or {}
 
 
 @api.get("/augments")
@@ -1209,15 +1263,33 @@ async def players(puuids: str = ""):
     """Wspolna historia z graczami po puuid - pasek champ selecta i panel
     live (sojusznicy z K), wiersz oceny (znajomi z innych gier)."""
     ids = [p for p in puuids.split(",") if len(p) == 36]
-    my = db.my_lcu_puuid()
+    my = await asyncio.to_thread(db.my_lcu_puuid)
     return await asyncio.to_thread(db.players_summary, ids, my)
 
 
 @api.get("/players/recurring")
 async def players_recurring(min_games: int = 2):
     """Rejestr powtarzajacych sie graczy (Laboratorium)."""
-    my = db.my_lcu_puuid()
+    my = await asyncio.to_thread(db.my_lcu_puuid)
     return {"players": await asyncio.to_thread(db.recurring_players, my, min_games)}
+
+
+@write_api.put("/players/{puuid}/note")
+async def put_player_note(puuid: str, payload: dict):
+    """(V) Notatka o graczu. Pusta notatka kasuje wiersz - front ma jeden
+    prompt na dodanie/edycje/usuniecie. 36 znakow = puuid klienta (champ
+    select, eog); 78-znakowy z ACCOUNT-V1 to inny identyfikator tego samego
+    konta (db.my_lcu_puuid) i nie jest kluczem karty 9."""
+    if len(puuid) != 36:
+        raise HTTPException(400, "puuid musi miec 36 znakow")
+    note = payload.get("note")
+    if note is not None and not isinstance(note, str):
+        raise HTTPException(400, "note musi byc tekstem")
+    note = (note or "").strip()
+    if len(note) > 500:
+        raise HTTPException(400, "notatka najwyzej 500 znakow")
+    saved = await asyncio.to_thread(db.set_player_note, puuid, note)
+    return {"ok": True, "note": saved}
 
 
 @api.get("/cheatsheet/{champion_id}")
@@ -1413,6 +1485,10 @@ async def grades_explain(match_id: str):
 async def grades_history(limit: int = 60, mode: str | None = None):
     """Oceny z predykcja modelu obok tego, co faktycznie wypadlo.
     Kolejnosc po czasie obserwacji - bez ORDER BY SQLite zwraca dowolna."""
+    return await asyncio.to_thread(_grades_history_sync, limit, mode)
+
+
+def _grades_history_sync(limit, mode):
     use_mode = mode or DEFAULT_MODE
     # filtr trybu warunkowo, jak wszedzie: bezwarunkowe `= ?` z NULL-em
     # (brak DEFAULT_MODE) nie dopasowywalo niczego i widok byl zawsze
@@ -1461,6 +1537,10 @@ async def grades_history(limit: int = 60, mode: str | None = None):
 
 @api.get("/split/progress")
 async def split_progress():
+    return await asyncio.to_thread(_split_progress_sync)
+
+
+def _split_progress_sync():
     sid = db.latest_snapshot_id()
     if sid is None:
         raise HTTPException(400, "brak snapshotow")
@@ -1603,7 +1683,8 @@ async def snowball_next(limit: int = 1):
 
 @api.get("/sentinel")
 async def sentinel_status():
-    return db.get_json_setting("mayhem_api") or {"open": False, "checked_at": 0}
+    return (await asyncio.to_thread(db.get_json_setting, "mayhem_api")
+            or {"open": False, "checked_at": 0})
 
 
 @api.get("/limits")
@@ -1613,6 +1694,12 @@ async def limits():
 
 @api.get("/system/health")
 async def system_health():
+    # (U) caly odczyt w watku: kilkanascie synchronicznych polaczen na petli
+    # zdarzen blokowalo serwer (i statyki) na czas zapisu po grze / backupu
+    return await asyncio.to_thread(_system_health_sync)
+
+
+def _system_health_sync():
     with db.connect() as c:
         last = {r["kind"]: r["ts"] for r in c.execute(
             "SELECT kind, MAX(ts) ts FROM event_log GROUP BY kind")}
@@ -1641,14 +1728,13 @@ async def system_health():
         "model": db.model_status(),
         "ddragon_patch": db.get_setting("ddragon_patch"),
         "events": events,
-        "gates": await asyncio.to_thread(db.data_gates),
-        "pipeline": await asyncio.to_thread(db.pipeline_sanity),
+        "gates": db.data_gates(),
+        "pipeline": db.pipeline_sanity(),
         # (F3) sam licznik "ekrany bez oceny" nie mowi, KTORE gry - a to
         # rozstrzyga miedzy remake'iem a martwym kanalem ocen
         "pipeline_detail": {
-            "eog_bez_oceny": await asyncio.to_thread(db.eog_without_grade_ids),
-            "games_without_grade": await asyncio.to_thread(
-                db.games_without_grade_ids)},
+            "eog_bez_oceny": db.eog_without_grade_ids(),
+            "games_without_grade": db.games_without_grade_ids()},
         "last_backup": db.get_json_setting("last_backup"),
         # (A6) czujki: zdrowie klucza Riot i wiek mnoznikow balansu -
         # progi koloru naklada front, tu czysty odczyt
@@ -1659,7 +1745,7 @@ async def system_health():
         "non_mission_games": non_mission,
         # (E) czarna skrzynka agenta + watchdog "grano bez agenta"
         "agent_health": db.get_json_setting("agent_health"),
-        "agent_gaps": await asyncio.to_thread(db.agent_activity_gaps),
+        "agent_gaps": db.agent_activity_gaps(),
     }
 
 
@@ -1720,6 +1806,10 @@ async def push_live(payload: dict):
 
 @api.get("/live")
 async def read_live():
+    return await _with_fallback("live", _read_live)
+
+
+async def _read_live():
     live = await asyncio.to_thread(db.get_live)
     if not live:
         return {"active": False}
@@ -1737,33 +1827,35 @@ async def read_live():
         "gold_per_min": round(fv["gpm"], 2),
     }
 
-    # jaki prog obowiazuje na tym championie
-    sid = db.latest_snapshot_id()
-    need, milestone, need_count, need_have = None, None, None, None
-    if sid and live["champion_id"]:
-        for r in db.snapshot_rows(sid):
-            if r["champion_id"] == live["champion_id"]:
-                milestone = r["milestone"]
-                nxt = json.loads(r["next_grades"] or "null")
-                need = scoring.cheapest_grade(nxt)
-                # krotnosc szczebla (bonus milestone: S- x2) i oceny juz
-                # uzbierane - szyna pokazuje "S- x2 (masz 1)", nie samo "S-"
-                need_count = int((nxt or {}).get(need) or 1) if need else None
-                need_have = scoring._have(
-                    json.loads(r["grades_earned"] or "[]"), need)
-                break
+    # (U) prog, krotnosc i klucz DD w jednym watku - synchroniczne odczyty
+    # na petli zdarzen zamrazaly serwer przy zapisie po grze
+    def ctx():
+        sid = db.latest_snapshot_id()
+        need, milestone, need_count, need_have, key = None, None, None, None, None
+        if sid and live["champion_id"]:
+            for r in db.snapshot_rows(sid):
+                if r["champion_id"] == live["champion_id"]:
+                    milestone = r["milestone"]
+                    nxt = json.loads(r["next_grades"] or "null")
+                    need = scoring.cheapest_grade(nxt)
+                    # krotnosc szczebla (bonus milestone: S- x2) i oceny juz
+                    # uzbierane - szyna pokazuje "S- x2 (masz 1)", nie samo "S-"
+                    need_count = int((nxt or {}).get(need) or 1) if need else None
+                    need_have = scoring._have(
+                        json.loads(r["grades_earned"] or "[]"), need)
+                    break
+        # klucz DD do ikony - ten sam mechanizm co w /targets i historii ocen
+        if live["champion_id"]:
+            with db.connect() as c:
+                r = c.execute("SELECT key FROM champion WHERE id = ?",
+                              (live["champion_id"],)).fetchone()
+                key = r["key"] if r else None
+        return need, milestone, need_count, need_have, key
+    need, milestone, need_count, need_have, key = await asyncio.to_thread(ctx)
 
     ref = await asyncio.to_thread(
         db.reference_pace, need or "A-", live["game_mode"] or DEFAULT_MODE,
         live["champion_id"])
-
-    # klucz DD do ikony - ten sam mechanizm co w /targets i historii ocen
-    key = None
-    if live["champion_id"]:
-        with db.connect() as c:
-            r = c.execute("SELECT key FROM champion WHERE id = ?",
-                          (live["champion_id"],)).fetchone()
-            key = r["key"] if r else None
 
     return {
         "active": True, "age": live["age"],

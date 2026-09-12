@@ -23,8 +23,14 @@ fi
 # i dwa procesy z roznych stron montu potrafia sie o nia pobic.
 # Zrodlo otwierane read-only przez URI: gdyby pliku bazy nie bylo, connect
 # nie ma prawa stworzyc pustego i "zbackupowac" go jako sukces.
+# Kopia w krokach po 4096 stron (16 MB): blokada SHARED zrodla trwa tylko
+# w trakcie kroku, miedzy krokami zapisujacy (eog, timeline, snowball)
+# dostaja EXCLUSIVE, a czytelnicy dashboardu nie czekaja na SHARED trzymany
+# przez cala kopie (log 10.09: 500 "locked"). `sleep` to odczekanie po
+# BUSY/LOCKED przed ponowieniem kroku, nie przerwa miedzy krokami. Zapis
+# w trakcie kroku = SQLite zaczyna kopie od nowa, wiec kopia jest spojna.
 /opt/homebrew/bin/docker compose exec -T backend \
-  python -c "import sqlite3; s=sqlite3.connect('file:/code/data/mastery.db?mode=ro', uri=True); d=sqlite3.connect('/code/data/_snap.db'); s.backup(d); d.close(); s.close()"
+  python -c "import sqlite3; s=sqlite3.connect('file:/code/data/mastery.db?mode=ro', uri=True); d=sqlite3.connect('/code/data/_snap.db'); s.backup(d, pages=4096, sleep=0.02); d.close(); s.close()"
 mv "$HOME/stacks/riot/data/_snap.db" "$SNAP"
 sqlite3 "$SNAP" "PRAGMA integrity_check;" | grep -q '^ok$' || { echo "BAZA USZKODZONA - przerywam"; exit 1; }
 

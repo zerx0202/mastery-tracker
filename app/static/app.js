@@ -239,6 +239,39 @@ async function playersFor(puuids) {
   puuids.forEach(p => { if (PLAYERS[p]) out[p] = PLAYERS[p]; });
   return out;
 }
+
+/* (V) notatka o graczu: window.prompt wystarcza (jeden uzytkownik, siec
+   prywatna, zero frameworkow). Okno jest modalne - ticki renderNow z tego
+   czasu wyrzuca epoka renderu, PUT idzie po zamknieciu. Po zapisie cache
+   PLAYERS dostaje note, wiec zeton odswieza sie w nastepnym ticku. */
+const noteTag = n => n ? `<span class="note" title="${escq(n)}">✎ ${
+  esc(n.length > 40 ? n.slice(0, 39) + "…" : n)}</span>` : "";
+
+async function editNote(puuid, name) {
+  if (!puuid || puuid.length !== 36) return false;
+  const cur = (PLAYERS[puuid] && PLAYERS[puuid].note) || "";
+  const txt = window.prompt(`Notatka o ${name || puuid.slice(0, 8)} (pusta = usuń):`, cur);
+  if (txt === null) return false;
+  let token = "";
+  try { token = localStorage.getItem("api_token") || ""; } catch (e) {}
+  try {
+    const r = await fetch(`/api/players/${encodeURIComponent(puuid)}/note`, {
+      method: "PUT", headers: {"Content-Type": "application/json", "X-API-Token": token},
+      body: JSON.stringify({note: txt.slice(0, 500)})});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const out = await r.json();
+    // cache trzyma null dla nieznanego gracza - musi dostac obiekt, inaczej
+    // notatka nowego gracza czekalaby na twardy refresh
+    PLAYERS[puuid] = {...(PLAYERS[puuid] || {name: name || null, games: 0, with: 0,
+      against: 0, wins_with: 0, wins_against: 0, last_seen: null, recent: []}),
+      note: out.note};
+    return true;
+  } catch (e) {
+    alert("Nie udało się zapisać notatki: " + e.message
+      + (token ? "" : " (brak tokenu — wpisz go w System → konsola LCU)"));
+    return false;
+  }
+}
 /* (Q) sojusznik jako zeton: ikona championa, nazwa, wspolna historia
    ("razem 4 · 4/0" = gry razem · W/L z mojej perspektywy) albo "nowy";
    dotad szary drobny tekst w jednej linii (zrzut 4.09: slabo widoczni) */
@@ -252,7 +285,12 @@ function allyChip(a, info) {
     if (info && info.against) parts.push(`przeciw ${info.against} · ${info.wins_against}/${info.against - info.wins_against}`);
     hist = parts.length ? `<b>${parts.join(", ")}</b>` : `<span class="dim">nowy</span>`;
   }
-  return `<span class="ally">${img}<span>${name}</span>${hist}</span>`;
+  // (V) notatka: skrot w zetonie, calosc w title; klik = edycja tylko z puuid
+  // (HIDDEN nie ma czym kluczowac) - obsluga delegacja na document
+  const note = info && info.note ? noteTag(info.note) : "";
+  const clickable = a.puuid && a.puuid.length === 36
+    ? ` data-puuid="${esc(a.puuid)}" data-name="${escq((a.name || "").split("#")[0])}"` : "";
+  return `<span class="ally${note ? " noted" : ""}"${clickable}>${img}<span>${name}</span>${hist}${note}</span>`;
 }
 const allyChips = (allies, mates) =>
   `<span class="allies">${allies.map(a => allyChip(a, (mates || {})[a.puuid])).join("")}</span>`;
@@ -316,6 +354,20 @@ function livePanel(d, bal, cheat, pn, allies, mates) {
 // wystartowal juz nowszy przebieg
 let NOW_EPOCH = 0;
 
+// (U) zapis do DOM tylko przy zmianie tresci: innerHTML co tick restartowal
+// animacje i przeliczal layout bez powodu (CLS/LCP, zrzuty 11.09)
+// Porownanie z ostatnio ZAPISANYM stringiem, nie z el.innerHTML: serializator
+// normalizuje biale znaki miedzy atrybutami i skrot nigdy nie trafial (przeglad U)
+const LAST_HTML = {};
+function put(id, html) {
+  if (LAST_HTML[id] === html) return;
+  const el = $(id);
+  if (!el) return;
+  LAST_HTML[id] = html;
+  el.innerHTML = html;
+}
+let LOBBY_FAILS = 0, LAST_LOBBY = null;
+
 async function renderNow() {
   const ep = ++NOW_EPOCH;
   const stale = () => ep !== NOW_EPOCH;
@@ -332,12 +384,11 @@ async function renderNow() {
   // (M, karta 9) sojusznicy z lobby zyja przez cala gre: wyjscie z champ
   // selecta zeruje pule, ale backend przepisuje sojusznikow i /lobby oddaje
   // ich takze jako nieaktywne (P) - panel live tez ich pokazuje
-  const lobbyNow = lobbyR.status === "fulfilled" ? lobbyR.value : {active: false};
+  const lobbyNow = lobbyR.status === "fulfilled" ? lobbyR.value : (LAST_LOBBY || {active: false});
   const allies = lobbyNow.allies || [];
   const mates = allies.length ? await playersFor(allies.map(a => a.puuid)) : {};
   if (stale()) return;
-  $("live-panel") && ($("live-panel").innerHTML = live.active
-    ? livePanel(live, bal, cheat, pnLive, allies, mates) : "");
+  put("live-panel", live.active ? livePanel(live, bal, cheat, pnLive, allies, mates) : "");
 
   // pasek live-bar skladamy w JEDNEJ zmiennej i ustawiamy raz na koncu -
   // baner sentinela i blad champ selecta byly wstawiane wczesnie
@@ -346,6 +397,13 @@ async function renderNow() {
   let lobby = {active: false};
   if (lobbyR.status === "fulfilled") {
     lobby = lobbyR.value;
+    LOBBY_FAILS = 0;
+    LAST_LOBBY = lobby;
+  } else if (++LOBBY_FAILS < 3) {
+    // (U, przeglad) pojedyncza porazka (baza zajeta zapisem po grze) nie moze
+    // wyrzucic widoku z champ selecta do rankingu globalnego ani migac
+    // banerem - zostaje ostatni dobry odczyt, jak w backendzie
+    lobby = LAST_LOBBY || lobby;
   } else {
     barHtml += `<div class="live" style="border-color:#6B4E28;
       background:rgba(224,164,88,.07)"><span style="color:var(--warn)">⚠</span>
@@ -371,21 +429,22 @@ async function renderNow() {
     const alHtml = allies.length ? `<div style="margin-top:8px">${allyChips(allies, mates)}</div>` : "";
     barHtml += `<div class="live"><span class="dot"></span>
       <div><b>${esc(lobby.queue || "Champ select")}</b> —
-      ${lobby.champion_ids.length} w puli, odczyt sprzed ${lobby.age}s${alHtml}</div></div>`;
+      ${lobby.champion_ids.length} w puli, ${lobby.stale
+        ? "ostatni dobry odczyt — baza zajęta" : `odczyt sprzed ${lobby.age}s`}${alHtml}</div></div>`;
     if (stale()) return;
-    $("live-bar").innerHTML = barHtml;
+    put("live-bar", barHtml);
   } else {
     let data;
     try { data = await api("/targets?limit=12"); } catch (e) {
       if (stale()) return;
-      $("live-bar").innerHTML = barHtml;
+      put("live-bar", barHtml);
       $("hero").innerHTML = `<div class="hero empty"><div class="empty-state">
         <h3>Nie można pobrać rankingu</h3><div>${esc(e.message)}</div></div></div>`;
-      $("cards").innerHTML = ""; $("cards-label").textContent = "";
+      $("cards").innerHTML = ""; $("cards-label").style.visibility = "hidden";
       return;
     }
     if (stale()) return;
-    $("live-bar").innerHTML = barHtml;
+    put("live-bar", barHtml);
     GOAL = data.goal;
     targets = data.targets;
     patchMeta = data.patch;
@@ -397,7 +456,7 @@ async function renderNow() {
       <h3>Nic do zrobienia w tej puli</h3>
       <div>Żaden z dostępnych championów nie zbliża do szczebla ${msName(GOAL - 1)}.</div>
       </div></div>`;
-    $("cards").innerHTML = ""; $("cards-label").textContent = "";
+    $("cards").innerHTML = ""; $("cards-label").style.visibility = "hidden";
     return;
   }
 
@@ -429,7 +488,7 @@ async function renderNow() {
     ? (pn.champion ? pn.anchor_url : null)
     : patchUrl(patchMeta && patchMeta.short, b.name);
 
-  $("hero").innerHTML = patchBanner + `
+  put("hero", patchBanner + `
     <div class="hero">
       <div>
         <div class="big">${b.steps_remaining}<small>${
@@ -449,13 +508,14 @@ async function renderNow() {
         ${patchBlock(pn)}
         ${cheatLines(heroCheat, true)}
       </div>
-    </div>`;
+    </div>`);
 
   const rest = targets.slice(1);
 
   // Ten sam uklad w obu widokach. Karty rozjezdzaly sie na trzy rozmiary
   // i powtarzaly te sama etykiete; tabela pokazuje wiecej w mniejszym miejscu.
   $("cards-label").textContent = inSelect ? "Kolejność w tej puli" : "Ranking pozostałych";
+  $("cards-label").style.visibility = "";
   $("cards").className = "";
 
   const shownRows = inSelect ? rest : rest.slice(0, 15);
@@ -783,7 +843,8 @@ function explainBox(ex) {
     ? `<div class="range" style="margin-top:9px">znajomi z innych gier: ${
         ex.known_players.map(k => `<b>${esc((k.name || k.puuid.slice(0, 8)).split("#")[0])}</b>${
           k.with ? ` razem ${k.with}× (${k.wins_with}W)` : ""}${
-          k.against ? ` przeciw ${k.against}× (${k.wins_against}W)` : ""}`).join(" · ")}</div>` : "";
+          k.against ? ` przeciw ${k.against}× (${k.wins_against}W)` : ""}${
+          k.note ? " " + noteTag(k.note) : ""}`).join(" · ")}</div>` : "";
   return `<div class="explain-box">
     <div class="range">Szansa wg modelu — ${ths}</div>
     <div style="margin-top:9px">${bars}</div>${pct}${mpct}${augs}${known}
@@ -1009,11 +1070,15 @@ async function renderLab() {
       <td class="r num">${p.wins_against}/${p.against - p.wins_against}</td>
       <td class="r num" style="color:var(--dim)">${p.last_seen
         ? new Date(p.last_seen * 1000).toLocaleDateString("pl-PL") : "—"}</td>
+      <td class="note-cell">${p.note ? `<span class="note" title="${escq(p.note)}">${esc(p.note)}</span>`
+        : `<span class="dim">—</span>`}<button type="button" class="note-edit" data-puuid="${
+        esc(p.puuid)}" data-name="${escq(nm)}" title="Edytuj notatkę">✎</button></td>
     </tr>`; }).join("");
     $("lab-body").insertAdjacentHTML("beforeend", `<div class="panel" style="margin-top:14px">
       <div class="eyebrow">Powtarzający się gracze (karta 9)</div>
       <table><thead><tr><th>Gracz</th><th class="r">Razem</th><th class="r">W/L razem</th>
-        <th class="r">Przeciw</th><th class="r">W/L przeciw</th><th class="r">Ostatnio</th></tr></thead>
+        <th class="r">Przeciw</th><th class="r">W/L przeciw</th><th class="r">Ostatnio</th>
+        <th>Notatka</th></tr></thead>
       <tbody>${prow}</tbody></table>
       <div class="tagline">Tożsamości z ekranów końcowych i odzysku (10 graczy na mecz)
         oraz z champ selecta; W/L z Twojej perspektywy; nazwa = ostatnie znane Riot ID.</div></div>`);
@@ -1287,7 +1352,9 @@ async function renderSystem() {
 
 /* ---------- routing ---------- */
 const VIEWS = {
-  "#/": ["v-now", async () => { await renderNow(); renderSide(); }],
+  // (U) panel boczny rownolegle z widokiem glownym - LCP czekal na caly
+  // lancuch renderNow, a boczny ma wlasne 5 odczytow
+  "#/": ["v-now", async () => { renderSide(); await renderNow(); }],
   "#/oceny": ["v-grades", renderGrades],
   "#/split": ["v-split", renderSplit],
   "#/lab": ["v-lab", renderLab],
@@ -1327,6 +1394,14 @@ function tick() {
 
 addEventListener("hashchange", route);
 $("lab-stat").addEventListener("change", renderLab);
+// (V) delegacja: zetony i przycisk w tabeli sa przepisywane przez innerHTML
+// co render, wiec jeden handler siedzi na document
+document.addEventListener("click", async ev => {
+  const el = ev.target.closest(".ally[data-puuid], .note-edit[data-puuid]");
+  if (!el) return;
+  const ok = await editNote(el.dataset.puuid, el.dataset.name);
+  if (ok && el.classList.contains("note-edit")) renderLab();
+});
 // (J) w champ selekcie odswiezamy co sekunde - /lobby jest cache'owane
 // (partia F), a plakietki wymiany nie moga czekac 4 s; poza champ selektem
 // zostaje siatka 4 s. Epoka renderu (NOW_EPOCH) pilnuje nakladania sie.
@@ -1337,4 +1412,13 @@ setInterval(() => {
   if (NOW_FAST || NOW_TICK % 4 === 0) renderNow();
 }, 1000);
 setInterval(tick, 10000);
-(async () => { tick(); await ddragon(); route(); })();
+// (U) route() od razu: wersja ddragon (fetch zewnetrzny bez timeoutu)
+// tylko odswieza ikony przy nastepnym ticku, nie trzyma pierwszego renderu
+(async () => {
+  tick(); route();
+  // (U, przeglad) widoki jednorazowe (panel boczny, #/oceny) nie odswiezaja
+  // sie tickiem - po zmianie wersji ikon route() jeszcze raz
+  const before = PATCH;
+  await ddragon();
+  if (PATCH !== before) route();
+})();

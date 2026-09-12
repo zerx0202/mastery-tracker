@@ -233,3 +233,24 @@ def test_champ_select_bar_shows_ally_chips(page):
     txt = chips.inner_text()
     assert "Zed" in txt and "nowy" in txt and "(ukryty)" in txt, txt
     assert page.locator("#live-bar .ally img").count() == 2
+
+
+def test_ally_chip_shows_note_and_prompt_edits_it(page):
+    # (V) notatka o graczu w zetonie champ selecta: skrot + pelny tekst
+    # w title, klik otwiera prompt, zapis odswieza zeton w nastepnym ticku
+    now = int(time.time())
+    db.set_lobby([45, 12, 99], "KIWI", "limited", now, trade_ids=[12], allies=[
+        {"cellId": 1, "championId": 12, "puuid": "a" * 36, "name": "Zed#EUW", "hidden": False},
+        {"cellId": 3, "championId": 99, "puuid": "", "name": "", "hidden": True}])
+    full = "flamer, mutuj od startu i graj swoje - dluga notatka"
+    db.set_player_note("a" * 36, full)
+    page.reload()
+    chip = page.wait_for_selector("#live-bar .ally.noted")
+    assert "flamer" in chip.inner_text()
+    note = chip.query_selector(".note")
+    assert note.get_attribute("title") == full and note.inner_text().endswith("…")
+    assert page.locator("#live-bar .ally[data-puuid]").count() == 1   # ukryty bez puuid
+    page.once("dialog", lambda d: d.accept("nowa notatka"))
+    page.click("#live-bar .ally[data-puuid]")
+    page.wait_for_selector('#live-bar .note:has-text("nowa notatka")')
+    assert db.get_player_notes(["a" * 36]) == {"a" * 36: "nowa notatka"}

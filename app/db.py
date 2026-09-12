@@ -1217,11 +1217,13 @@ def players_summary(puuids, my_puuid, exclude_match=None):
     Bez mojego puuid (cache pusty) nie da sie odroznic 'razem' od 'przeciw'
     - wtedy pusto, nie zgadujemy."""
     puuids = [p for p in dict.fromkeys(puuids or []) if p and p != my_puuid]
-    if not puuids or not my_puuid:
+    if not puuids:
         return {}
     ph = ",".join("?" * len(puuids))
     with connect() as con:
-        rows = [dict(r) for r in con.execute(f"""
+        # (V) bez mojego puuid nie ma historii razem/przeciw (nie zgadujemy),
+        # ale notatka nie zalezy ode mnie - zeton ma ja pokazac zawsze
+        rows = [] if not my_puuid else [dict(r) for r in con.execute(f"""
             SELECT o.puuid, o.match_id, o.team_id AS their_team,
                    me.team_id AS my_team, m.win, m.game_creation, g.grade,
                    (SELECT ps.champion_id FROM player_stat ps
@@ -1235,10 +1237,15 @@ def players_summary(puuids, my_puuid, exclude_match=None):
             ORDER BY m.game_creation DESC""", (my_puuid, *puuids, exclude_match))]
         names = {r["puuid"]: r["name"] for r in con.execute(
             f"SELECT puuid, name FROM player_name WHERE puuid IN ({ph})", puuids)}
+        # (V, notatki) notatka jedzie w tym samym slowniku co historia - front
+        # ma jeden cache (PLAYERS) i jeden ksztalt dla zetonu, tabeli i oceny
+        notes = {r["puuid"]: r["note"] for r in con.execute(
+            f"SELECT puuid, note FROM player_note WHERE puuid IN ({ph})", puuids)}
 
     def blank(p):
-        return {"name": names.get(p), "games": 0, "with": 0, "against": 0,
-                "wins_with": 0, "wins_against": 0, "last_seen": None, "recent": []}
+        return {"name": names.get(p), "note": notes.get(p), "games": 0, "with": 0,
+                "against": 0, "wins_with": 0, "wins_against": 0, "last_seen": None,
+                "recent": []}
     out = {}
     for r in rows:
         d = out.setdefault(r["puuid"], blank(r["puuid"]))
@@ -1254,7 +1261,9 @@ def players_summary(puuids, my_puuid, exclude_match=None):
                                 "win": bool(r["win"]), "my_grade": r["grade"],
                                 "their_champion": r["their_champion"]})
     for p in puuids:
-        if p not in out and names.get(p):
+        # gracz z notatka, ale bez historii i nazwy, tez wraca - zeton
+        # w champ selekcie ma pokazac notatke, zanim eog dopisze nazwe
+        if p not in out and (notes.get(p) or (my_puuid and names.get(p))):
             out[p] = blank(p)
     return out
 
@@ -2914,6 +2923,10 @@ def snowball_ingest(puuid, games):
                     "stat_key, stat_value) VALUES (?,?,?,?,0,?,?)",
                     (mid, pn, cid, part.get("teamId") or 0, k, v))
                 new_rows += 1
+            # (U) commit per gra (~120 wierszy) zamiast jednej transakcji na
+            # 2 tys. wierszy + 4 indeksy: czytelnicy dashboardu wchodza miedzy
+            # grami, a nie czekaja na caly listing gracza (log 10.09)
+            con.commit()
     return kiwi, new_rows
 
 
@@ -3010,3 +3023,49 @@ def upgrade_drop_bots():
         ph = ",".join("?" * len(bots))
         con.execute(f"DELETE FROM match_participant WHERE puuid IN ({ph})", bots)
         con.execute(f"DELETE FROM player_name WHERE puuid IN ({ph})", bots)
+
+
+# ============================================================
+# (V) notatki o graczach - "kto to byl" wpisane reka, widoczne w champ
+# selekcie i w grze. Klucz = 36-znakowy puuid klienta (ten sam, co
+# match_participant i player_name). Osobna tabela, nie kolumna
+# w player_name, bo save_player_names robi INSERT OR REPLACE po kazdym
+# ekranie koncowym i notatka by ginela. Definicja NA KONCU pliku: migrate()
+# odpala init_* w kolejnosci linii.
+PLAYER_NOTE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS player_note (
+    puuid      TEXT PRIMARY KEY,
+    note       TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+"""
+
+
+def init_player_note():
+    with connect() as con:
+        con.executescript(PLAYER_NOTE_SCHEMA)
+
+
+def get_player_notes(puuids):
+    """puuid -> notatka; tylko istniejace wiersze."""
+    puuids = [p for p in dict.fromkeys(puuids or []) if p]
+    if not puuids:
+        return {}
+    ph = ",".join("?" * len(puuids))
+    with connect() as con:
+        return {r["puuid"]: r["note"] for r in con.execute(
+            f"SELECT puuid, note FROM player_note WHERE puuid IN ({ph})", puuids)}
+
+
+def set_player_note(puuid, note, ts=None):
+    """Pusta/biala notatka kasuje wiersz - jeden endpoint do dodania, edycji
+    i usuniecia (front ma jeden prompt). Zwraca zapisany tekst albo None."""
+    note = (note or "").strip()
+    with connect() as con:
+        if not note:
+            con.execute("DELETE FROM player_note WHERE puuid=?", (puuid,))
+            return None
+        con.execute(
+            "INSERT OR REPLACE INTO player_note (puuid, note, updated_at) VALUES (?,?,?)",
+            (puuid, note, ts or int(time.time())))
+    return note
