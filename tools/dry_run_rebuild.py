@@ -93,7 +93,7 @@ def rebuild_and_compare(copy_path, tmp_db_path):
             block = json.loads(zlib.decompress(r["payload"]))
             adb.save_eog(block, platform, r["captured_at"])
             adb.flatten_eog_stats(block, r["match_id"])
-            adb.save_match_participants(block, r["match_id"])
+            adb.save_match_participants(block, r["match_id"], r["captured_at"])
 
         e_cmp = e_mis = ps_mis = part_mis = 0
         e_diffs = []

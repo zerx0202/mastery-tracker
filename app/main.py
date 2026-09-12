@@ -913,7 +913,7 @@ async def push_eog(payload: dict):
         if match_id:
             stats_rows = await asyncio.to_thread(db.flatten_eog_stats, block, match_id)
             participants = await asyncio.to_thread(
-                db.save_match_participants, block, match_id)
+                db.save_match_participants, block, match_id, ts)
             me = db._find_local_player(block)
             reroll = (block.get("rerollData") or {}).get("rerollCount")
             pool_id = await asyncio.to_thread(
@@ -1277,7 +1277,7 @@ async def players_recurring(min_games: int = 2):
 @write_api.put("/players/{puuid}/note")
 async def put_player_note(puuid: str, payload: dict):
     """(V) Notatka o graczu. Pusta notatka kasuje wiersz - front ma jeden
-    prompt na dodanie/edycje/usuniecie. 36 znakow = puuid klienta (champ
+    formularz na dodanie/edycje/usuniecie. 36 znakow = puuid klienta (champ
     select, eog); 78-znakowy z ACCOUNT-V1 to inny identyfikator tego samego
     konta (db.my_lcu_puuid) i nie jest kluczem karty 9."""
     if len(puuid) != 36:

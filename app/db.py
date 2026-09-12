@@ -659,6 +659,13 @@ def save_lcu_participants(g, match_id, my_puuid=None):
               else pl.get("summonerName") or "")
         names.append((pl.get("puuid"), nm))
     mode = g.get("gameMode")
+    # (W) czas tej gry, nie chwila odzysku: gra z historii bywa sprzed dni
+    # i jej nazwy sa starsze od tych z dzisiejszego eog
+    dur = int(g.get("gameDuration") or 0)
+    if dur > 10000:
+        dur //= 1000
+    gc = g.get("gameCreation") or 0
+    seen_ts = int(gc / 1000) + dur if gc else None
     written = 0
     with connect() as con:
         con.execute("DELETE FROM match_participant WHERE match_id=?", (match_id,))
@@ -685,7 +692,7 @@ def save_lcu_participants(g, match_id, my_puuid=None):
                     "stat_key, stat_value) VALUES (?,?,?,?,?,?,?)",
                     (match_id, pid, cid, p.get("teamId") or 0, is_local, k, v))
             written += 1
-    save_player_names(names)
+    save_player_names(names, seen_ts)
     return written
 
 
@@ -1104,20 +1111,26 @@ def init_player_name():
 
 
 def save_player_names(pairs, ts=None):
-    """(M, karta 9) puuid -> ostatnia znana nazwa Riot ID. Zrodla: blok eog
+    """(M, karta 9) puuid -> NAJNOWSZA znana nazwa Riot ID. Zrodla: blok eog
     (riotIdGameName#riotIdTagLine), pelna gra z odzysku (player.gameName),
-    sojusznicy z champ selecta (K). Nazwa zmienia sie rzadko - ostatnia
-    wygrywa. match_participant swiadomie trzyma tylko puuid (tozsamosc),
-    nazwa to etykieta."""
+    sojusznicy z champ selecta (K). match_participant swiadomie trzyma tylko
+    puuid (tozsamosc), nazwa to etykieta. ts = czas OBSERWACJI (koniec gry,
+    nie chwila zapisu): odzysk z historii LCU dowozi gry sprzed dni, a
+    ostatni zapis nie moze cofnac nazwy do starszej (W) - nowsza wygrywa."""
     import time as _t
     ts = ts or int(_t.time())
     rows = [(p, n, ts) for p, n in pairs if p and n]
     if not rows:
         return 0
     with connect() as con:
-        con.executemany(
-            "INSERT OR REPLACE INTO player_name (puuid, name, seen_at) VALUES (?,?,?)",
-            rows)
+        con.executemany("""
+            INSERT INTO player_name (puuid, name, seen_at) VALUES (?,?,?)
+            ON CONFLICT(puuid) DO UPDATE SET name = excluded.name,
+                seen_at = excluded.seen_at
+            WHERE excluded.seen_at >= player_name.seen_at""", rows)
+    # (W) kazda widziana nazwa zostaje w historii - zmiana Riot ID nie gubi
+    # "kim byl" (player_alias, koniec pliku)
+    save_player_aliases(rows)
     return len(rows)
 
 
@@ -1174,10 +1187,12 @@ def _bot_identity(pl):
     return (pl.get("tagLine") == "BOT" and "bot" in name.lower()) or _bot_name(name)
 
 
-def save_match_participants(block, match_id):
+def save_match_participants(block, match_id, ts=None):
     """Tozsamosci graczy z bloku eog -> match_participant. Gracz bez puuid
     (np. bot) nie dostaje wiersza, ale zajmuje slot - numeracja musi zostac
-    zgodna z player_stat. Zwraca liczbe zapisanych wierszy."""
+    zgodna z player_stat. ts = kiedy ekran byl (W): przy replayu blobow
+    nazwy dostaja czas zapisu ekranu, nie "teraz". Zwraca liczbe zapisanych
+    wierszy."""
     rows = []
     names = []
     n = 0
@@ -1205,7 +1220,7 @@ def save_match_participants(block, match_id):
             "INSERT INTO match_participant "
             "(match_id, participant_no, puuid, team_id) "
             "VALUES (:match_id, :participant_no, :puuid, :team_id)", rows)
-    save_player_names(names)
+    save_player_names(names, ts)
     return len(rows)
 
 
@@ -1241,11 +1256,19 @@ def players_summary(puuids, my_puuid, exclude_match=None):
         # ma jeden cache (PLAYERS) i jeden ksztalt dla zetonu, tabeli i oceny
         notes = {r["puuid"]: r["note"] for r in con.execute(
             f"SELECT puuid, note FROM player_note WHERE puuid IN ({ph})", puuids)}
+        # (W) wszystkie widziane Riot ID tego puuid, od najswiezszego - front
+        # pokazuje biezaca nazwe, starsze jako "dawniej"
+        aliases = {}
+        for r in con.execute(
+                f"SELECT puuid, name FROM player_alias WHERE puuid IN ({ph}) "
+                "ORDER BY last_seen DESC, first_seen DESC", puuids):
+            aliases.setdefault(r["puuid"], []).append(r["name"])
 
     def blank(p):
-        return {"name": names.get(p), "note": notes.get(p), "games": 0, "with": 0,
-                "against": 0, "wins_with": 0, "wins_against": 0, "last_seen": None,
-                "recent": []}
+        return {"name": names.get(p), "note": notes.get(p),
+                "aliases": [n for n in aliases.get(p, []) if n != names.get(p)],
+                "games": 0, "with": 0, "against": 0, "wins_with": 0,
+                "wins_against": 0, "last_seen": None, "recent": []}
     out = {}
     for r in rows:
         d = out.setdefault(r["puuid"], blank(r["puuid"]))
@@ -1292,10 +1315,11 @@ def backfill_participants_from_eog():
     patcha, w ktorych lacze zginelo przy splaszczaniu. Idempotentne:
     save_match_participants nadpisuje wiersze meczu w calosci."""
     with connect() as con:
-        mids = [r["match_id"] for r in con.execute("SELECT match_id FROM eog_raw")]
+        mids = [(r["match_id"], r["captured_at"]) for r in con.execute(
+            "SELECT match_id, captured_at FROM eog_raw")]
     filled = empty = rows = 0
-    for mid in mids:
-        n = save_match_participants(load_eog(mid) or {}, mid)
+    for mid, ts in mids:
+        n = save_match_participants(load_eog(mid) or {}, mid, ts)
         rows += n
         if n:
             filled += 1
@@ -3069,3 +3093,85 @@ def set_player_note(puuid, note, ts=None):
             "INSERT OR REPLACE INTO player_note (puuid, note, updated_at) VALUES (?,?,?)",
             (puuid, note, ts or int(time.time())))
     return note
+
+
+# ============================================================
+# (W) historia Riot ID. Kluczem tozsamosci jest puuid (staly), nazwa to
+# etykieta, a player_name trzyma tylko najnowsza - po zmianie Riot ID
+# "kim byl" ginelo. player_alias pamieta kazda widziana
+# nazwe z pierwszym i ostatnim widzeniem; front pokazuje najnowsza, starsze
+# jako "dawniej". Zasilanie: save_player_names (eog, pelna gra z odzysku,
+# sojusznicy z champ selecta) + jednorazowy backfill z blobow eog_raw
+# (kazdy ekran koncowy zna 10 Riot ID z chwili gry). Definicja NA KONCU
+# pliku: migrate() odpala init_*/upgrade_* w kolejnosci linii.
+PLAYER_ALIAS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS player_alias (
+    puuid      TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen  INTEGER NOT NULL,
+    PRIMARY KEY (puuid, name)
+);
+"""
+
+
+def init_player_alias():
+    with connect() as con:
+        con.executescript(PLAYER_ALIAS_SCHEMA)
+
+
+def save_player_aliases(rows):
+    """rows: (puuid, nazwa, ts). Nowa para dostaje wiersz, znana rozszerza
+    okno widzenia. Zwraca liczbe przyjetych wierszy."""
+    rows = [(p, n, ts, ts) for p, n, ts in rows if p and n]
+    if not rows:
+        return 0
+    with connect() as con:
+        con.executemany("""
+            INSERT INTO player_alias (puuid, name, first_seen, last_seen)
+            VALUES (?,?,?,?)
+            ON CONFLICT(puuid, name) DO UPDATE SET
+                first_seen = MIN(first_seen, excluded.first_seen),
+                last_seen = MAX(last_seen, excluded.last_seen)""", rows)
+    return len(rows)
+
+
+def player_aliases(puuids):
+    """puuid -> wszystkie widziane nazwy, od najswiezszej."""
+    puuids = [p for p in dict.fromkeys(puuids or []) if p]
+    if not puuids:
+        return {}
+    ph = ",".join("?" * len(puuids))
+    out = {}
+    with connect() as con:
+        for r in con.execute(
+                f"SELECT puuid, name FROM player_alias WHERE puuid IN ({ph}) "
+                "ORDER BY last_seen DESC, first_seen DESC", puuids):
+            out.setdefault(r["puuid"], []).append(r["name"])
+    return out
+
+
+def upgrade_player_alias_backfill():
+    """Jednorazowo: ostatnie nazwy z player_name i wszystkie Riot ID z blobow
+    eog_raw (z czasem zapisu ekranu) -> player_alias. Pomijane, gdy tabela
+    juz ma wiersze - migrate() biegnie przy kazdym starcie."""
+    import zlib
+    with connect() as con:
+        if con.execute("SELECT 1 FROM player_alias LIMIT 1").fetchone():
+            return
+        rows = [(r["puuid"], r["name"], r["seen_at"]) for r in con.execute(
+            "SELECT puuid, name, seen_at FROM player_name")]
+        blobs = [(r["payload"], r["captured_at"]) for r in con.execute(
+            "SELECT payload, captured_at FROM eog_raw")]
+    for payload, ts in blobs:
+        try:
+            block = json.loads(zlib.decompress(payload))
+        except Exception:
+            continue
+        for team in block.get("teams") or []:
+            for p in team.get("players") or []:
+                name = _riot_name(p)
+                if not p.get("puuid") or not name or p.get("botPlayer") or _bot_name(name):
+                    continue
+                rows.append((p["puuid"], name, ts))
+    save_player_aliases(rows)

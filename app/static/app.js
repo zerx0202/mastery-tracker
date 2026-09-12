@@ -25,6 +25,12 @@ const CDRAGON = id =>
 const icon = (k, cid) => k
   ? `https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${k}.png`
   : (cid ? CDRAGON(cid) : BLANK);
+// (W) nieudany obrazek zapamietuje adres, ktory padl: morph() nie przywraca
+// go przy nastepnym ticku (inaczej brakujaca ikona pobierala sie co sekunde)
+function imgFail(img) {
+  img.dataset.fallback = img.getAttribute("src") || "";
+  img.src = BLANK;
+}
 const esc = s => String(s ?? "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
 
 const ROMAN = ["I", "II", "III", "IV"];
@@ -240,44 +246,77 @@ async function playersFor(puuids) {
   return out;
 }
 
-/* (V) notatka o graczu: window.prompt wystarcza (jeden uzytkownik, siec
-   prywatna, zero frameworkow). Okno jest modalne - ticki renderNow z tego
-   czasu wyrzuca epoka renderu, PUT idzie po zamknieciu. Po zapisie cache
-   PLAYERS dostaje note, wiec zeton odswieza sie w nastepnym ticku. */
+/* (V/W) notatka o graczu: formularz w <dialog> (index.html), poza
+   regionami przepisywanymi tickiem - okno nie znika przy odswiezeniu.
+   Token API z localStorage (zapisywany od razu po wpisaniu w Systemie
+   albo tutaj, gdy go brak); po zapisie cache PLAYERS dostaje note
+   i widok odswieza sie natychmiast. */
 const noteTag = n => n ? `<span class="note" title="${escq(n)}">✎ ${
   esc(n.length > 40 ? n.slice(0, 39) + "…" : n)}</span>` : "";
+const tokenGet = () => { try { return localStorage.getItem("api_token") || ""; } catch (e) { return ""; } };
+const tokenSet = v => { try { localStorage.setItem("api_token", v); } catch (e) {} };
+const NOTE = {puuid: null, name: ""};
 
-async function editNote(puuid, name) {
-  if (!puuid || puuid.length !== 36) return false;
+function openNoteForm(puuid, name) {
+  if (!puuid || puuid.length !== 36) return;
+  NOTE.puuid = puuid;
+  NOTE.name = name || puuid.slice(0, 8);
   const cur = (PLAYERS[puuid] && PLAYERS[puuid].note) || "";
-  const txt = window.prompt(`Notatka o ${name || puuid.slice(0, 8)} (pusta = usuń):`, cur);
-  if (txt === null) return false;
-  let token = "";
-  try { token = localStorage.getItem("api_token") || ""; } catch (e) {}
-  try {
-    const r = await fetch(`/api/players/${encodeURIComponent(puuid)}/note`, {
-      method: "PUT", headers: {"Content-Type": "application/json", "X-API-Token": token},
-      body: JSON.stringify({note: txt.slice(0, 500)})});
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const out = await r.json();
-    // cache trzyma null dla nieznanego gracza - musi dostac obiekt, inaczej
-    // notatka nowego gracza czekalaby na twardy refresh
-    PLAYERS[puuid] = {...(PLAYERS[puuid] || {name: name || null, games: 0, with: 0,
-      against: 0, wins_with: 0, wins_against: 0, last_seen: null, recent: []}),
-      note: out.note};
-    return true;
-  } catch (e) {
-    alert("Nie udało się zapisać notatki: " + e.message
-      + (token ? "" : " (brak tokenu — wpisz go w System → konsola LCU)"));
-    return false;
-  }
+  $("note-who").textContent = NOTE.name;
+  $("note-text").value = cur;
+  $("note-del").hidden = !cur;
+  $("note-token-row").hidden = !!tokenGet();
+  $("note-err").hidden = true;
+  $("note-dlg").showModal();
+  $("note-text").focus();
 }
+
+async function saveNote(text) {
+  const typed = $("note-token").value.trim();
+  if (typed) tokenSet(typed);
+  const r = await fetch(`/api/players/${encodeURIComponent(NOTE.puuid)}/note`, {
+    method: "PUT", headers: {"Content-Type": "application/json", "X-API-Token": tokenGet()},
+    body: JSON.stringify({note: text.slice(0, 500)})});
+  if (r.status === 401) throw new Error("zły lub brakujący token API");
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const out = await r.json();
+  // cache trzyma null dla nieznanego gracza - musi dostac obiekt, inaczej
+  // notatka nowego gracza czekalaby na twardy refresh
+  PLAYERS[NOTE.puuid] = {...(PLAYERS[NOTE.puuid] || {name: NOTE.name, aliases: [],
+    games: 0, with: 0, against: 0, wins_with: 0, wins_against: 0, last_seen: null,
+    recent: []}), note: out.note};
+}
+
+function noteFail(prefix, e) {
+  const err = $("note-err");
+  err.textContent = prefix + e.message;
+  err.hidden = false;
+  if (/token/.test(e.message)) $("note-token-row").hidden = false;
+}
+function noteDone() {
+  $("note-dlg").close();
+  if (location.hash === "#/lab") renderLab(); else renderNow();
+}
+$("note-form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  try { await saveNote($("note-text").value); noteDone(); }
+  catch (e) { noteFail("Nie udało się zapisać: ", e); }
+});
+$("note-del").addEventListener("click", async () => {
+  try { await saveNote(""); noteDone(); }
+  catch (e) { noteFail("Nie udało się usunąć: ", e); }
+});
+$("note-cancel").addEventListener("click", () => $("note-dlg").close());
 /* (Q) sojusznik jako zeton: ikona championa, nazwa, wspolna historia
    ("razem 4 · 4/0" = gry razem · W/L z mojej perspektywy) albo "nowy";
    dotad szary drobny tekst w jednej linii (zrzut 4.09: slabo widoczni) */
 function allyChip(a, info) {
-  const img = `<img onerror="this.src=BLANK" src="${icon(a.key, a.championId)}" alt="">`;
-  const name = a.hidden ? "(ukryty)" : esc((a.name || "?").split("#")[0]);
+  const img = `<img onerror="imgFail(this)" src="${icon(a.key, a.championId)}" alt="">`;
+  // (W) dawne Riot ID w podpowiedzi przy nazwie - w zetonie zawsze biezaca
+  const old = info && info.aliases && info.aliases.length
+    ? ` title="dawniej: ${escq(info.aliases.join(", "))}"` : "";
+  const name = a.hidden ? "<span>(ukryty)</span>"
+    : `<span${old}>${esc((a.name || "?").split("#")[0])}</span>`;
   let hist = "";
   if (!a.hidden) {
     const parts = [];
@@ -290,7 +329,10 @@ function allyChip(a, info) {
   const note = info && info.note ? noteTag(info.note) : "";
   const clickable = a.puuid && a.puuid.length === 36
     ? ` data-puuid="${esc(a.puuid)}" data-name="${escq((a.name || "").split("#")[0])}"` : "";
-  return `<span class="ally${note ? " noted" : ""}"${clickable}>${img}<span>${name}</span>${hist}${note}</span>`;
+  // (W) klucz dla morph(): puuid, a dla ukrytego numer komorki
+  const key = a.puuid && a.puuid.length === 36 ? a.puuid : "cell" + (a.cellId ?? "");
+  return `<span class="ally${note ? " noted" : ""}" data-key="${esc(key)}"${clickable}>${
+    img}${name}${hist}${note}</span>`;
 }
 const allyChips = (allies, mates) =>
   `<span class="allies">${allies.map(a => allyChip(a, (mates || {})[a.puuid])).join("")}</span>`;
@@ -323,7 +365,7 @@ function livePanel(d, bal, cheat, pn, allies, mates) {
   return `<div class="panel" style="border-left:3px solid var(--ok);margin-bottom:22px">
     <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
       <span class="dot"></span>
-      <img onerror="this.src=BLANK" src="${icon(d.key, d.champion_id)}" alt=""
+      <img onerror="imgFail(this)" src="${icon(d.key, d.champion_id)}" alt=""
            style="width:34px;height:34px;border-radius:5px;background:var(--panel2)">
       <div style="font:700 22px/1 var(--display)">${esc(d.champion || "?")}</div>
       <div class="dim num">${Math.floor(d.minutes)} min · ${d.kills}/${d.deaths}/${d.assists}
@@ -364,9 +406,71 @@ function put(id, html) {
   const el = $(id);
   if (!el) return;
   LAST_HTML[id] = html;
-  el.innerHTML = html;
+  morph(el, html);
+}
+
+/* (W) Podmiana przez porownanie drzew zamiast innerHTML. Tick co 1 s
+   w champ selekcie i co 4 s w grze przepisywal tabele, zetony i panel live
+   od zera: ikony ladowaly sie ponownie, animacja kropki startowala od nowa,
+   hover i zaznaczenie ginely, uklad liczyl sie na nowo (zrzuty 12.09:
+   ekrany nadal migaly mimo partii U - to bylo zle podejscie, nie za malo
+   rezerwacji). Do DOM trafia tylko roznica: tekst, atrybut, nowy wiersz.
+   Elementy z data-key paruja sie po kluczu (wiersze rankingu, zetony),
+   reszta po pozycji i rodzaju wezla. */
+function morph(el, html) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  morphChildren(el, tpl.content);
+}
+const keyOf = n => n.nodeType === 1 && n.hasAttribute("data-key") ? n.getAttribute("data-key") : null;
+const sameKind = (a, b) => a.nodeType === b.nodeType && (a.nodeType !== 1 || a.tagName === b.tagName);
+function morphChildren(from, to) {
+  const byKey = new Map();
+  for (const o of from.childNodes) {
+    const k = keyOf(o);
+    if (k !== null) byKey.set(k, o);
+  }
+  let idx = 0;
+  for (const n of Array.from(to.childNodes)) {
+    const cur = from.childNodes[idx] || null;
+    const k = keyOf(n);
+    let o = null;
+    if (k !== null) {
+      o = byKey.get(k) || null;
+      if (o && !sameKind(o, n)) o = null;
+      if (o && o !== cur) from.insertBefore(o, cur);
+    } else if (cur && keyOf(cur) === null && sameKind(cur, n)) {
+      o = cur;
+    }
+    if (o) morphNode(o, n);
+    else from.insertBefore(n, cur);
+    idx++;
+  }
+  while (from.childNodes.length > idx) from.removeChild(from.lastChild);
+}
+function morphNode(o, n) {
+  if (n.nodeType !== 1) {
+    if (o.nodeValue !== n.nodeValue) o.nodeValue = n.nodeValue;
+    return;
+  }
+  for (const a of Array.from(o.attributes)) {
+    if (a.name !== "data-fallback" && !n.hasAttribute(a.name)) o.removeAttribute(a.name);
+  }
+  for (const a of Array.from(n.attributes)) {
+    // ikona, ktora juz raz padla, zostaje zastepnikiem (imgFail); inny adres
+    // kasuje te pamiec, zeby powrot do tej samej ikony probowal od nowa
+    if (a.name === "src" && o.dataset.fallback === a.value) continue;
+    if (o.getAttribute(a.name) !== a.value) {
+      if (a.name === "src") delete o.dataset.fallback;
+      o.setAttribute(a.name, a.value);
+    }
+  }
+  morphChildren(o, n);
 }
 let LOBBY_FAILS = 0, LAST_LOBBY = null;
+// (W) champion podgladany w hero po kliknieciu wiersza rankingu; null = lider.
+// Zerowany przy wejsciu/wyjsciu z champ selecta (inna lista)
+let HERO_PICK = null, HERO_SCOPE = null;
 
 async function renderNow() {
   const ep = ++NOW_EPOCH;
@@ -438,9 +542,9 @@ async function renderNow() {
     try { data = await api("/targets?limit=12"); } catch (e) {
       if (stale()) return;
       put("live-bar", barHtml);
-      $("hero").innerHTML = `<div class="hero empty"><div class="empty-state">
-        <h3>Nie można pobrać rankingu</h3><div>${esc(e.message)}</div></div></div>`;
-      $("cards").innerHTML = ""; $("cards-label").style.visibility = "hidden";
+      put("hero", `<div class="hero empty"><div class="empty-state">
+        <h3>Nie można pobrać rankingu</h3><div>${esc(e.message)}</div></div></div>`);
+      put("cards", ""); $("cards-label").style.visibility = "hidden";
       return;
     }
     if (stale()) return;
@@ -451,17 +555,21 @@ async function renderNow() {
   }
 
   if (stale()) return;
+  if (HERO_SCOPE !== inSelect) { HERO_SCOPE = inSelect; HERO_PICK = null; }
   if (!targets.length) {
-    $("hero").innerHTML = `<div class="hero empty"><div class="empty-state">
+    put("hero", `<div class="hero empty"><div class="empty-state">
       <h3>Nic do zrobienia w tej puli</h3>
       <div>Żaden z dostępnych championów nie zbliża do szczebla ${msName(GOAL - 1)}.</div>
-      </div></div>`;
-    $("cards").innerHTML = ""; $("cards-label").style.visibility = "hidden";
+      </div></div>`);
+    put("cards", ""); $("cards-label").style.visibility = "hidden";
     return;
   }
 
   // ---- hero ----
-  const b = targets[0];
+  // (W) hero = lider albo champion klikniety w rankingu (ta sama karta:
+  // szyna, model, notki patcha, sciaga); gdy wypadl z listy, wraca lider
+  const heroIdx = Math.max(0, targets.findIndex(t => t.champion_id === HERO_PICK));
+  const b = targets[heroIdx];
   const cons = b.expected_games_conservative;
   const gamesLine = (cons && Math.abs(cons - b.expected_games) > 1)
     ? `${Math.round(b.expected_games)}–${Math.round(cons)} gier`
@@ -495,9 +603,11 @@ async function renderNow() {
           b.steps_remaining === 1 ? "szczebel" : "szczeble"} do celu</small></div>
       </div>
       <div class="hero-side">
-        <div class="who"><span class="rank-badge lead">1</span><img onerror="this.src=BLANK" src="${icon(b.key, b.champion_id)}"
+        <div class="who"><span class="rank-badge lead">${heroIdx + 1}</span><img onerror="imgFail(this)" src="${icon(b.key, b.champion_id)}"
           alt="">${esc(b.name)}${patchNotes ? ` <a class="patch-link" href="${patchNotes}"
-          target="_blank" rel="noopener" title="zmiany championa w tym patchu">notki</a>` : ""}</div>
+          target="_blank" rel="noopener" title="zmiany championa w tym patchu">notki</a>` : ""}${
+          heroIdx ? ` <button type="button" class="hero-back" data-pick="0"
+          title="wróć do lidera rankingu">← lider</button>` : ""}</div>
         ${rail(b.milestone, GOAL, b.next_grade, b.next_need, b.next_have)}
         ${inSelect && poolBadges(b, lobbyTrade, inSelect)
           ? `<div style="margin-top:7px;margin-left:-8px">${poolBadges(b, lobbyTrade, inSelect)}</div>` : ""}
@@ -510,11 +620,13 @@ async function renderNow() {
       </div>
     </div>`);
 
-  const rest = targets.slice(1);
+  // (W) tabela = wszyscy poza championem w hero, z numerem z rankingu
+  const rest = targets.filter((t, i) => i !== heroIdx);
 
   // Ten sam uklad w obu widokach. Karty rozjezdzaly sie na trzy rozmiary
   // i powtarzaly te sama etykiete; tabela pokazuje wiecej w mniejszym miejscu.
-  $("cards-label").textContent = inSelect ? "Kolejność w tej puli" : "Ranking pozostałych";
+  const label = inSelect ? "Kolejność w tej puli" : "Ranking pozostałych";
+  if ($("cards-label").textContent !== label) $("cards-label").textContent = label;
   $("cards-label").style.visibility = "";
   $("cards").className = "";
 
@@ -522,7 +634,7 @@ async function renderNow() {
   const fmt = n => (n ?? 0).toLocaleString("pl-PL");
   const days = ts => ts ? Math.round((Date.now() - ts) / 86400000) : null;
 
-  $("cards").innerHTML = `<table class="pool-table">
+  put("cards", `<table class="pool-table">
     <thead><tr>
       <th style="width:44px"></th><th>Champion</th>
       <th class="r" style="width:92px" title="ile ocen ≥ progu brakuje do celu (nie szczebli)">Ocen do celu</th>
@@ -531,13 +643,13 @@ async function renderNow() {
       <th class="r" style="width:100px">Maestria</th>
       <th class="r" style="width:92px">Ostatnio</th>
     </tr></thead>
-    <tbody>${shownRows.map((t, i) => {
+    <tbody>${shownRows.map(t => {
       const own = t.model_own_games ?? 0;
       const d = days(t.last_play);
       return `
-      <tr>
-        <td class="rank-cell">${i + 2}</td>
-        <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(t.key, t.champion_id)}" alt="">
+      <tr data-key="${t.champion_id}" data-pick="${t.champion_id}" title="kliknij: pokaż w karcie u góry">
+        <td class="rank-cell">${targets.indexOf(t) + 1}</td>
+        <td><div class="champ-cell"><img onerror="imgFail(this)" src="${icon(t.key, t.champion_id)}" alt="">
           ${esc(t.name)}${verdictChip((notesAll.verdicts || {})[t.champion_id])}${poolBadges(t, lobbyTrade, inSelect)}</div></td>
         <td class="r num" title="${t.steps_remaining} ${t.steps_remaining === 1 ? "szczebel" : "szczebli"} do celu">${
           t.grades_remaining ?? t.steps_remaining}</td>
@@ -552,7 +664,7 @@ async function renderNow() {
     }).join("")}</tbody></table>
     ${!inSelect && rest.length > shownRows.length
       ? `<div class="msg" style="text-align:center">i ${
-          rest.length - shownRows.length} dalszych championów</div>` : ""}`;
+          rest.length - shownRows.length} dalszych championów</div>` : ""}`);
 }
 
 /* Panel boczny: to, po co dzis trzeba wchodzic na podstrony.
@@ -577,7 +689,7 @@ async function renderSide() {
 
     const last = (gr.grades || []).map(g => `
       <div class="mini">
-        <img onerror="this.src=BLANK" src="${icon(g.key, g.champion_id)}" alt="">
+        <img onerror="imgFail(this)" src="${icon(g.key, g.champion_id)}" alt="">
         <span>${esc(g.name)}</span>
         <span class="chip ${g.grade.startsWith(">=") ? "gold" : ""}"
           style="margin-left:auto">${esc(g.grade)}</span>
@@ -630,11 +742,12 @@ async function renderSide() {
               <span>brakuje ~${-slack} dni</span></div>
              <div class="tagline" style="color:var(--warn)">Do końca „${esc(mission.name)}"
               za mało czasu na pewniaki — bierz wysokie, choć niepewne P.</div>`
-          : `<div class="kv"><span>Projekcja misji
-                <small class="dim">(symulacja)</small></span>
-              <span>~${needDays} dni <small class="dim">(${d25}–${d75};
-                mediana ${sim.median} gier, pula ${sim.pool_size};
-                zapas ${slack}, zegar: ${esc(mission.name)})</small></span></div>`;
+          // (W) w panelu tylko liczba dni; reszta w podpowiedzi (zrzut 12.09:
+          // etykieta ucieta do "Projekcja ...", dopiski po "~9 dni" zbedne)
+          : `<div class="kv"><span>Projekcja</span>
+              <span title="${escq(`symulacja: mediana ${sim.median} gier przy ${pa.tempo
+                } gier/dzień, przedział ${d25}–${d75} dni; zapas ${slack
+                } dni do końca „${mission.name}"`)}">~${needDays} dni</span></div>`;
       } else if (pa.best_expected && pa.tempo > 0 && mission) {
         const needDays = Math.ceil(pa.best_expected / pa.tempo);
         const slack = Math.floor(mission.days_left) - needDays;
@@ -643,12 +756,9 @@ async function renderSide() {
               <span>brakuje ~${-slack} dni</span></div>
              <div class="tagline" style="color:var(--warn)">Do końca „${esc(mission.name)}"
               za mało czasu na pewniaki — bierz wysokie, choć niepewne P.</div>`
-          : `<div class="kv"><span>Projekcja misji
-                <small class="dim">(dolna granica)</small></span>
-              <span>~${needDays} dni <small class="dim">(zapas ${slack},
-                zegar: ${esc(mission.name)})</small></span></div>
-             <div class="tagline">Projekcja liczy się liderem rankingu w każdej
-              grze — losowanie puli realnie ją wydłuża.</div>`;
+          : `<div class="kv"><span>Projekcja</span>
+              <span title="${escq(`dolna granica: lider rankingu w każdej grze (losowanie puli realnie wydłuża); zapas ${
+                slack} dni do końca „${mission.name}"`)}">~${needDays} dni</span></div>`;
       }
       passHtml = `
       <div class="panel">
@@ -744,7 +854,7 @@ async function renderGrades() {
     const ps = (ok("S-") && g.p_S != null) ? (100 * g.p_S).toFixed(0) + "%" : "—";
     return `<tr class="grade-row" data-mid="${esc(g.match_id || "")}" style="cursor:pointer" title="kliknij: czemu taka ocena">
       <td><span class="chip ${cls}">${esc(g.grade)}</span></td>
-      <td><div class="champ-cell"><img onerror="this.src=BLANK" src="${icon(g.key, g.champion_id)}" alt="">
+      <td><div class="champ-cell"><img onerror="imgFail(this)" src="${icon(g.key, g.champion_id)}" alt="">
         ${esc(g.name)}</div></td>
       <td class="num">${g.kills}/${g.deaths}/${g.assists}</td>
       <td class="r num">${g.gpm}</td>
@@ -890,7 +1000,7 @@ async function renderSplit() {
         <div class="kv"><span>Gry / winrate</span>
           <span>${rc.games} · ${wr}%</span></div>
         <div class="kv"><span>Czas w grze</span><span>${rc.hours} h</span></div>
-        <div class="kv"><span>Różnych championów</span>
+        <div class="kv"><span title="różne postacie, którymi grałeś od startu splitu">Zagranych championów</span>
           <span>${rc.unique_champions}</span></div>
         <div class="kv"><span>Oceny S / A</span>
           <span>${rc.s_count} / ${rc.a_count}</span></div>
@@ -956,6 +1066,10 @@ async function renderSplit() {
   const plotW = W - 2 * PAD, bw = Math.min(46, plotW / dayBars.length * 0.62);
   const xB = i2 => PAD + plotW * (i2 + 0.5) / dayBars.length;
   const yB = v => H - PAD - (H - 2 * PAD) * v / vMax;
+  // (W) podpis co k-ty dzien: przy 28 dniach na 820 px podpisy nachodzily
+  // na siebie ("17 sie18 sie19 sie"); k tak dobrane, zeby podpis mial >= 56 px,
+  // pozostale dni dostaja sama kreske
+  const labelStep = Math.max(1, Math.ceil(dayBars.length / Math.floor(plotW / 56)));
 
   $("split-chart").insertAdjacentHTML("beforeend", `
     <div class="panel" style="margin-top:14px">
@@ -974,7 +1088,9 @@ async function renderSplit() {
             text-anchor="middle" fill="var(--gold)"
             font-size="12" font-family="var(--mono)">+${b.v}${
             b.hit3 ? ' <tspan fill="#F4E9CF" font-weight="700">· III</tspan>' : ""}</text>`).join("")}
-        ${dayBars.map((b, i2) => `
+        ${dayBars.map((b, i2) => `<line x1="${xB(i2).toFixed(1)}" x2="${xB(i2).toFixed(1)}"
+          y1="${H - PAD}" y2="${H - PAD + 4}" stroke="var(--line)"/>`).join("")}
+        ${dayBars.map((b, i2) => i2 % labelStep ? "" : `
           <text x="${xB(i2).toFixed(1)}" y="${H - PAD + 16}" text-anchor="middle"
             fill="var(--dim)" font-size="10.5" font-family="var(--mono)">${
             fmtD(b.k).replace(" ", "\u00a0")}</text>`).join("")}
@@ -1062,8 +1178,13 @@ async function renderLab() {
   if (rp && rp.players && rp.players.length) {
     const prow = rp.players.map(p => {
       const [nm, tag] = (p.name || p.puuid.slice(0, 8)).split("#");
-      return `<tr>
-      <td>${esc(nm)}<small class="dim"> ${esc(tag || "")}</small></td>
+      // (W) dawne Riot ID pod biezaca nazwa - ten sam puuid, inna etykieta
+      const old = p.aliases || [];
+      const oldHtml = old.length ? `<div class="dim" style="font-size:11px" title="${
+        escq(old.join(", "))}">dawniej ${esc(old.slice(0, 2).join(", "))}${
+        old.length > 2 ? ` +${old.length - 2}` : ""}</div>` : "";
+      return `<tr data-key="${esc(p.puuid)}">
+      <td>${esc(nm)}<small class="dim"> ${esc(tag || "")}</small>${oldHtml}</td>
       <td class="r num">${p.with}</td>
       <td class="r num">${p.wins_with}/${p.with - p.wins_with}</td>
       <td class="r num">${p.against}</td>
@@ -1075,13 +1196,11 @@ async function renderLab() {
         esc(p.puuid)}" data-name="${escq(nm)}" title="Edytuj notatkę">✎</button></td>
     </tr>`; }).join("");
     $("lab-body").insertAdjacentHTML("beforeend", `<div class="panel" style="margin-top:14px">
-      <div class="eyebrow">Powtarzający się gracze (karta 9)</div>
+      <div class="eyebrow">Powtarzający się gracze</div>
       <table><thead><tr><th>Gracz</th><th class="r">Razem</th><th class="r">W/L razem</th>
         <th class="r">Przeciw</th><th class="r">W/L przeciw</th><th class="r">Ostatnio</th>
         <th>Notatka</th></tr></thead>
-      <tbody>${prow}</tbody></table>
-      <div class="tagline">Tożsamości z ekranów końcowych i odzysku (10 graczy na mecz)
-        oraz z champ selecta; W/L z Twojej perspektywy; nazwa = ostatnie znane Riot ID.</div></div>`);
+      <tbody>${prow}</tbody></table></div>`);
   }
 }
 
@@ -1300,7 +1419,8 @@ async function renderSystem() {
       <div class="eyebrow">Konsola LCU</div>
       <div class="sub" style="margin-bottom:10px">Surowy GET do klienta gry —
         wykonuje agent przy najbliższym obiegu (~3 s), wyłącznie odczyty.
-        Token zapisu ten sam co w agencie.</div>
+        Token ten sam co w agencie; zapisuje się w tej przeglądarce od razu
+        po wpisaniu i służy też notatkom o graczach: <b id="token-state"></b></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <input id="probe-token" type="password" placeholder="X-API-Token"
           style="width:170px">
@@ -1313,14 +1433,24 @@ async function renderSystem() {
     </div>`;
 
   // (42) konsola: zlecenie -> agent wykonuje -> odpytujemy wynik
-  try { $("probe-token").value = localStorage.getItem("api_token") || ""; }
-  catch (e) {}
+  // (W) token zapisywany przy kazdym wpisaniu, nie dopiero przy "Wyslij":
+  // wpisany i porzucony przy wyjsciu z zakladki znikal, wiec notatki
+  // dostawaly 401 (uwaga czlowieka 12.09)
+  const tokenState = () => {
+    const has = !!tokenGet();
+    $("token-state").textContent = has ? "zapisany" : "brak";
+    $("token-state").style.color = has ? "var(--ok)" : "var(--warn)";
+  };
+  $("probe-token").value = tokenGet();
+  tokenState();
+  $("probe-token").addEventListener("input", () => {
+    tokenSet($("probe-token").value.trim());
+    tokenState();
+  });
   $("probe-run").addEventListener("click", async () => {
     const out = $("probe-out");
     const path = $("probe-path").value.trim();
     if (!path) return;
-    try { localStorage.setItem("api_token", $("probe-token").value); }
-    catch (e) {}
     out.textContent = "zlecam…";
     let created;
     try {
@@ -1394,13 +1524,13 @@ function tick() {
 
 addEventListener("hashchange", route);
 $("lab-stat").addEventListener("change", renderLab);
-// (V) delegacja: zetony i przycisk w tabeli sa przepisywane przez innerHTML
-// co render, wiec jeden handler siedzi na document
-document.addEventListener("click", async ev => {
-  const el = ev.target.closest(".ally[data-puuid], .note-edit[data-puuid]");
-  if (!el) return;
-  const ok = await editNote(el.dataset.puuid, el.dataset.name);
-  if (ok && el.classList.contains("note-edit")) renderLab();
+// (V/W) delegacja: zetony, wiersze rankingu i przyciski sa podmieniane
+// przez morph() co render, wiec jeden handler siedzi na document
+document.addEventListener("click", ev => {
+  const note = ev.target.closest(".ally[data-puuid], .note-edit[data-puuid]");
+  if (note) { openNoteForm(note.dataset.puuid, note.dataset.name); return; }
+  const pick = ev.target.closest("[data-pick]");
+  if (pick) { HERO_PICK = +pick.dataset.pick || null; renderNow(); }
 });
 // (J) w champ selekcie odswiezamy co sekunde - /lobby jest cache'owane
 // (partia F), a plakietki wymiany nie moga czekac 4 s; poza champ selektem

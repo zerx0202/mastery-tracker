@@ -235,9 +235,10 @@ def test_champ_select_bar_shows_ally_chips(page):
     assert page.locator("#live-bar .ally img").count() == 2
 
 
-def test_ally_chip_shows_note_and_prompt_edits_it(page):
-    # (V) notatka o graczu w zetonie champ selecta: skrot + pelny tekst
-    # w title, klik otwiera prompt, zapis odswieza zeton w nastepnym ticku
+def test_ally_chip_opens_note_form_and_saves(page):
+    # (V/W) notatka o graczu: klik w zeton otwiera formularz w <dialog>
+    # (zamiast window.prompt), zapis idzie z formularza, zeton odswieza sie
+    # od razu; skrot w zetonie + pelny tekst w title
     now = int(time.time())
     db.set_lobby([45, 12, 99], "KIWI", "limited", now, trade_ids=[12], allies=[
         {"cellId": 1, "championId": 12, "puuid": "a" * 36, "name": "Zed#EUW", "hidden": False},
@@ -250,7 +251,81 @@ def test_ally_chip_shows_note_and_prompt_edits_it(page):
     note = chip.query_selector(".note")
     assert note.get_attribute("title") == full and note.inner_text().endswith("…")
     assert page.locator("#live-bar .ally[data-puuid]").count() == 1   # ukryty bez puuid
-    page.once("dialog", lambda d: d.accept("nowa notatka"))
     page.click("#live-bar .ally[data-puuid]")
+    page.wait_for_selector("#note-dlg[open]")
+    assert page.input_value("#note-text") == full
+    assert "Zed" in page.inner_text("#note-who")
+    page.fill("#note-text", "nowa notatka")
+    page.click("#note-save")
+    page.wait_for_selector("#note-dlg", state="hidden")
     page.wait_for_selector('#live-bar .note:has-text("nowa notatka")')
     assert db.get_player_notes(["a" * 36]) == {"a" * 36: "nowa notatka"}
+    # "Usun" kasuje wiersz i zeton traci notatke
+    page.click("#live-bar .ally[data-puuid]")
+    page.wait_for_selector("#note-dlg[open]")
+    page.click("#note-del")
+    page.wait_for_selector("#note-dlg", state="hidden")
+    page.wait_for_selector("#live-bar .ally.noted", state="detached")
+    assert db.get_player_notes(["a" * 36]) == {}
+
+
+def test_api_token_persists_without_running_a_probe(page):
+    # (W) token wpisany w Systemie zapisuje sie od razu - dotad dopiero
+    # przycisk "Wyslij" go utrwalal, wiec po wyjsciu z zakladki znikal
+    page.click('nav a[href="#/system"]')
+    page.wait_for_selector("#probe-token")
+    page.wait_for_selector('#token-state:has-text("brak")')
+    page.fill("#probe-token", "sekret")
+    page.wait_for_selector('#token-state:has-text("zapisany")')
+    page.click('nav a[href="#/"]')
+    page.wait_for_selector("#v-now:not([hidden])")
+    page.click('nav a[href="#/system"]')
+    page.wait_for_selector("#probe-token")
+    assert page.input_value("#probe-token") == "sekret"
+    assert page.evaluate("localStorage.getItem('api_token')") == "sekret"
+
+
+def test_ranking_row_click_shows_that_champion_in_hero(page):
+    # (W) klik w wiersz rankingu = ta sama karta hero dla tego championa
+    # (numer z rankingu, tabela bez niego), "lider" wraca do lidera
+    row = page.wait_for_selector("#cards tr[data-pick]")
+    name = row.query_selector(".champ-cell").inner_text().split()[0]
+    row.click()
+    page.wait_for_selector('#hero .rank-badge:has-text("2")')
+    assert name in page.inner_text("#hero .who")
+    page.wait_for_selector('#cards tr[data-pick] .rank-cell:has-text("1")')
+    page.click("#hero .hero-back")
+    page.wait_for_selector('#hero .rank-badge:has-text("1")')
+    page.wait_for_selector("#hero .hero-back", state="detached")
+
+
+def test_tick_keeps_dom_nodes_alive(page):
+    # (W) morph zamiast innerHTML: po kilku tickach (co 1 s w champ selekcie)
+    # tabela, wiersz i pasek champ selecta to wciaz te same wezly - dotad
+    # kazdy tick tworzyl je od nowa i ekran migal
+    page.wait_for_selector("#cards tr[data-pick]")
+    page.wait_for_selector("#live-bar .live")
+    page.evaluate("""() => {
+        document.querySelector('#cards table').__keep = 1;
+        document.querySelector('#cards tr[data-pick]').__keep = 1;
+        document.querySelector('#live-bar .live').__keep = 1; }""")
+    page.wait_for_timeout(2600)
+    assert page.evaluate("document.querySelector('#cards table').__keep") == 1
+    assert page.evaluate("document.querySelector('#cards tr[data-pick]').__keep") == 1
+    assert page.evaluate("document.querySelector('#live-bar .live').__keep") == 1
+
+
+def test_lab_recurring_players_show_old_ids_without_footnote(page):
+    # (W) "Powtarzajacy sie gracze" bez dopisku (karta 9) i bez stopki;
+    # dawne Riot ID pod biezaca nazwa
+    from tests.test_partia_m import _game
+    my, a = "m" * 36, "a" * 36
+    now = int(time.time())
+    _game("EUW1_1", 1, 1, now - 7200, [(my, "Ja#1", 100, 45), (a, "Stara#EUW", 100, 238)])
+    _game("EUW1_2", 2, 0, now - 3600, [(my, "Ja#1", 200, 45), (a, "Nowa#EUW", 100, 238)])
+    db.save_player_names([(a, "Nowa#EUW")], now + 100)
+    page.click('nav a[href="#/lab"]')
+    panel = page.wait_for_selector('#v-lab .panel:has-text("Powtarzający się gracze")')
+    txt = panel.inner_text()
+    assert "(karta 9)" not in txt and "Tożsamości" not in txt
+    assert "Nowa" in txt and "dawniej Stara#EUW" in txt

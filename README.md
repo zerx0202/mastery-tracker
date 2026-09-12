@@ -98,7 +98,11 @@ LCU trzyma je płasko w statystykach.
 Z bloku końcowego zapisywane są też tożsamości wszystkich dziesięciu graczy
 (`match_participant`: mecz → PUUID per slot, ta sama numeracja co
 w statystykach) — spłaszczanie odrzuca pola nienumeryczne, więc bez osobnej
-tabeli łącze ginęło. Surowe bloki ocen (`champion-mastery-updates`) są
+tabeli łącze ginęło. Nazwa gracza to etykieta przy stałym PUUID: `player_name`
+trzyma ostatnie znane Riot ID, `player_alias` każde widziane (z ekranów
+końcowych, odzysku i champ selecta) — po zmianie Riot ID front pokazuje
+nowe, a stare jako „dawniej". `player_note` to ręczne notatki o graczach
+widoczne w champ selekcie i w grze. Surowe bloki ocen (`champion-mastery-updates`) są
 archiwizowane w całości w `grade_raw` (wzorzec `eog_raw`): zapis wyciąga
 kilkanaście pól, a resztę trzyma skompresowany blob — ubezpieczenie na
 wypadek, gdyby Riot przebudował system ocen.

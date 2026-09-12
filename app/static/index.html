@@ -86,6 +86,28 @@
 
 </main>
 
+<!-- (V/W) notatka o graczu: formularz poza regionami przepisywanymi tickiem -->
+<dialog id="note-dlg">
+  <form id="note-form">
+    <div class="eyebrow">Notatka o graczu</div>
+    <div class="who" id="note-who"></div>
+    <textarea id="note-text" rows="4" maxlength="500"
+      placeholder="np. flamer, mutuj od startu · dobry adc, trzymaj się go"></textarea>
+    <div id="note-token-row" hidden>
+      <label for="note-token">Token API <small>(ten sam co w agencie; zapisze się
+        w tej przeglądarce)</small></label>
+      <input id="note-token" type="password" autocomplete="off">
+    </div>
+    <div id="note-err" class="warn" hidden></div>
+    <div class="note-actions">
+      <button type="button" id="note-del">Usuń</button>
+      <span class="spacer"></span>
+      <button type="button" id="note-cancel">Anuluj</button>
+      <button type="submit" id="note-save">Zapisz</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="app.js" defer></script>
 </body>
 </html>
