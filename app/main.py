@@ -540,8 +540,8 @@ async def _targets(limit, only, ids, mode):
             continue
         if wanted and norm(name) not in wanted and norm(r["key"] or "") not in wanted:
             continue
-        if r["milestone"] >= GOAL:
-            continue
+        # (23.09) championi na celu i powyzej ZOSTAJA: bonus milestone jest
+        # powtarzalny, wiec ich celem jest nastepny bonus (scoring.row_goal)
 
         out.append({
             "champion_id": r["champion_id"],

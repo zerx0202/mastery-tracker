@@ -441,3 +441,12 @@ def test_split_value_labels_do_not_collide(page):
                 assert (b - a) * 22 >= (width(vals[a]) + width(vals[b])) / 2, (a, b)
     wide = page.evaluate(f"splitValueLabels({vals}, 60)")
     assert all(wide[i] for i in range(8)), "przy szerokim wykresie podpis ma kazdy"
+
+
+def test_rail_extends_to_next_bonus(page):
+    # (23.09) champion po bonusie 1 ma cel "bonus 2" - szyna i legenda
+    # siegaja nastepnego bonusu zamiast konczyc sie na celu misji
+    page.wait_for_selector("#hero .who")
+    html = page.evaluate("rail(5, 5, 'S-', 2, 1)")
+    assert "bonus 2" in html and "Do <b>bonus 2</b>" in html
+    assert html.count('class="chev done"') == 5

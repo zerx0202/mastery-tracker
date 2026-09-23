@@ -85,6 +85,25 @@ def _have(grades_earned, grade):
     return sum(1 for g in grades_earned or [] if GRADE_RANK.get(g, -1) >= lo)
 
 
+def step_for(ladder, m):
+    """Szczebel m drabinki. (23.09) Bonus milestone jest powtarzalny: powyzej
+    ostatniego znanego szczebla, gdy ten jest bonusowy, kolejny bonus ma ten
+    sam wymog (drabinka widzi dopiero szczeble, na ktorych ktos stoi)."""
+    step = ladder.get(m)
+    if step is not None or not ladder:
+        return step
+    top = max(ladder)
+    if m > top and ladder[top].get("bonus"):
+        return ladder[top]
+    return None
+
+
+def row_goal(milestone, goal):
+    """Cel championa: cel misji, a po jego osiagnieciu nastepny bonus -
+    bonus milestone sie powtarza i dalej liczy sie do zadania (23.09)."""
+    return max(goal, milestone + 1)
+
+
 def expected_games(champion_id, milestone, goal, ladder, rates, prior,
                    grades_earned=None):
     """Rozklada droge do celu na szczeble i sumuje (brakujace oceny)/p.
@@ -99,7 +118,7 @@ def expected_games(champion_id, milestone, goal, ladder, rates, prior,
     steps = []
     known = True
     for m in range(milestone, goal):
-        step = ladder.get(m)
+        step = step_for(ladder, m)
         if step is None:
             known = False
             total += UNKNOWN_STEP_COST
@@ -131,7 +150,7 @@ def expected_games_prior_only(milestone, goal, ladder, prior, grades_earned=None
     Krotnosc szczebla i uzbierane oceny jak w expected_games."""
     total = 0.0
     for m in range(milestone, goal):
-        step = ladder.get(m)
+        step = step_for(ladder, m)
         if step is None:
             total += UNKNOWN_STEP_COST
             continue
@@ -147,13 +166,15 @@ def score_rows(rows, ladder, rates, prior, goal):
     for r in rows:
         cid = r["champion_id"]
         earned = r.get("grades_earned")
-        exp, steps, known = expected_games(cid, r["milestone"], goal, ladder,
+        g = row_goal(r["milestone"], goal)
+        exp, steps, known = expected_games(cid, r["milestone"], g, ladder,
                                            rates, prior, earned)
 
+        r["goal"] = g
         r["expected_games"] = round(exp, 1)
         r["path"] = steps
         r["path_known"] = known
-        r["steps_remaining"] = max(0, goal - r["milestone"])
+        r["steps_remaining"] = max(0, g - r["milestone"])
 
         # najblizszy szczebel - to widzisz w champ selekcie; krotnosc
         # i uzbierane oceny ida do szyny ("S- x2, masz 1")
@@ -174,7 +195,7 @@ def score_rows(rows, ladder, rates, prior, goal):
 
         # ile wyszloby bez wlasnych wynikow - miara tego, jak bardzo
         # optymistyczna ocena opiera sie na garstce gier
-        cons = expected_games_prior_only(r["milestone"], goal, ladder, prior, earned)
+        cons = expected_games_prior_only(r["milestone"], g, ladder, prior, earned)
         r["expected_games_conservative"] = round(cons, 1)
         r["optimism"] = round(cons / exp, 2) if exp > 0 else None
 

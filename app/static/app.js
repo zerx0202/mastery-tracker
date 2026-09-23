@@ -40,6 +40,8 @@ let GOAL = 4;
 
 /* ---------- szyna milestone ---------- */
 function rail(milestone, goal, nextGrade, need, have) {
+  // (23.09) po celu misji szyna siega nastepnego bonusu (bonus powtarzalny)
+  goal = Math.max(goal, milestone + 1);
   const cells = [];
   for (let i = 0; i < goal; i++) {
     const cls = i < milestone ? "done" : (i === milestone ? "next" : "");
