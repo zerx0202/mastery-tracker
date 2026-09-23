@@ -1090,6 +1090,7 @@ async function renderSplit() {
   // na siebie ("17 sie18 sie19 sie"); k tak dobrane, zeby podpis mial >= 56 px,
   // pozostale dni dostaja sama kreske
   const labelStep = Math.max(1, Math.ceil(dayBars.length / Math.floor(plotW / 56)));
+  const showVal = splitValueLabels(dayBars.map(b => b.v), plotW / dayBars.length);
 
   $("split-chart").insertAdjacentHTML("beforeend", `
     <div class="panel" style="margin-top:14px">
@@ -1103,11 +1104,11 @@ async function renderSplit() {
           <rect x="${(xB(i2) - bw / 2).toFixed(1)}" y="${yB(b.v).toFixed(1)}"
             width="${bw.toFixed(1)}" height="${(H - PAD - yB(b.v)).toFixed(1)}"
             rx="3" fill="var(--gold)"
-            ${b.hit3 ? 'stroke="#F4E9CF" stroke-width="2"' : ""}/>
-          <text x="${xB(i2).toFixed(1)}" y="${(yB(b.v) - 6).toFixed(1)}"
+            ${b.hit3 ? 'stroke="#F4E9CF" stroke-width="2"' : ""}><title>${
+            fmtD(b.k)}: +${b.v} marks${b.hit3 ? " · champion na III" : ""}</title></rect>
+          ${showVal[i2] ? `<text x="${xB(i2).toFixed(1)}" y="${(yB(b.v) - 6).toFixed(1)}"
             text-anchor="middle" fill="var(--gold)"
-            font-size="12" font-family="var(--mono)">+${b.v}${
-            b.hit3 ? ' <tspan fill="#F4E9CF" font-weight="700">· III</tspan>' : ""}</text>`).join("")}
+            font-size="12" font-family="var(--mono)">+${b.v}</text>` : ""}`).join("")}
         ${dayBars.map((b, i2) => `<line x1="${xB(i2).toFixed(1)}" x2="${xB(i2).toFixed(1)}"
           y1="${H - PAD}" y2="${H - PAD + 4}" stroke="var(--line)"/>`).join("")}
         ${dayBars.map((b, i2) => i2 % labelStep ? "" : `
@@ -1116,6 +1117,25 @@ async function renderSplit() {
             fmtD(b.k).replace(" ", "\u00a0")}</text>`).join("")}
       </svg>
     </div>`);
+}
+
+/* (23.09) Ktore slupki marks dostaja podpis wartosci. Przy ~22 px na dzien
+   podpisy "+13 · III" nachodzily na siebie; "III" dubluje obrys slupka
+   (legenda), wiec zostaje sama wartosc. Podpisy przyjmowane od najwyzszej
+   wartosci (remis: lewy), kazdy tylko wtedy, gdy nie zachodzi na zaden juz
+   przyjety - szczyty zawsze maja podpis, reszta jest w tooltipie slupka. */
+function splitValueLabels(values, slotPx) {
+  const width = v => String("+" + v).length * 7.2 + 4;
+  const order = values.map((v, i) => i).filter(i => values[i])
+    .sort((a, b) => values[b] - values[a] || a - b);
+  const shown = values.map(() => false);
+  const taken = [];
+  for (const i of order) {
+    const clash = taken.some(j =>
+      Math.abs(i - j) * slotPx < (width(values[i]) + width(values[j])) / 2);
+    if (!clash) { shown[i] = true; taken.push(i); }
+  }
+  return shown;
 }
 
 /* ---------- LABORATORIUM ---------- */
@@ -1247,7 +1267,9 @@ async function renderSystem() {
 
   // (A6) progi wieku: brak swiezego snapshotu >48 h znaczy, ze dobowy cron
   // nie domyka dziur w milestone'ach - dokladnie to, co mial krzyczec
-  const AGE_WARN = {snapshot: 48 * 3600, snapshot_cron: 48 * 3600};
+  // (23.09) bez snapshot_cron: cron robi snapshot tylko po 20 h bez zadnego,
+  // wiec przy codziennym graniu jest "stary" z definicji - falszywy alarm
+  const AGE_WARN = {snapshot: 48 * 3600};
   const seen = Object.entries(d.last_seen).map(([k, ts]) => {
     const old = AGE_WARN[k] && (d.now - (ts || 0)) > AGE_WARN[k];
     return `<div class="kv"><span>${LABELS[k] || k}</span>

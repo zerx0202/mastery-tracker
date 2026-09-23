@@ -1882,7 +1882,7 @@ def match_percentiles(match_id):
     return out
 
 
-def agent_activity_gaps(limit=5, slack=300):
+def agent_activity_gaps(limit=5, slack=300, window=20):
     """(E) Watchdog "grano bez agenta": miedzy snapshotami punkty maestrii
     urosly, a agent nie zameldowal ZADNEGO ekranu koncowego w tym oknie.
     Gry sa odzyskiwalne (P6/backfill), bezpowrotnie przepadaja oceny sprzed
@@ -1897,6 +1897,14 @@ def agent_activity_gaps(limit=5, slack=300):
             "GROUP BY snapshot_id")}
         eog_ts = [r["ts"] for r in con.execute(
             "SELECT ts FROM event_log WHERE kind='eog'")]
+        # (23.09) luka ma sens, dopoki jej gry siedza w oknie `window`
+        # ostatnich gier historii klienta - pozniej baner (10.09) wisial bez
+        # konca. Granica = start `window`-tej najnowszej gry (ms albo s).
+        cut = con.execute(
+            "SELECT CASE WHEN game_creation > 100000000000 THEN game_creation / 1000 "
+            "ELSE game_creation END t FROM match_player "
+            "ORDER BY t DESC LIMIT 1 OFFSET ?", (window - 1,)).fetchone()
+    cutoff = cut["t"] if cut else None
     gaps = []
     for a, b in zip(snaps, snaps[1:], strict=False):
         delta = (totals.get(b["id"]) or 0) - (totals.get(a["id"]) or 0)
@@ -1904,6 +1912,8 @@ def agent_activity_gaps(limit=5, slack=300):
             continue
         lo, hi = a["taken_at"] - slack, b["taken_at"] + slack
         if any(lo <= t <= hi for t in eog_ts):
+            continue
+        if cutoff is not None and b["taken_at"] < cutoff:
             continue
         gaps.append({"from_ts": a["taken_at"], "to_ts": b["taken_at"],
                      "points_delta": delta})

@@ -379,3 +379,65 @@ def test_page_keeps_room_for_scrollbar(page):
     page.wait_for_selector("#hero .who")
     gutter = page.evaluate("getComputedStyle(document.documentElement).scrollbarGutter")
     assert gutter == "stable"
+
+
+def test_agent_uri_list_stays_inside_its_card(page):
+    # (23.09) dlugie URI z WS wychodzily poza karte Agenta w prawo
+    db.set_json_setting("agent_health", {
+        "ts": int(time.time()), "queue": 0, "bad": 0, "ws_ok": True,
+        "ws_events": {"total": 1, "uris": {
+            "/lol-client-config/v3/client-config/lol.client_settings.champion_select."
+            "enemy_scouting_card_mastery_and_recent_enabled": 1,
+            "/riot-messaging-service/v1/message/championmastery/v1/notifications/"
+            "champion-mastery-change": 4}}})
+    page.click('nav a[href="#/system"]')
+    panel = page.wait_for_selector('#v-system .panel:has-text("URI eog/mastery")')
+    over = panel.evaluate("p => p.scrollWidth - p.clientWidth")
+    assert over <= 1, f"tresc wystaje {over} px poza karte"
+
+
+def test_snapshot_cron_age_is_not_a_warning(page):
+    # (23.09) cron robi snapshot tylko po 20 h bez zadnego - przy codziennym
+    # graniu naturalnie "stary"; alarm wieku zostaje na samym snapshot
+    with db.connect() as con:
+        insert_row(con, "event_log", ts=int(time.time()) - 5 * 86400,
+                   kind="snapshot_cron", detail="{}")
+    page.click('nav a[href="#/system"]')
+    row = page.wait_for_selector('#v-system .kv:has-text("snapshot_cron")')
+    color = row.eval_on_selector("span:last-child", "s => s.style.color")
+    assert "warn" not in color
+
+
+def test_empty_status_bar_takes_no_room(browser, ui_server):
+    # (23.09) poza champ selectem pasek lobby jest pusty - pusty pas nad hero
+    db.set_lobby([], "KIWI", "limited", int(time.time()))
+    ctx = browser.new_context()
+    pg = ctx.new_page()
+    pg.route(re.compile(r"^https?://(?!127\.0\.0\.1)"), lambda r: r.abort())
+    try:
+        pg.goto(ui_server + "/", wait_until="domcontentloaded")
+        pg.wait_for_selector("#hero .who")
+        assert pg.evaluate("document.getElementById('live-bar').offsetHeight") == 0
+    finally:
+        ctx.close()
+
+
+def test_split_value_labels_do_not_collide(page):
+    # (23.09) podpisy "+13 · III" nachodzily na siebie przy ~22 px na dzien;
+    # "III" dubluje obrys slupka, a podpis wartosci pokazujemy, gdy sie
+    # miesci, albo na lokalnym szczycie (reszta w tooltipie slupka)
+    page.wait_for_selector("#hero .who")
+    vals = [2, 13, 3, 4, 5, 14, 14, 3, 0, 1]
+    shown = page.evaluate(f"splitValueLabels({vals}, 22)")
+    assert shown[1] and shown[5], "szczyty maja podpis"
+    assert not shown[8], "zero nie ma podpisu"
+
+    def width(v):                     # jak w app.js: mono 12 px ~ 7,2 px na znak
+        return len(f"+{v}") * 7.2 + 4
+    on = [i for i, s in enumerate(shown) if s]
+    for a in on:
+        for b in on:
+            if a < b:
+                assert (b - a) * 22 >= (width(vals[a]) + width(vals[b])) / 2, (a, b)
+    wide = page.evaluate(f"splitValueLabels({vals}, 60)")
+    assert all(wide[i] for i in range(8)), "przy szerokim wykresie podpis ma kazdy"

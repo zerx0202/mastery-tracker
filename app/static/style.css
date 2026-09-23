@@ -145,6 +145,10 @@ td.r,th.r{text-align:right}
     border-bottom:1px solid var(--line);font-size:13.5px}
 .kv:last-child{border-bottom:none}
 .kv span:last-child{font-family:var(--mono);color:var(--gold)}
+/* (23.09) dluga wartosc (URI z WS) lamie sie w karcie zamiast z niej
+   wystawac - element flex bez min-width:0 nie zawija */
+.kv{gap:12px}
+.kv span:last-child{min-width:0;overflow-wrap:anywhere;text-align:right}
 .bar-row{display:grid;grid-template-columns:64px 1fr 46px;align-items:center;gap:10px;
          margin:7px 0;font-family:var(--mono);font-size:12px}
 .bar{height:8px;background:var(--panel2);border-radius:2px;overflow:hidden;
@@ -265,6 +269,10 @@ select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
 /* (U) rezerwacja miejsca: pasek statusu i hero maja minimalna wysokosc,
    zeby deck nie skakal przy kazdym ticku (CLS 0.47 na zrzucie 11.09) */
 #live-bar{min-height:46px;margin-bottom:20px}
+/* (23.09) poza champ selectem pasek jest pusty - rezerwacja z U dawala
+   pusty pas nad hero. Pojawienie sie paska przy starcie champ selecta to
+   jedna zmiana stanu, nie migotanie co tick (to rozwiazal morph w W) */
+#live-bar:empty{min-height:0;margin-bottom:0}
 #live-bar .live{margin-bottom:0}
 #live-bar .live + .live{margin-top:10px}
 #hero{min-height:236px}
