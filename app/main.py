@@ -1888,4 +1888,17 @@ async def norms(stat: str = "totalDamageDealtToChampions", mode: str | None = No
 
 app.include_router(api)
 app.include_router(write_api)
+@app.middleware("http")
+async def static_no_cache(request, call_next):
+    """(W) Statyki zawsze rewalidowane: bez naglowka przegladarka trzymala
+    stare app.js po deployu (Chrome heurystycznie, okno PWA bez paska
+    adresu tym bardziej) i dwa razy "brak zmiany" udawal bug. no-cache
+    = pytaj serwer za kazdym razem; StaticFiles odpowiada ETag/304, wiec
+    koszt to jeden naglowek przez Tailscale, nie ponowne pobranie."""
+    resp = await call_next(request)
+    if not request.url.path.startswith("/api"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 app.mount("/", StaticFiles(directory="app/static", html=True), name="static")
