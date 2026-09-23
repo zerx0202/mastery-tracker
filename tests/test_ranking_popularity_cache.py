@@ -47,6 +47,12 @@ def test_popularity_refreshes_after_ttl(fresh_db, monkeypatch):
     _seed_sb(1, start=2)
     later = time.time() + app_main.SB_POP_TTL + 1
     monkeypatch.setattr(app_main.time, "time", lambda: later)
+    # (23.09) po TTL stara wartosc od razu, nowa przychodzi z tla
+    assert app_main.sb_popularity() == {45: 2}
+    for _ in range(250):
+        if app_main.sb_popularity() == {45: 3}:
+            break
+        time.sleep(0.02)
     assert app_main.sb_popularity() == {45: 3}
     assert len(calls) == 2
 

@@ -371,3 +371,11 @@ def test_hero_chance_comes_from_calibrated_rates(page):
     pct = int(100 * lead["next_p"] + 0.5)
     assert f"{pct}% szans na" in txt
     assert "AUC" not in txt
+
+
+def test_page_keeps_room_for_scrollbar(page):
+    # (23.09) pasek przewijania po wczytaniu dlugiej tabeli Ocen nie moze
+    # przesuwac strony w bok (CLS 0,20 na zrzucie)
+    page.wait_for_selector("#hero .who")
+    gutter = page.evaluate("getComputedStyle(document.documentElement).scrollbarGutter")
+    assert gutter == "stable"

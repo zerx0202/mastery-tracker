@@ -712,7 +712,21 @@ def explain(match_id):
     return out
 
 
-def predict(row, threshold, model=None, baselines=None, mode=None):
+def predict_context():
+    """Model, baseline'y i external z ustawien - raz na serie predykcji.
+    (23.09) Historia ocen wolala predict 2x na wiersz, a kazdy predict czytal
+    trzy ustawienia (osobne polaczenia z baza): 361 odczytow na 60 wierszy."""
+    cached = get_json_setting("champion_baselines") or {}
+    return {"model": get_json_setting("grade_model"),
+            "baselines": ({int(k): v for k, v in (cached.get("per_champ") or {}).items()},
+                          cached.get("global") or 1.0),
+            "external": get_json_setting("external_dpm") or None}
+
+
+_UNSET = object()
+
+
+def predict(row, threshold, model=None, baselines=None, mode=None, external=_UNSET):
     model = model or get_json_setting("grade_model")
     if not model:
         return None
@@ -725,7 +739,8 @@ def predict(row, threshold, model=None, baselines=None, mode=None):
         baselines = ({int(k): v for k, v in (cached.get("per_champ") or {}).items()},
                      cached.get("global") or 1.0)
 
-    external = get_json_setting("external_dpm") or None
+    if external is _UNSET:
+        external = get_json_setting("external_dpm") or None
     f = extract_features(row, baselines[0], baselines[1], external, mode)
     z = m["bias"]
     for j, key in enumerate(model["features"]):

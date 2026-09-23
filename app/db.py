@@ -2,6 +2,7 @@ import json
 import re
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -2254,25 +2255,37 @@ def games_without_grade_ids(limit=5):
             (int(_t.time()) - GRADE_GRACE_S, limit))]
 
 
+# (23.09) Liczniki statusu modelu jako wyszukania po indeksie
+# idx_ps_local (match_id, is_local) dla ~230 ocenionych meczow. Zlaczenie
+# JOIN grade_observation x player_stat planista robil skanem 5,7 mln wierszy
+# - 0,5 s na kopii, kilka sekund na virtiofs, przy KAZDYM /system/health
+# (panel boczny Teraz i zakladka System). Test pilnuje planu (bez SCAN p).
+MODEL_STATUS_SQL = {
+    "joined": """
+        SELECT COUNT(*) c FROM player_stat p
+        WHERE p.is_local = 1
+          AND p.match_id IN (SELECT match_id FROM grade_observation)""",
+    "with_rich": """
+        SELECT COUNT(DISTINCT g.match_id) c FROM grade_observation g
+        WHERE EXISTS (SELECT 1 FROM player_stat p
+                      WHERE p.match_id = g.match_id AND p.is_local = 1)""",
+    "with_match": """
+        SELECT COUNT(*) c FROM grade_observation g
+        JOIN match_player m ON m.match_id = g.match_id""",
+}
+
+
 def model_status(min_games=40):
     """Marker: ile obserwacji mamy i czy juz warto stroic model."""
     with connect() as con:
         total = con.execute("SELECT COUNT(*) c FROM grade_observation").fetchone()["c"]
-        joined = con.execute("""
-            SELECT COUNT(*) c FROM grade_observation g
-            JOIN player_stat p ON p.match_id = g.match_id AND p.is_local = 1
-            """).fetchone()["c"]
+        joined = con.execute(MODEL_STATUS_SQL["joined"]).fetchone()["c"]
         exact = con.execute(
             "SELECT COUNT(*) c FROM grade_observation WHERE COALESCE(censored,0)=0").fetchone()["c"]
         by_src = [dict(r) for r in con.execute(
             "SELECT COALESCE(source,'lcu') source, COUNT(*) n FROM grade_observation GROUP BY 1")]
-    with connect() as con:
-        with_match = con.execute("""
-            SELECT COUNT(*) c FROM grade_observation g
-            JOIN match_player m ON m.match_id = g.match_id""").fetchone()["c"]
-        with_rich = con.execute("""
-            SELECT COUNT(DISTINCT g.match_id) c FROM grade_observation g
-            JOIN player_stat p ON p.match_id = g.match_id AND p.is_local = 1""").fetchone()["c"]
+        with_match = con.execute(MODEL_STATUS_SQL["with_match"]).fetchone()["c"]
+        with_rich = con.execute(MODEL_STATUS_SQL["with_rich"]).fetchone()["c"]
     usable = with_match
     return {
         "grades_total": total,
@@ -2497,7 +2510,7 @@ def champion_norms(stat_key="totalDamageDealtToChampions", mode=None, min_obs=1)
     args = [stat_key] + ([mode] if mode else [])
     with connect() as con:
         rows = [dict(r) for r in con.execute(f"""
-            SELECT p.champion_id, p.stat_value, m.duration
+            SELECT p.champion_id, p.stat_value, m.duration, p.match_id
             FROM player_stat p
             JOIN norm_source m ON m.match_id = p.match_id
             WHERE p.stat_key = ? AND m.duration > 300 {clause}""", args)]
@@ -2549,8 +2562,10 @@ def champion_norms(stat_key="totalDamageDealtToChampions", mode=None, min_obs=1)
             "anchor": "klasa" if cls in anchors else "global",
         }
 
-    with connect() as con:
-        nm = con.execute("SELECT COUNT(DISTINCT match_id) c FROM player_stat").fetchone()["c"]
+    # (23.09) mecze = mecze z ta statystyka w tym trybie, policzone z juz
+    # pobranych wierszy - COUNT(DISTINCT match_id) po calej tabeli (5,7 mln)
+    # kosztowal drugie tyle co samo liczenie norm
+    nm = len({r["match_id"] for r in rows})
 
     return {
         "stat": stat_key,
@@ -2563,18 +2578,57 @@ def champion_norms(stat_key="totalDamageDealtToChampions", mode=None, min_obs=1)
 _NORM_CACHE = {}
 _NORM_TTL = 300  # sekund; po nowej grze normy maja sie przeliczyc, nie zamarzac
 
+_SWR_LOCK = threading.Lock()
+_SWR_RUNNING = set()
+
+
+def swr_get(store, key, ttl, compute):
+    """Wartosc z pamieci; po TTL oddaje STARA od razu i przelicza w tle
+    (jeden watek na klucz). Tylko pierwsze wywolanie liczy synchronicznie.
+    (23.09) Popularnosc snowballa i normy championow to pelne przejscia po
+    milionach wierszy (sekundy na virtiofs) - po wygasnieciu TTL ktos zawsze
+    czekal (Teraz: LCP 3,96 s). Nieudane przeliczenie zostawia stara wartosc;
+    nastepne wywolanie sprobuje znowu."""
+    hit = store.get(key)
+    if hit is None:
+        val = compute()
+        store[key] = (time.time(), val)
+        return val
+    ts, val = hit
+    if time.time() - ts < ttl:
+        return val
+    tag = (id(store), key)
+    with _SWR_LOCK:
+        if tag in _SWR_RUNNING:
+            return val
+        _SWR_RUNNING.add(tag)
+
+    def run():
+        try:
+            store[key] = (time.time(), compute())
+        except Exception:
+            pass
+        finally:
+            with _SWR_LOCK:
+                _SWR_RUNNING.discard(tag)
+    threading.Thread(target=run, daemon=True).start()
+    return val
+
 
 def norm_z(champion_id, stat_key, value_per_min, mode=None, cache=None):
     """Ile odchylen powyzej typowego wyniku na tym championie.
     To jest miara, ktora Riot faktycznie stosuje przy ocenie."""
-    import time as _t
-    store = _NORM_CACHE if cache is None else cache
-    key = (stat_key, mode)
-    hit = store.get(key)
-    if hit is None or (cache is None and _t.time() - hit[0] > _NORM_TTL):
-        hit = (_t.time(), champion_norms(stat_key, mode))
-        store[key] = hit
-    d = hit[1]
+    if cache is None:
+        # klucz ze sciezka bazy: swiat testu i przywrocona kopia nie dziela norm
+        d = swr_get(_NORM_CACHE, (str(DB_PATH), stat_key, mode), _NORM_TTL,
+                    lambda: champion_norms(stat_key, mode))
+    else:
+        # jawny cache (trening, narzedzia): bez TTL i bez watkow tla
+        hit = cache.get((stat_key, mode))
+        if hit is None:
+            hit = (0, champion_norms(stat_key, mode))
+            cache[(stat_key, mode)] = hit
+        d = hit[1]
     if not d["global"]:
         return None
     c = d["champions"].get(champion_id)

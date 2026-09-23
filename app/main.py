@@ -266,6 +266,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(balance_refresh_loop())
     asyncio.create_task(augments_refresh_loop())
     asyncio.create_task(ddragon_refresh_loop())
+    asyncio.create_task(asyncio.to_thread(warm_caches))
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
     state["plain"] = httpx.AsyncClient(timeout=15.0)
@@ -492,14 +493,21 @@ _SB_POP_CACHE = {}
 
 
 def sb_popularity():
-    key = str(db.DB_PATH)
-    now = time.time()
-    hit = _SB_POP_CACHE.get(key)
-    if hit and now - hit[0] < SB_POP_TTL:
-        return hit[1]
-    pop = db.champion_sb_popularity()
-    _SB_POP_CACHE[key] = (now, pop)
-    return pop
+    # (23.09) po TTL stara wartosc od razu, przeliczenie w tle (db.swr_get) -
+    # samo TTL przenosilo 3-sekundowy skan na co dziesiate otwarcie Teraz
+    return db.swr_get(_SB_POP_CACHE, str(db.DB_PATH), SB_POP_TTL,
+                      lambda: db.champion_sb_popularity())
+
+
+def warm_caches():
+    """Rozgrzewa ciezkie odczyty zaraz po starcie serwera, zanim zapyta
+    o nie pulpit: popularnosc snowballa i normy obrazen dla modelu."""
+    try:
+        sb_popularity()
+        db.norm_z(0, model.NORM_KEYS["dmg_ratio"], 0.0, DEFAULT_MODE)
+        _player_stat_rows()
+    except Exception as e:
+        _loop_error("warm_caches", e)
 
 
 async def _targets(limit, only, ids, mode):
@@ -1635,12 +1643,13 @@ def _grades_history_sync(limit, mode):
         names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM champion")}
         keys = {r["id"]: r["key"] for r in c.execute("SELECT id, key FROM champion")}
     book = augments.get_book().get("augments") or {}
+    ctx = model.predict_context()
 
     out = []
     for r in rows[:limit]:
         # (B5) jak w /model/explain: tryb jawnie, spojnie z treningiem
-        pa = model.predict(r, "A-", mode=use_mode) or {}
-        ps = model.predict(r, "S-", mode=use_mode) or {}
+        pa = model.predict(r, "A-", mode=use_mode, **ctx) or {}
+        ps = model.predict(r, "S-", mode=use_mode, **ctx) or {}
         fv = features.match_features(r)
         out.append({
             "grade": r["grade"],
@@ -1897,6 +1906,20 @@ async def system_health():
     return await asyncio.to_thread(_system_health_sync)
 
 
+# (23.09) Licznik wierszy player_stat (5,7 mln) to pelny skan przy kazdym
+# /system/health - a wola go tez panel boczny Teraz. Liczba do ogladania,
+# wiec stara o kilka minut wystarczy: db.swr_get przelicza ja w tle.
+ROWCOUNT_TTL = 600
+_ROWCOUNT_CACHE = {}
+
+
+def _player_stat_rows():
+    def count():
+        with db.connect() as c:
+            return c.execute("SELECT COUNT(*) c FROM player_stat").fetchone()["c"]
+    return db.swr_get(_ROWCOUNT_CACHE, str(db.DB_PATH), ROWCOUNT_TTL, count)
+
+
 def _system_health_sync():
     with db.connect() as c:
         last = {r["kind"]: r["ts"] for r in c.execute(
@@ -1905,6 +1928,9 @@ def _system_health_sync():
         for t in ("match_player", "grade_observation", "eog_raw",
                   "match_timeline", "champ_select_pool", "player_stat",
                   "snapshot"):
+            if t == "player_stat":
+                counts[t] = _player_stat_rows()
+                continue
             counts[t] = c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
         # filtr per queueId: customy (np. 3270) sa w bazie, ale poza misja -
         # licznik, zeby filtracja byla widoczna, a nie wygladala jak dziura
