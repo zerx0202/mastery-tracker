@@ -206,6 +206,8 @@ budowane z dwóch własnych źródeł:
 - snowball: z każdego meczu agent zna PUUID-y 9 pozostałych graczy;
   przy bezczynnym kliencie dociąga ich historie przez LCU (1 gracz na minutę,
   okno rewizyty 7 dni, dedup po game_id, własne gry odfiltrowane).
+  Bezczynny = ekran główny albo lobby drużyny; w kolejce, champ selekcie,
+  grze i w oknie pomeczowym snowball i odzysk gier czekają.
   Priorytet kolejki mają gracze widziani w wielu własnych meczach
   (`match_participant`) — ich historie najszybciej karmią normy.
 

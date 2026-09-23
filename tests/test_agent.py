@@ -116,10 +116,15 @@ def test_pool_dedup_and_bench_rotation():
     async def run():
         a = _pool_agent()
         # lawka {10,11}, ja gram 20, sojusznicy 21 i 22
+        # settle(): pula idzie w tle i najnowszy stan wygrywa (23.09) -
+        # bez odczekania szybka rotacja zastapilaby pierwszy stan
         await a.handle_champ_select(_sess([10, 11], [20, 21, 22]))
+        await a.settle()
         await a.handle_champ_select(_sess([10, 11], [20, 21, 22]))  # bez zmian
+        await a.settle()
         # rotacja sojusznika z lawka: 21 <-> 10, unia puli identyczna
         await a.handle_champ_select(_sess([21, 11], [20, 10, 22]))
+        await a.settle()
         return a.server.posts
 
     posts = asyncio.run(run())
@@ -136,6 +141,7 @@ def test_pool_exit_clears_state():
         await a.handle_champ_select(_sess([10], [20, 21]))
         await a.handle_champ_select(None)
         assert a.last_pool_key is None
+        await a.settle()
         return a.server.posts
 
     posts = asyncio.run(run())

@@ -65,6 +65,27 @@ RECOVER_MAX_FAILS = 3
 # prawdziwym koncu gry nic nie kosztuje (port i tak juz nie zyje).
 LIVE_GONE_AFTER = 3
 
+# (23.09) Pula z champ selecta idzie w tle: najnowszy stan wygrywa, porazka
+# = ponowienie z rosnaca przerwa do skutku (albo do nowszego stanu). Dotad
+# obsluga WS czekala na POST /lobby do 90 s - gdy serwer wisial po grze,
+# caly kanal zdarzen stal, a nieudana pusta pula zostawiala stare lobby
+# na stronie do 90 min. Krotki limit: pula sprzed 10 s i tak jest nieaktualna.
+POOL_POST_TIMEOUT = 10
+POOL_RETRY_FIRST = 1
+POOL_RETRY_MAX = 30
+
+# (23.09) /live {ended} ponawiany, az dojdzie - albo az zacznie sie nowa gra,
+# ktora sama nadpisze wiersz (spozniony "ended" skasowalby jej dane).
+LIVE_END_RETRY_FIRST = 2
+LIVE_END_RETRY_SECONDS = 600
+
+# (23.09) Praca w tle (snowball, odzysk gier, timeline) tylko przy
+# bezczynnym kliencie: ekran glowny albo lobby druzyny. W kolejce, ready
+# checku, champ selekcie, grze i na ekranie koncowym - nie, podobnie w trakcie
+# epizodu pomeczowego (ocena, eog, snapshot, historia, backup). To
+# harmonogram, nie limit: dane dochodza przy nastepnej bezczynnosci.
+IDLE_PHASES = ("None", "Lobby")
+
 # Wylacznie dane ULOTNE (zyja tylko na ekranie koncowym) - trzy endpointy
 # nieulotne (local-player mastery, collections, career-stats) byly zrzucane
 # po kazdej grze bez zadnego konsumenta i kasowane rotacja (audyt 2.09)
@@ -331,6 +352,11 @@ class Agent:
         self._my_puuid = None
         self._recover_fails = {}   # gid -> nieudane proby odzysku (A4)
         self._timeline_fails = {}  # gid -> nieudane proby timeline (C3)
+        self.phase = None          # ostatnia znana faza gameflow (23.09)
+        self._pool_next = None     # (payload, log) czekajacy na wysylke
+        self._pool_task = None
+        self._bg = set()           # zadania w tle - referencje przeciw GC
+        self._live_active = False
 
     # ---------- akcje ----------
 
@@ -368,16 +394,66 @@ class Agent:
                 break
         log(f"historia LCU: {total} przeslanych, {new} nowych", "ok")
 
-    async def send_pool(self, ids, mode, pool_kind, queue_id, trade_ids=None,
-                        allies=None):
-        await self.server.post("/lobby", {
+    def send_pool(self, ids, mode, pool_kind, queue_id, trade_ids=None,
+                  allies=None, note=None):
+        """Kolejkuje stan puli do wysylki w tle; nie czeka na serwer."""
+        self.queue_pool({
             "champion_ids": sorted(set(ids)),
             "trade_ids": sorted({t for t in (trade_ids or []) if t}),
             "queue": mode,
             "pool_kind": pool_kind,
             "queue_id": queue_id,
             "allies": allies or [],
-        })
+        }, note)
+
+    def queue_pool(self, payload, note=None):
+        self._pool_next = (payload, note)
+        if self._pool_task is None or self._pool_task.done():
+            self._pool_task = asyncio.create_task(self._pool_sender())
+
+    async def _pool_sender(self):
+        """Jeden nadawca puli: wysyla najnowszy stan; nowszy stan w trakcie
+        wysylki idzie od razu po niej, porazka = ponowienie z przerwa."""
+        delay = POOL_RETRY_FIRST
+        while self._pool_next is not None:
+            item = self._pool_next
+            payload, note = item
+            r = await self.server.post("/lobby", payload, timeout=POOL_POST_TIMEOUT)
+            if self._pool_next is not item:
+                delay = POOL_RETRY_FIRST
+                continue
+            if r is not None:
+                self._pool_next = None
+                if note:
+                    log(*note)
+                continue
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, POOL_RETRY_MAX)
+
+    def _spawn(self, coro):
+        """Zadanie w tle z trzymana referencja (petla asyncio trzyma tylko
+        slaba - zadanie bez referencji potrafi zniknac w polowie)."""
+        t = asyncio.create_task(coro)
+        self._bg.add(t)
+        t.add_done_callback(self._bg.discard)
+        return t
+
+    async def settle(self):
+        """Czeka na wszystko, co agent wyslal w tle (testy, diagnostyka)."""
+        while True:
+            pending = {t for t in self._bg if not t.done()}
+            if self._pool_task is not None and not self._pool_task.done():
+                pending.add(self._pool_task)
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def background_allowed(self):
+        """Czy wolno teraz dociazac LCU i serwer praca w tle (snowball,
+        odzysk gier, timeline) - patrz IDLE_PHASES."""
+        return (bool(self.lcu.port) and not self.in_game
+                and not self.last_pool_key and self.phase in IDLE_PHASES
+                and (self._eog_task is None or self._eog_task.done()))
 
     async def sync_pass(self):
         """Tor przepustki (18) + deadline grindu (3+19): event-hub klienta.
@@ -475,6 +551,10 @@ class Agent:
         if r and r.get("errors"):
             log(f"blad zapisu oceny: {r['errors'][0]}", "warn")
         return True
+
+    async def _grade_from_ws(self, data):
+        if await self.submit_grade(data, "ws"):
+            log("ocena zlapana z WebSocketu", "ok")
 
     async def recover_last_grade(self):
         """(K, wariant a) Przy wykryciu klienta czytamy notyfikacje oceny
@@ -584,48 +664,51 @@ class Agent:
 
     async def snowball_loop(self):
         """Co ~60 s bierze jednego gracza z rejestru serwera i dosyla jego
-        gry KIWI. Chodzi tylko przy bezczynnym kliencie (nie w champ selekcie,
-        nie w grze) - LCU ma byc responsywne dla Ciebie, nie dla snowballa."""
+        gry KIWI. Chodzi tylko przy bezczynnym kliencie (background_allowed)
+        - LCU i serwer maja byc responsywne dla Ciebie, nie dla snowballa."""
         while True:
             await asyncio.sleep(60)
             try:
-                if (self.cfg.get("snowball") != "on" or not self.lcu.port
-                        or self.in_game or self.last_pool_key):
-                    continue
-                nxt = await self.session.get(
-                    self.cfg["api_base"] + "/snowball/next",
-                    timeout=aiohttp.ClientTimeout(total=15))
-                data = await nxt.json()
-                puuids = data.get("puuids") or []
-                if not puuids:
-                    # pusta kolejka mylila sie z awaria (przypadek 2.09) -
-                    # jeden log na przejscie w bezczynnosc, nie co minute
-                    if not self._sb_idle:
-                        self._sb_idle = True
-                        log("snowball: kolejka pusta - rejestr swiezy, "
-                            "wroce po oknie rewizyty", "dim")
-                    continue
-                self._sb_idle = False
-                pu = puuids[0]
-                h = await self.lcu.get(
-                    f"/lol-match-history/v1/products/lol/{pu}/matches"
-                    f"?begIndex=0&endIndex=19", timeout=20)
-                games = (h or {}).get("games", {}).get("games") or []
-                r = await self.server.post("/snowball/ingest",
-                                           {"puuid": pu, "games": games})
-                if r is not None:
-                    kiwi, new = r.get("kiwi") or 0, r.get("new_rows") or 0
-                    if new:
-                        log(f"snowball: gracz {pu[:8]}… — {kiwi} gier KIWI, "
-                            f"+{new} wierszy statystyk", "ok")
-                    elif kiwi:
-                        # 0 nowych to dedup po game_id (kandydaci pochodza
-                        # z Twoich meczow, wiec historie mocno sie nakladaja),
-                        # nie awaria ingestu
-                        log(f"snowball: gracz {pu[:8]}… — {kiwi} gier KIWI, "
-                            "wszystkie juz w bazie (dedup)", "dim")
+                await self._snowball_once()
             except Exception as e:
                 log(f"snowball: {type(e).__name__}: {e}", "dim")
+
+    async def _snowball_once(self):
+        if self.cfg.get("snowball") != "on" or not self.background_allowed():
+            return
+        nxt = await self.session.get(
+            self.cfg["api_base"] + "/snowball/next",
+            timeout=aiohttp.ClientTimeout(total=15))
+        data = await nxt.json()
+        puuids = data.get("puuids") or []
+        if not puuids:
+            # pusta kolejka mylila sie z awaria (przypadek 2.09) -
+            # jeden log na przejscie w bezczynnosc, nie co minute
+            if not self._sb_idle:
+                self._sb_idle = True
+                log("snowball: kolejka pusta - rejestr swiezy, "
+                    "wroce po oknie rewizyty", "dim")
+            return
+        self._sb_idle = False
+        pu = puuids[0]
+        h = await self.lcu.get(
+            f"/lol-match-history/v1/products/lol/{pu}/matches"
+            f"?begIndex=0&endIndex=19", timeout=20)
+        games = (h or {}).get("games", {}).get("games") or []
+        r = await self.server.post("/snowball/ingest",
+                                   {"puuid": pu, "games": games})
+        if r is None:
+            return
+        kiwi, new = r.get("kiwi") or 0, r.get("new_rows") or 0
+        if new:
+            log(f"snowball: gracz {pu[:8]}… — {kiwi} gier KIWI, "
+                f"+{new} wierszy statystyk", "ok")
+        elif kiwi:
+            # 0 nowych to dedup po game_id (kandydaci pochodza
+            # z Twoich meczow, wiec historie mocno sie nakladaja),
+            # nie awaria ingestu
+            log(f"snowball: gracz {pu[:8]}… — {kiwi} gier KIWI, "
+                "wszystkie juz w bazie (dedup)", "dim")
 
     # ---------- konsola LCU (42) + odzysk gier (P6) ----------
 
@@ -777,7 +860,7 @@ class Agent:
         while True:
             await asyncio.sleep(120)
             try:
-                if (not self.lcu.port or self.in_game or self.last_pool_key):
+                if not self.background_allowed():
                     continue
                 if not await self._recover_once():
                     await self._timeline_once()
@@ -850,7 +933,7 @@ class Agent:
             self._sess_fp = None
             if self.last_pool_key is not None:
                 log("wyjscie z champ selecta")
-                await self.send_pool([], None, None, 0)
+                self.send_pool([], None, None, 0)
                 self.last_pool_key = None
             return
 
@@ -928,18 +1011,20 @@ class Agent:
         # startswith nie pomyli "1,2|t:" z "1,23|t:"
         rotation = bool(self.last_pool_key) and self.last_pool_key.startswith(ids_key)
         self.last_pool_key = key
-        await self.send_pool(ids, mode, pool_kind, queue_id, trade_ids, allies)
-        if rotation:
-            log(f"[{mode}] rotacja z lawka: {len(trade_ids)} do wymiany", "dim")
-        else:
-            log(f"[{mode} q={queue_id}/{pool_kind}] wyslano {len(ids)} championow", "ok")
+        # log dopiero po dostarczeniu - "wyslano" ma znaczyc "serwer ma"
+        note = ((f"[{mode}] rotacja z lawka: {len(trade_ids)} do wymiany", "dim")
+                if rotation else
+                (f"[{mode} q={queue_id}/{pool_kind}] wyslano {len(ids)} championow", "ok"))
+        self.send_pool(ids, mode, pool_kind, queue_id, trade_ids, allies, note=note)
 
-        # snapshot PRZED gra - raz na champ select
+        # snapshot PRZED gra - raz na champ select; w tle (DURABLE, kolejka
+        # dyskowa przy porazce), bo POST idzie do Riot API przez serwer
         if not self.pre_snapshot_done:
             self.pre_snapshot_done = True
-            await self.snapshot("przed gra")
+            self._spawn(self.snapshot("przed gra"))
 
     async def handle_phase(self, phase):
+        self.phase = phase
         if phase == PHASE_IN_GAME:
             if not self.in_game:
                 log("gra w toku", "dim")
@@ -1046,9 +1131,10 @@ class Agent:
                         await asyncio.sleep(self.cfg.get("live_poll_seconds", 2))
                         continue
                     was_live = False
+                    self._live_active = False
                     misses = 0
                     log("koniec danych na zywo", "dim")
-                    await self.server.post("/live", {"ended": True}, timeout=15)
+                    self._spawn(self._send_live_end())
                     # eventdata znika razem z portem 2999 - wysylamy ostatni
                     # zlapany stan. Bufor wolno czyscic bezwarunkowo, bo
                     # /eventdata jest na liscie DURABLE: porazka POST-a
@@ -1071,6 +1157,7 @@ class Agent:
                 # stan, POST idzie raz, przy smierci portu
                 self._live_events = ev
 
+            self._live_active = True
             try:
                 await self.send_live(data)
                 if not was_live:
@@ -1080,6 +1167,17 @@ class Agent:
                 log(f"blad odczytu na zywo: {type(e).__name__}: {e}", "warn")
 
             await asyncio.sleep(self.cfg.get("live_poll_seconds", 2))
+
+    async def _send_live_end(self):
+        """/live {ended} do skutku (patrz LIVE_END_RETRY_*): nieudany POST
+        zostawial na stronie panel zakonczonej gry w nowym lobby."""
+        delay = LIVE_END_RETRY_FIRST
+        deadline = time.monotonic() + LIVE_END_RETRY_SECONDS
+        while time.monotonic() < deadline and not self._live_active:
+            if await self.server.post("/live", {"ended": True}, timeout=15) is not None:
+                return
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
 
     def resolve_champion(self, player):
         """(klucz_dd, champion_id) dla gracza z Live Client Data.
@@ -1288,9 +1386,12 @@ class Agent:
             self.ws_events["mastery"] += 1
             # Ocena wypchnieta przez klienta w momencie powstania - zero
             # zgadywania fazy. Dziala tez, gdy petla dopytujaca akurat nie
-            # biegnie (backend deduplikuje po meczu).
-            if data and await self.submit_grade(data, "ws"):
-                log("ocena zlapana z WebSocketu", "ok")
+            # biegnie (backend deduplikuje po meczu). (23.09) POST w tle:
+            # kanal WS nie czeka na serwer; flaga gasi dopytywanie od razu.
+            entries = data if isinstance(data, list) else [data]
+            if data and any(isinstance(e, dict) and e.get("grade") for e in entries):
+                self._grade_done = True
+                self._spawn(self._grade_from_ws(data))
         else:
             return False
         return True

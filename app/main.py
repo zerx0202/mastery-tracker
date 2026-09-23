@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
@@ -11,7 +12,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 
 from . import (augments, balance, champinfo, db, features, model, patchnotes,
-               scoring)
+               scoring, trainer)
 from .db import GRADE_RANK
 
 API_KEY = os.environ["RIOT_API_KEY"]
@@ -65,6 +66,62 @@ def _loop_error(loop, e):
         pass
 
 
+# ---------------- trening modelu w tle ----------------
+
+# (23.09) Trening poza sciezka zadania i poza procesem serwera: /grade
+# czekal na model.train (~1 min, rosnie z liczba ocen) ponad 90 s limitu
+# agenta, a CPU w watku serwera glodzilo wszystkie inne zapytania (konwoj
+# GIL) - kilka minut "serwer nieosiagalny" po kazdej grze, stare lobby
+# i "database is locked". Zlecenia w trakcie treningu scalaja sie w jeden
+# kolejny przebieg: po grze /grade i /history/lcu strzelaja jeden po
+# drugim, a drugi musi zobaczyc wiersz meczu, ktorego pierwszy jeszcze
+# nie mial. TRAIN_IN_PROCESS=0 (testy) = watek zamiast procesu.
+TRAIN_IN_PROCESS = os.getenv("TRAIN_IN_PROCESS", "1") != "0"
+_TRAIN = {"task": None, "again": False}
+
+
+async def run_training(mode=None):
+    mode = mode or DEFAULT_MODE
+    if not TRAIN_IN_PROCESS:
+        return await asyncio.to_thread(model.train, mode, True, GOAL)
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(
+            trainer.pool(), trainer.train_job, str(db.DB_PATH), mode, GOAL)
+    except BrokenProcessPool:
+        # pad procesu roboczego (OOM, kill) - nastepne zlecenie stawia nowy
+        trainer.shutdown()
+        raise
+
+
+async def _training_worker():
+    while True:
+        _TRAIN["again"] = False
+        try:
+            await run_training()
+        except Exception as e:
+            await asyncio.to_thread(db.log_event, "model_train_fail",
+                                    {"error": f"{type(e).__name__}: {e}"[:200]},
+                                    int(time.time()))
+        if not _TRAIN["again"]:
+            return
+
+
+def request_training():
+    """Zlecenie treningu bez czekania na wynik. Wolane z petli zdarzen."""
+    t = _TRAIN["task"]
+    if t is not None and not t.done():
+        _TRAIN["again"] = True
+        return
+    _TRAIN["task"] = asyncio.create_task(_training_worker())
+
+
+async def training_idle():
+    """Czeka, az trening w tle (z ewentualna powtorka) sie skonczy."""
+    while _TRAIN["task"] is not None and not _TRAIN["task"].done():
+        await asyncio.shield(_TRAIN["task"])
+
+
 async def mayhem_sentinel_loop():
     """Riot dzis celowo blokuje Mayhema w match-v5 (403; developer-relations
     #1109 i #1154). Raz na dobe sprawdzamy jednym zapytaniem, czy to sie
@@ -73,7 +130,7 @@ async def mayhem_sentinel_loop():
     await asyncio.sleep(30)
     while True:
         try:
-            st = db.get_json_setting("mayhem_api") or {}
+            st = await asyncio.to_thread(db.get_json_setting, "mayhem_api") or {}
             if time.time() - st.get("checked_at", 0) >= 20 * 3600:
                 # stala modulu (RIOT_REGION) - gole os.getenv("REGION") bylo
                 # trzecia nazwa env na ten sam koncept i dzialalo tylko
@@ -92,17 +149,18 @@ async def mayhem_sentinel_loop():
                     # o kluczu - zablokowana kolejka tez daje 403; klucz
                     # rozstrzyga petla snapshotow, gdzie 403 = klucz)
                     if e.status_code == 401:
-                        note_riot_auth(False, 401)
+                        await asyncio.to_thread(note_riot_auth, False, 401)
                     ids = []
-                db.set_json_setting("mayhem_api", {
+                await asyncio.to_thread(db.set_json_setting, "mayhem_api", {
                     "checked_at": int(time.time()),
                     "open": bool(ids),
                     "sample": (ids or [None])[0]})
                 if ids:
-                    db.log_event("mayhem_api_open", {"match_id": ids[0]},
-                                 int(time.time()))
+                    await asyncio.to_thread(
+                        db.log_event, "mayhem_api_open", {"match_id": ids[0]},
+                        int(time.time()))
         except Exception as e:
-            _loop_error("sentinel", e)
+            await asyncio.to_thread(_loop_error, "sentinel", e)
         await asyncio.sleep(3600)
 
 
@@ -126,10 +184,10 @@ async def daily_snapshot_loop():
             # champion-mastery-v4 z dobrym kluczem nie zwraca 401/403 -
             # tutaj (w odroznieniu od sentinela) to jednoznacznie klucz
             if e.status_code in (401, 403):
-                note_riot_auth(False, e.status_code)
-            _loop_error("snapshot_cron", e)
+                await asyncio.to_thread(note_riot_auth, False, e.status_code)
+            await asyncio.to_thread(_loop_error, "snapshot_cron", e)
         except Exception as e:
-            _loop_error("snapshot_cron", e)
+            await asyncio.to_thread(_loop_error, "snapshot_cron", e)
         await asyncio.sleep(3600)
 
 
@@ -140,14 +198,14 @@ async def balance_refresh_loop():
     await asyncio.sleep(120)
     while True:
         try:
-            st = db.get_json_setting("mayhem_balance") or {}
+            st = await asyncio.to_thread(db.get_json_setting, "mayhem_balance") or {}
             if time.time() - st.get("fetched_at", 0) >= 24 * 3600:
                 r = await state["plain"].get(balance.BALANCE_URL,
                                              follow_redirects=True)
                 if r.status_code == 200:
                     await asyncio.to_thread(balance.store_balance, r.text)
         except Exception as e:
-            _loop_error("balance", e)
+            await asyncio.to_thread(_loop_error, "balance", e)
         await asyncio.sleep(6 * 3600)
 
 
@@ -160,8 +218,8 @@ async def augments_refresh_loop():
     await asyncio.sleep(150)
     while True:
         try:
-            book = db.get_json_setting("augment_book") or {}
-            cur = db.get_setting("ddragon_patch") or ""
+            book = await asyncio.to_thread(db.get_json_setting, "augment_book") or {}
+            cur = await asyncio.to_thread(db.get_setting, "ddragon_patch") or ""
             short = ".".join(cur.split(".")[:2]) if cur else None
             if short and book.get("patch") != short:
                 r = await state["plain"].get(
@@ -171,7 +229,7 @@ async def augments_refresh_loop():
                     await asyncio.to_thread(augments.store_augments,
                                             r.text, short)
         except Exception as e:
-            _loop_error("augments", e)
+            await asyncio.to_thread(_loop_error, "augments", e)
         await asyncio.sleep(6 * 3600)
 
 
@@ -190,6 +248,7 @@ async def lifespan(app: FastAPI):
     yield
     await state["client"].aclose()
     await state["plain"].aclose()
+    trainer.shutdown()
 
 
 app = FastAPI(title="Mastery Tracker", lifespan=lifespan)
@@ -250,19 +309,24 @@ async def riot_get(url, params=None, attempts=4):
 
 async def my_puuid():
     riot_id = f"{MY_NAME}#{MY_TAG}"
-    if cached := db.get_cached_puuid(riot_id):
+    if cached := await asyncio.to_thread(db.get_cached_puuid, riot_id):
         return cached
     data = await riot_get(
         f"https://{REGION}.api.riotgames.com"
         f"/riot/account/v1/accounts/by-riot-id/{quote(MY_NAME)}/{quote(MY_TAG)}")
-    db.cache_puuid(riot_id, data["puuid"], int(time.time()))
+    await asyncio.to_thread(db.cache_puuid, riot_id, data["puuid"], int(time.time()))
     return data["puuid"]
 
 
 # ---------------- podstawy ----------------
 
+# (23.09) Handlery, ktore tylko czytaja baze, sa zwyklym def: FastAPI
+# wykonuje je w puli watkow. Jako async def czytaly SQLite NA petli zdarzen
+# - przy zapisie po grze (busy_timeout 10 s) kazdy taki odczyt zamrazal
+# caly serwer, razem z POST-ami agenta. Handlery z innymi await czytaja
+# baze przez asyncio.to_thread.
 @api.get("/health")
-async def health():
+def health():
     return {
         "status": "ok",
         "platform": PLATFORM,
@@ -279,15 +343,19 @@ async def refresh_champions(force: bool = False):
     vers = (await state["plain"].get(
         "https://ddragon.leagueoflegends.com/api/versions.json")).json()
     patch = vers[0]
-    if not force and db.get_setting("ddragon_patch") == patch and db.champion_count() > 0:
-        return {"patch": patch, "champions": db.champion_count(), "skipped": True}
+    cur = await asyncio.to_thread(db.get_setting, "ddragon_patch")
+    have = await asyncio.to_thread(db.champion_count)
+    if not force and cur == patch and have > 0:
+        return {"patch": patch, "champions": have, "skipped": True}
     data = (await state["plain"].get(
         f"https://ddragon.leagueoflegends.com/cdn/{patch}/data/en_US/champion.json")).json()
     champs = [(int(v["key"]), v["name"], v["id"], ",".join(v.get("tags") or []))
               for v in data["data"].values()]
-    db.save_champions(champs)
-    db.set_setting("ddragon_patch", patch)
-    db.log_event("ddragon", {"patch": patch, "champions": len(champs)})
+    def store():
+        db.save_champions(champs)
+        db.set_setting("ddragon_patch", patch)
+        db.log_event("ddragon", {"patch": patch, "champions": len(champs)})
+    await asyncio.to_thread(store)
     return {"patch": patch, "champions": len(champs)}
 
 
@@ -297,9 +365,9 @@ async def snapshot():
     data = await riot_get(
         f"https://{PLATFORM}.api.riotgames.com"
         f"/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}")
-    note_riot_auth(True, 200)
+    await asyncio.to_thread(note_riot_auth, True, 200)
     ts = int(time.time())
-    prev = db.latest_snapshot_id()
+    prev = await asyncio.to_thread(db.latest_snapshot_id)
     sid = await asyncio.to_thread(db.save_snapshot, ts, data)
     new_split = await asyncio.to_thread(db.detect_split_reset, prev, sid, ts)
     await asyncio.to_thread(db.learn_ladder, data, ts)
@@ -320,7 +388,7 @@ async def snapshot():
 
 
 @api.get("/ladder")
-async def ladder():
+def ladder():
     known = db.get_ladder()
     return {"known": known, "missing": [m for m in range(GOAL) if m not in known], "goal": GOAL}
 
@@ -645,12 +713,12 @@ async def _read_lobby(max_age):
 # ---------------- snapshoty i postep ----------------
 
 @api.get("/snapshots")
-async def snapshots():
+def snapshots():
     return db.list_snapshots()
 
 
 @api.get("/progress")
-async def progress(from_id: int | None = None, to_id: int | None = None):
+def progress(from_id: int | None = None, to_id: int | None = None):
     snaps = db.list_snapshots()
     if len(snaps) < 2 and (from_id is None or to_id is None):
         raise HTTPException(400, "Potrzebne co najmniej dwa snapshoty")
@@ -681,7 +749,7 @@ async def sync_worker():
         full = sync.get("full", False)
         after = None
         if not full:
-            last = db.latest_game_creation()
+            last = await asyncio.to_thread(db.latest_game_creation)
             if last:
                 after = last // 1000 - 3600
 
@@ -700,7 +768,7 @@ async def sync_worker():
             if not full and added == 0:
                 break
 
-        todo = db.pending_match_ids()
+        todo = await asyncio.to_thread(db.pending_match_ids)
         sync["total"] = len(todo)
         sync["done"] = 0
         for mid in todo:
@@ -740,7 +808,7 @@ async def history_stop():
 
 
 @api.get("/history/status")
-async def history_status():
+def history_status():
     return {**state["sync"], **db.history_stats()}
 
 
@@ -752,7 +820,7 @@ async def history_lcu(payload: dict):
     karmia player_stat i match_participant jak przy eog (partia D: own_slice
     wyrzucal ten material bezpowrotnie)."""
     games = payload.get("games") or []
-    my = db.my_lcu_puuid()
+    my = await asyncio.to_thread(db.my_lcu_puuid)
     new = 0
     errors = []
     for g in games:
@@ -788,19 +856,14 @@ async def history_lcu(payload: dict):
         # Trening po ocenie strzela ZA WCZESNIE w potoku: grade laduje
         # ~30 s przed wierszem match_player (ten powstaje dopiero tutaj),
         # a training_rows JOIN-uje oba - swieza ocena wchodzila do modelu
-        # dopiero przy nastepnej grze. Drugi trigger domyka potok; trening
-        # jest idempotentny, wiec podwojne odpalenie kosztuje tylko CPU w tle.
-        try:
-            await asyncio.to_thread(model.train, DEFAULT_MODE, True, GOAL)
-        except Exception as e:
-            await asyncio.to_thread(db.log_event, "model_train_fail",
-                                    {"error": f"{type(e).__name__}: {e}"},
-                                    int(time.time()))
+        # dopiero przy nastepnej grze. Drugi trigger domyka potok; zlecenie
+        # w trakcie treningu po ocenie scala sie w jeden kolejny przebieg.
+        request_training()
     return {"received": len(games), "new": new, "errors": errors[:5]}
 
 
 @api.get("/history/modes")
-async def history_modes():
+def history_modes():
     return db.mode_breakdown()
 
 
@@ -843,15 +906,11 @@ async def push_grade(payload: dict):
         # archiwum nie blokuje zapisu oceny (intencja wyzej).
         raise HTTPException(500, "; ".join(errors[:3]))
     if new:
-        # nowa obserwacja = trening od razu. Bez tego grade_model w settings
-        # stoi na stanie sprzed oceny, a predykcje/readiness/targets czytaja
-        # wlasnie jego. Trening na tej probce to ulamek sekundy; jego awaria
-        # nie moze zablokowac zapisu oceny, stad oslona.
-        try:
-            await asyncio.to_thread(model.train, DEFAULT_MODE, True, GOAL)
-        except Exception as e:
-            await asyncio.to_thread(db.log_event, "model_train_fail",
-                                    {"error": f"{type(e).__name__}: {e}"}, ts)
+        # nowa obserwacja = trening. Bez tego grade_model w settings stoi
+        # na stanie sprzed oceny, a predykcje/readiness/targets czytaja
+        # wlasnie jego. W tle i w osobnym procesie: odpowiedz nie czeka
+        # (~1 min), awarie loguje worker (model_train_fail).
+        request_training()
     return {"received": len(raw), "new": new, "errors": errors[:5]}
 
 
@@ -961,42 +1020,42 @@ async def push_eog(payload: dict):
 
 
 @api.get("/eog")
-async def eog_summary():
+def eog_summary():
     return db.eog_stats()
 
 
 @api.get("/grades")
-async def grades():
+def grades():
     return db.grade_stats()
 
 
 @api.get("/grades/dataset")
-async def grades_dataset(mode: str | None = None):
+def grades_dataset(mode: str | None = None):
     return db.grades_with_stats(mode or DEFAULT_MODE)
 
 
 @api.get("/splits")
-async def splits():
+def splits():
     return {"current": db.current_split_id(), "splits": db.list_splits()}
 
 
 @api.get("/events")
-async def events(limit: int = 50, kind: str | None = None):
+def events(limit: int = 50, kind: str | None = None):
     return db.recent_events(limit, kind)
 
 
 @api.get("/pools")
-async def pools(limit: int = 50):
+def pools(limit: int = 50):
     return db.pool_history(limit)
 
 
 @api.get("/stats/keys")
-async def stats_keys():
+def stats_keys():
     return db.stat_keys()
 
 
 @api.get("/stats/share/{match_id}/{stat_key}")
-async def stats_share(match_id: str, stat_key: str):
+def stats_share(match_id: str, stat_key: str):
     r = db.my_share(match_id, stat_key)
     if r is None:
         raise HTTPException(404, "brak danych dla tego meczu lub pola")
@@ -1040,7 +1099,7 @@ async def get_augments():
 @write_api.post("/augments/refresh")
 async def augments_refresh():
     """(6) Reczny refresh slownika, poza petla patchowa."""
-    cur = db.get_setting("ddragon_patch") or ""
+    cur = await asyncio.to_thread(db.get_setting, "ddragon_patch") or ""
     short = ".".join(cur.split(".")[:2]) if cur else None
     r = await state["plain"].get(
         augments.BIN_URL, follow_redirects=True, timeout=90,
@@ -1180,7 +1239,7 @@ async def patch_notes_current():
     fetch listingu game-updates + artykulu (slug odkrywany z listingu - format
     zmienil sie w 2026), nieudany fetch ponawiany po godzinie. Zrodlo, parser
     i granica uzycia (wylacznie wyswietlanie): app/patchnotes.py."""
-    short = patch_meta()["short"]
+    short = (await asyncio.to_thread(patch_meta))["short"]
 
     def fresh(ent):
         return (ent and ent.get("patch") == short
@@ -1188,11 +1247,11 @@ async def patch_notes_current():
                 and (ent.get("ok")
                      or time.time() - ent.get("fetched_at", 0) < 3600))
 
-    ent = db.get_json_setting("patch_notes")
+    ent = await asyncio.to_thread(db.get_json_setting, "patch_notes")
     if fresh(ent):
         return ent
     async with _NOTES_LOCK:
-        ent = db.get_json_setting("patch_notes")
+        ent = await asyncio.to_thread(db.get_json_setting, "patch_notes")
         if fresh(ent):
             return ent
         ent = {"patch": short, "fetched_at": int(time.time()), "ok": False,
@@ -1320,7 +1379,7 @@ async def cheatsheet(champion_id: int):
     pierwszym zapytaniu, cache per champion per patch w settings; nieudany
     fetch ponawiany najwczesniej po godzinie. Zrodlo WYLACZNIE do
     wyswietlania - jak mnozniki balansu."""
-    short = patch_meta()["short"]
+    short = (await asyncio.to_thread(patch_meta))["short"]
 
     def fresh(ent):
         return (ent and ent.get("patch") == short
@@ -1328,7 +1387,7 @@ async def cheatsheet(champion_id: int):
                 and (ent.get("ok")
                      or time.time() - ent.get("fetched_at", 0) < 3600))
 
-    store = db.get_json_setting("cheatsheet") or {}
+    store = await asyncio.to_thread(db.get_json_setting, "cheatsheet") or {}
     ent = store.get(str(champion_id))
     if fresh(ent):
         return ent
@@ -1339,7 +1398,7 @@ async def cheatsheet(champion_id: int):
 
     lock = _CHEAT_LOCKS.setdefault(champion_id, asyncio.Lock())
     async with lock:
-        store = db.get_json_setting("cheatsheet") or {}
+        store = await asyncio.to_thread(db.get_json_setting, "cheatsheet") or {}
         ent = store.get(str(champion_id))
         if fresh(ent):
             return ent
@@ -1359,7 +1418,7 @@ async def cheatsheet(champion_id: int):
                     ent["ok"] = True
         except Exception:
             pass
-        version = db.get_setting("ddragon_patch")
+        version = await asyncio.to_thread(db.get_setting, "ddragon_patch")
         if version:
             try:
                 r = await state["plain"].get(
@@ -1436,17 +1495,17 @@ async def backup_report(payload: dict):
 
 
 @api.get("/model/status")
-async def model_status(min_games: int = 40):
+def model_status(min_games: int = 40):
     return db.model_status(min_games)
 
 
 @write_api.post("/model/train")
 async def model_train(mode: str | None = None):
-    return await asyncio.to_thread(model.train, mode or DEFAULT_MODE, True, GOAL)
+    return await run_training(mode)
 
 
 @api.get("/model")
-async def model_get():
+def model_get():
     m = db.get_json_setting("grade_model")
     if not m:
         raise HTTPException(404, "model nie byl jeszcze trenowany")
@@ -1459,7 +1518,7 @@ async def model_rates(mode: str | None = None):
 
 
 @api.get("/model/explain")
-async def model_explain(mode: str | None = None):
+def model_explain(mode: str | None = None):
     """Ostatnie mecze z predykcja obok faktycznej oceny - do sprawdzenia,
     czy model w ogole trafia."""
     # (B5) predict bez mode liczyl z-score dmg z populacji WSZYSTKICH
@@ -1485,18 +1544,22 @@ async def grades_explain(match_id: str):
     out = await asyncio.to_thread(model.explain, match_id)
     if not out:
         raise HTTPException(404, "brak oceny lub statystyk dla tego meczu")
-    with db.connect() as c:
-        r = c.execute("SELECT augments FROM eog_raw WHERE match_id=?",
-                      (match_id,)).fetchone()
-    ids = json.loads(r["augments"]) if r and r["augments"] else []
+    def aug_ids():
+        with db.connect() as c:
+            r = c.execute("SELECT augments FROM eog_raw WHERE match_id=?",
+                          (match_id,)).fetchone()
+        return json.loads(r["augments"]) if r and r["augments"] else []
+    ids = await asyncio.to_thread(aug_ids)
     out["augments"] = augments.names_for(ids)
     # (E) pozycja na tle 10 graczy TEGO meczu - kontekst, nie diagnoza
     out["match_pct"] = await asyncio.to_thread(db.match_percentiles, match_id)
     # (M, karta 9) znajomi w tym meczu: widziani w INNYCH meczach
-    my = db.my_lcu_puuid()
-    with db.connect() as c:
-        others = [r["puuid"] for r in c.execute(
-            "SELECT puuid FROM match_participant WHERE match_id=?", (match_id,))]
+    def people():
+        with db.connect() as c:
+            others = [r["puuid"] for r in c.execute(
+                "SELECT puuid FROM match_participant WHERE match_id=?", (match_id,))]
+        return db.my_lcu_puuid(), others
+    my, others = await asyncio.to_thread(people)
     summ = await asyncio.to_thread(db.players_summary, others, my, match_id)
     out["known_players"] = [{"puuid": p, **d} for p, d in summ.items() if d["games"]]
     return out
@@ -1897,9 +1960,10 @@ async def norms(stat: str = "totalDamageDealtToChampions", mode: str | None = No
     """Rozklad danej statystyki per champion, zebrany ze wszystkich graczy
     w Mayhemie. Zastepuje zrodlo zewnetrzne, ktore tego trybu nie ma."""
     d = await asyncio.to_thread(db.champion_norms, stat, mode or DEFAULT_MODE)
-    names = {}
-    with db.connect() as c:
-        names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM champion")}
+    def champ_names():
+        with db.connect() as c:
+            return {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM champion")}
+    names = await asyncio.to_thread(champ_names)
     d["champions"] = {
         str(cid): {**v, "name": names.get(cid, str(cid))}
         for cid, v in sorted(d["champions"].items(), key=lambda kv: -kv[1]["mean"])}

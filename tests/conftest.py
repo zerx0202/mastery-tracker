@@ -13,6 +13,10 @@ os.environ.setdefault("RIOT_ID", "Test#EUW")
 os.environ.setdefault("MY_RIOT_NAME", "Test")
 os.environ.setdefault("MY_RIOT_TAG", "EUW")
 os.environ.setdefault("API_TOKEN", "")
+# trening w tle w watku, nie w procesie potomnym: atrapy model.train
+# z monkeypatch dzialaja tylko w tym procesie; sciezke procesu sprawdza
+# jawnie tests/test_training_off_request_path.py
+os.environ.setdefault("TRAIN_IN_PROCESS", "0")
 
 from app import db
 

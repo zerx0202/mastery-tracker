@@ -111,6 +111,7 @@ def test_champ_select_sends_allies_and_skips_identical_sessions():
         sess = _sess([114, 360], team)
         await a.handle_champ_select(sess)
         await a.handle_champ_select(json.loads(json.dumps(sess)))   # ten sam tik zegara
+        await a.settle()                   # pula idzie w tle (23.09)
         posts = [p for p in a.server.posts if p[0] == "/lobby"]
         assert len(posts) == 1                                          # odcisk odsial powtorke
         assert a.lcu.calls.count("/lol-gameflow/v1/session") == 1      # bez drugiego GET-a
@@ -121,7 +122,9 @@ def test_champ_select_sends_allies_and_skips_identical_sessions():
                              "name": "Zed#EUW", "hidden": False}
         # wyjscie z champ selecta zeruje odcisk - ta sama sesja pozniej idzie znow
         await a.handle_champ_select(None)
+        await a.settle()
         await a.handle_champ_select(sess)
+        await a.settle()
         assert len([p for p in a.server.posts if p[0] == "/lobby"]) == 3
     asyncio.run(run())
 
@@ -136,10 +139,12 @@ def test_dispatch_ws_routes_and_counts(tmp_path):
         assert a.in_game is True
         sess = _sess([114], [{"cellId": 2, "championId": 53}])
         assert await a.dispatch_ws("/lol-champ-select/v1/session", sess) is True
+        await a.settle()                   # POST-y ida w tle (23.09)
         assert any(p[0] == "/lobby" for p in a.server.posts)
         assert await a.dispatch_ws(
             "/lol-end-of-game/v1/champion-mastery-updates",
             [{"grade": "A", "championId": 53, "gameId": 5, "pointsGained": 400}]) is True
+        await a.settle()
         assert any(p[0] == "/grade" for p in a.server.posts)
         assert await a.dispatch_ws("/lol-chat/v1/conversations", {"x": 1}) is False
         assert a.ws_events == {"total": 4, "phase": 1, "champ_select": 1, "mastery": 1,

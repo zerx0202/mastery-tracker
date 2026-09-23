@@ -66,6 +66,7 @@ def test_ws_delete_of_champ_select_session_is_an_exit():
         assert a.last_pool_key is not None
         assert await a.dispatch_ws("/lol-champ-select/v1/session", sess, "Delete") is True
         assert a.last_pool_key is None and a._sess_fp is None
+        await a.settle()                                  # pula idzie w tle (23.09)
         assert [p[1]["champion_ids"] for p in a.server.posts if p[0] == "/lobby"][-1] == []
     asyncio.run(run())
 
@@ -77,11 +78,13 @@ def test_empty_gameflow_does_not_freeze_unknown_queue():
         a = _agent(FakeLcu({}))                           # gameflow chwilowo nie odpowiada
         sess = _sess([114], [{"cellId": 2, "championId": 53}])
         await a.handle_champ_select(sess)
+        await a.settle()                                  # pula idzie w tle (23.09)
         lobby = [p[1] for p in a.server.posts if p[0] == "/lobby"]
         assert lobby[-1]["queue"] == "UNKNOWN" and a._sess_fp is None
         a.lcu.responses["/lol-gameflow/v1/session"] = {
             "gameData": {"queue": {"gameMode": "KIWI", "id": 2400}}}
         await a.handle_champ_select(sess)                 # ta sama sesja, kolejny tik
+        await a.settle()
         assert a.lcu.calls.count("/lol-gameflow/v1/session") == 2
         lobby = [p[1] for p in a.server.posts if p[0] == "/lobby"]
         assert lobby[-1]["queue"] == "KIWI" and a._sess_fp is not None
