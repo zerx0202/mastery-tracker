@@ -86,6 +86,26 @@ LIVE_END_RETRY_SECONDS = 600
 # harmonogram, nie limit: dane dochodza przy nastepnej bezczynnosci.
 IDLE_PHASES = ("None", "Lobby")
 
+# (23.09, decyzja czlowieka "tak dla 1 na 10 s") Tempo snowballa. Przy
+# 1 graczu/min seria 3 dni x 10 gier (~960 graczy z rewizjami 7-dniowymi)
+# wymagala ~16 h bezczynnego klienta, przy 10 s ~2,7 h. Riot nie publikuje
+# limitu LCU dla historii (aplikacje typu Porofessor biora 9 profili
+# w sekundy), wiec prawdziwym zabezpieczeniem jest hamowanie: kazda porazka
+# (LCU bez danych, serwer nie przyjal) podwaja przerwe do 5 min, sukces
+# wraca do 10 s. Pusta kolejka / zajety klient = pytanie serwera co minute.
+SNOWBALL_INTERVAL = 10
+SNOWBALL_IDLE_POLL = 60
+SNOWBALL_BACKOFF_MAX = 300
+
+
+def snowball_next_delay(outcome, prev):
+    """Przerwa przed kolejnym obiegiem snowballa wg wyniku poprzedniego."""
+    if outcome == "done":
+        return SNOWBALL_INTERVAL
+    if outcome == "fail":
+        return min(max(prev, SNOWBALL_INTERVAL) * 2, SNOWBALL_BACKOFF_MAX)
+    return SNOWBALL_IDLE_POLL
+
 # Wylacznie dane ULOTNE (zyja tylko na ekranie koncowym) - trzy endpointy
 # nieulotne (local-player mastery, collections, career-stats) byly zrzucane
 # po kazdej grze bez zadnego konsumenta i kasowane rotacja (audyt 2.09)
@@ -663,19 +683,28 @@ class Agent:
             log(f"meldunek incydentu: {type(e).__name__}: {e}", "dim")
 
     async def snowball_loop(self):
-        """Co ~60 s bierze jednego gracza z rejestru serwera i dosyla jego
-        gry KIWI. Chodzi tylko przy bezczynnym kliencie (background_allowed)
-        - LCU i serwer maja byc responsywne dla Ciebie, nie dla snowballa."""
+        """Bierze po jednym graczu z rejestru serwera i dosyla jego gry KIWI.
+        Tylko przy bezczynnym kliencie (background_allowed); tempo i hamowanie
+        - SNOWBALL_* i snowball_next_delay."""
+        delay = SNOWBALL_IDLE_POLL
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(delay)
             try:
-                await self._snowball_once()
+                outcome = await self._snowball_once()
             except Exception as e:
                 log(f"snowball: {type(e).__name__}: {e}", "dim")
+                outcome = "fail"
+            if outcome == "fail" and delay < SNOWBALL_BACKOFF_MAX:
+                log(f"snowball: porazka, nastepna proba za "
+                    f"{snowball_next_delay(outcome, delay)} s", "dim")
+            delay = snowball_next_delay(outcome, delay)
 
     async def _snowball_once(self):
+        """Jeden gracz. Wynik: "done" (przetworzony), "idle" (klient zajety,
+        snowball wylaczony albo pusta kolejka), "fail" (LCU nie oddal historii
+        albo serwer jej nie przyjal - hamowanie)."""
         if self.cfg.get("snowball") != "on" or not self.background_allowed():
-            return
+            return "idle"
         nxt = await self.session.get(
             self.cfg["api_base"] + "/snowball/next",
             timeout=aiohttp.ClientTimeout(total=15))
@@ -688,17 +717,21 @@ class Agent:
                 self._sb_idle = True
                 log("snowball: kolejka pusta - rejestr swiezy, "
                     "wroce po oknie rewizyty", "dim")
-            return
+            return "idle"
         self._sb_idle = False
         pu = puuids[0]
         h = await self.lcu.get(
             f"/lol-match-history/v1/products/lol/{pu}/matches"
             f"?begIndex=0&endIndex=19", timeout=20)
-        games = (h or {}).get("games", {}).get("games") or []
+        if h is None:
+            # (23.09) odmowa/timeout LCU to NIE pusta historia: ingest z [] oznaczal
+            # gracza jako sprawdzonego i wypadal z kolejki na 7 dni
+            return "fail"
+        games = (h.get("games") or {}).get("games") or []
         r = await self.server.post("/snowball/ingest",
                                    {"puuid": pu, "games": games})
         if r is None:
-            return
+            return "fail"
         kiwi, new = r.get("kiwi") or 0, r.get("new_rows") or 0
         if new:
             log(f"snowball: gracz {pu[:8]}… — {kiwi} gier KIWI, "
@@ -709,6 +742,7 @@ class Agent:
             # nie awaria ingestu
             log(f"snowball: gracz {pu[:8]}… — {kiwi} gier KIWI, "
                 "wszystkie juz w bazie (dedup)", "dim")
+        return "done"
 
     # ---------- konsola LCU (42) + odzysk gier (P6) ----------
 
