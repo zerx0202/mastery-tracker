@@ -218,18 +218,40 @@ async def augments_refresh_loop():
     await asyncio.sleep(150)
     while True:
         try:
-            book = await asyncio.to_thread(db.get_json_setting, "augment_book") or {}
-            cur = await asyncio.to_thread(db.get_setting, "ddragon_patch") or ""
-            short = ".".join(cur.split(".")[:2]) if cur else None
-            if short and book.get("patch") != short:
-                r = await state["plain"].get(
-                    augments.BIN_URL, follow_redirects=True, timeout=90,
-                    headers={"User-Agent": "mastery-tracker/1.0"})
-                if r.status_code == 200:
-                    await asyncio.to_thread(augments.store_augments,
-                                            r.text, short)
+            await augments_refresh_once()
         except Exception as e:
             await asyncio.to_thread(_loop_error, "augments", e)
+        await asyncio.sleep(6 * 3600)
+
+
+async def augments_refresh_once():
+    """Jeden obieg: pobiera slownik, gdy zmienil sie BIEZACY patch (patch
+    gry albo DD, patrz patch_meta) - dotad kluczem byl sam Data Dragon,
+    wiec nowe augmenty czekaly na jego reczne odswiezenie. True = pobrano."""
+    book = await asyncio.to_thread(db.get_json_setting, "augment_book") or {}
+    short = (await asyncio.to_thread(patch_meta))["short"]
+    if not short or book.get("patch") == short:
+        return False
+    r = await state["plain"].get(
+        augments.BIN_URL, follow_redirects=True, timeout=90,
+        headers={"User-Agent": "mastery-tracker/1.0"})
+    if r.status_code != 200:
+        return False
+    await asyncio.to_thread(augments.store_augments, r.text, short)
+    return True
+
+
+async def ddragon_refresh_loop():
+    """(23.09) Data Dragon (nazwy, klucze ikon, wersja zasobow) odswiezany
+    sam co 6 h - dotad wylacznie recznym POST /refresh-champions, ktorego
+    nikt nie wolal 23 dni. refresh_champions pomija zapis, gdy wersja sie
+    nie zmienila, wiec pusty obieg to jeden lekki GET versions.json."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await refresh_champions()
+        except Exception as e:
+            await asyncio.to_thread(_loop_error, "ddragon", e)
         await asyncio.sleep(6 * 3600)
 
 
@@ -242,6 +264,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(daily_snapshot_loop())
     asyncio.create_task(balance_refresh_loop())
     asyncio.create_task(augments_refresh_loop())
+    asyncio.create_task(ddragon_refresh_loop())
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
     state["plain"] = httpx.AsyncClient(timeout=15.0)
@@ -415,12 +438,31 @@ def path_to_goal(current, ladder):
     return games, steps, marks
 
 
+def newer_patch(a, b):
+    """Nowszy z dwoch patchy "16.9"/"16.10" - porownanie liczbowe, nie
+    tekstowe ("16.9" > "16.10" jako tekst). None przegrywa z czymkolwiek."""
+    def key(p):
+        try:
+            return tuple(int(x) for x in str(p).split(".")[:2])
+        except ValueError:
+            return (-1,)
+    cands = [p for p in (a, b) if p]
+    return max(cands, key=key) if cands else None
+
+
 def patch_meta(mode=None):
     """Baner patch-awareness (karta 15): normy i model licza sie glownie
     na poprzednim patchu, a patch w Mayhemie zmienia tez mnozniki balansu
-    trybu (potwierdzone na customach, 1.09)."""
+    trybu (potwierdzone na customach, 1.09).
+
+    (23.09) short = nowszy z Data Dragona i patcha ostatniej wlasnej gry:
+    DD publikuje nowy patch z opoznieniem, a do 23.09 w ogole nie byl
+    odswiezany sam (system stal na 16.17 przy grze na 16.19). Od short
+    zaleza baner, notki, cache sciagi i slownik augmentow; version to
+    wersja zasobow DD (ikony, dane championow) - musi istniec w DD."""
     cur = db.get_setting("ddragon_patch") or ""
-    short = ".".join(cur.split(".")[:2]) if cur else None
+    dd_short = ".".join(cur.split(".")[:2]) if cur else None
+    short = newer_patch(dd_short, db.latest_game_patch())
     games = db.games_on_patch(short, mode) if short else 0
     return {"version": cur or None, "short": short, "games": games,
             "fresh": bool(short) and games < 8}
@@ -1099,8 +1141,7 @@ async def get_augments():
 @write_api.post("/augments/refresh")
 async def augments_refresh():
     """(6) Reczny refresh slownika, poza petla patchowa."""
-    cur = await asyncio.to_thread(db.get_setting, "ddragon_patch") or ""
-    short = ".".join(cur.split(".")[:2]) if cur else None
+    short = (await asyncio.to_thread(patch_meta))["short"]
     r = await state["plain"].get(
         augments.BIN_URL, follow_redirects=True, timeout=90,
         headers={"User-Agent": "mastery-tracker/1.0"})
@@ -1811,6 +1852,7 @@ def _system_health_sync():
         "counts": counts,
         "model": db.model_status(),
         "ddragon_patch": db.get_setting("ddragon_patch"),
+        "game_patch": db.latest_game_patch(),
         "events": events,
         "gates": db.data_gates(),
         "pipeline": db.pipeline_sanity(),

@@ -1716,6 +1716,19 @@ def champion_sb_popularity():
             "WHERE match_id GLOB 'SB_*' GROUP BY champion_id")}
 
 
+def latest_game_patch():
+    """Patch najnowszej wlasnej gry (gameVersion klienta, np. "16.19").
+    Data Dragon publikuje nowy patch z opoznieniem (sonda 23.09: 16.18.1
+    przy grze na 16.19), a gra wie od pierwszego meczu. game_creation bywa
+    w ms i w s - sortujemy po wartosci znormalizowanej do sekund."""
+    with connect() as con:
+        r = con.execute(
+            "SELECT patch FROM match_player WHERE patch IS NOT NULL AND patch != '' "
+            "ORDER BY CASE WHEN game_creation > 100000000000 "
+            "THEN game_creation / 1000 ELSE game_creation END DESC LIMIT 1").fetchone()
+    return r["patch"] if r else None
+
+
 def games_on_patch(patch_short, mode=None):
     clause = "AND game_mode = ?" if mode else ""
     args = (patch_short,) + ((mode,) if mode else ())

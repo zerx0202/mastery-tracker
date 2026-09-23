@@ -1383,7 +1383,9 @@ async function renderSystem() {
         ${d.non_mission_games ? `<div class="kv"><span class="dim">w tym poza misją
           (inne tryby, Practice Tool; treningi custom: ${d.custom_games || 0})</span>
           <span class="dim">${d.non_mission_games}</span></div>` : ""}
-        <div class="kv" style="margin-top:12px"><span>Patch Data Dragon</span>
+        <div class="kv" style="margin-top:12px"><span>Patch gry (ostatnia gra)</span>
+          <span>${esc(d.game_patch || "—")}</span></div>
+        <div class="kv"><span title="wersja zasobów: ikony i dane championów; Riot publikuje ją z opóźnieniem względem gry">Patch Data Dragon</span>
           <span>${esc(d.ddragon_patch || "—")}</span></div>
       </div>
       <div class="panel"><div class="eyebrow">Bramki danych</div>${gates}
