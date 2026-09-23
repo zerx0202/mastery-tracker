@@ -329,3 +329,30 @@ def test_lab_recurring_players_show_old_ids_without_footnote(page):
     txt = panel.inner_text()
     assert "(karta 9)" not in txt and "Tożsamości" not in txt
     assert "Nowa" in txt and "dawniej Stara#EUW" in txt
+
+
+def test_slow_ranking_still_renders_and_follows_click(browser, ui_server, monkeypatch):
+    # /targets na produkcji ~3,7 s, a tick pulpitu co 4 s unieważnial kazde
+    # rysowanie w toku - pusty hero i tabela bez bledu w konsoli (23.09),
+    # klik w wiersz "nic nie robil" z tego samego powodu
+    import asyncio
+    real = app_main._targets
+
+    async def slow(*a):
+        await asyncio.sleep(4.5)
+        return await real(*a)
+    monkeypatch.setattr(app_main, "_targets", slow)
+    db.set_lobby([], "KIWI", "limited", int(time.time()))  # pulpit, nie champ select
+    ctx = browser.new_context()
+    pg = ctx.new_page()
+    pg.route(re.compile(r"^https?://(?!127\.0\.0\.1)"), lambda r: r.abort())
+    try:
+        pg.goto(ui_server + "/", wait_until="domcontentloaded")
+        pg.wait_for_selector("#hero .who", timeout=20000)
+        row = pg.wait_for_selector("#cards tr[data-pick]")
+        name = row.query_selector(".champ-cell").inner_text().split()[0]
+        row.click()
+        pg.wait_for_selector("#hero .hero-back", timeout=20000)
+        assert name in pg.inner_text("#hero .who")
+    finally:
+        ctx.close()

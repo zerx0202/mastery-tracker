@@ -370,6 +370,27 @@ async def targets(limit: int = 30, only: str | None = None,
                                 lambda: _targets(limit, only, ids, mode))
 
 
+# Popularnosc w snowballu (pop_tier) to COUNT DISTINCT po ~1 mln wierszy
+# player_stat: na Macu (virtiofs) ~3 s z 3,7 s /targets, a pulpit pyta co
+# 4 s - kazde rysowanie bylo uniewazniane przez nastepne i ekran zostawal
+# pusty (23.09). Wynik rusza sie tylko, gdy snowball dopisze gry, a sluzy
+# do tercyli rzadki/sredni/czesty - 10 min spoznienia nic nie zmienia.
+# Klucz = sciezka bazy: swiat testu i przywrocona kopia nie dziela wyniku.
+SB_POP_TTL = 600
+_SB_POP_CACHE = {}
+
+
+def sb_popularity():
+    key = str(db.DB_PATH)
+    now = time.time()
+    hit = _SB_POP_CACHE.get(key)
+    if hit and now - hit[0] < SB_POP_TTL:
+        return hit[1]
+    pop = db.champion_sb_popularity()
+    _SB_POP_CACHE[key] = (now, pop)
+    return pop
+
+
 async def _targets(limit, only, ids, mode):
     # (U) snapshot i drabinka w watku - synchroniczny connect() z busy_timeout
     # 10 s na petli zdarzen zamrazal caly serwer przy zapisie po grze
@@ -423,7 +444,7 @@ async def _targets(limit, only, ids, mode):
     md = await asyncio.to_thread(db.get_json_setting, "grade_model")
     ready = await asyncio.to_thread(model.readiness)
     own_counts = await asyncio.to_thread(model.own_games_map, use_mode)
-    pop = await asyncio.to_thread(db.champion_sb_popularity)
+    pop = await asyncio.to_thread(sb_popularity)
     nz = sorted(v for v in pop.values() if v > 0)
 
     def pop_tier(n):

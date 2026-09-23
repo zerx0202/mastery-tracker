@@ -472,7 +472,22 @@ let LOBBY_FAILS = 0, LAST_LOBBY = null;
 // Zerowany przy wejsciu/wyjsciu z champ selecta (inna lista)
 let HERO_PICK = null, HERO_SCOPE = null;
 
+/* Licznik rysowan w toku: tick pulpitu pomija sie, dopoki poprzednie
+   rysowanie nie skonczy. Bez tego /targets dluzsze niz odstep ticku
+   (produkcja 23.09: 3,7 s przy ticku 4 s) sprawialo, ze kazde rysowanie
+   uniewaznial nastepny tick - pusty hero i tabela bez zadnego bledu,
+   klik w wiersz tez ginal. Klik i zmiana zakladki dalej uniewazniaja
+   stare rysowanie (epoka). Rysowanie starsze niz NOW_STUCK_MS uznajemy
+   za zawieszone (fetch bez timeoutu), zeby strona nie zamarzla na zawsze. */
+let NOW_INFLIGHT = 0, NOW_STARTED = 0;
+const NOW_STUCK_MS = 20000;
 async function renderNow() {
+  NOW_INFLIGHT++;
+  NOW_STARTED = Date.now();
+  try { await drawNow(); } finally { NOW_INFLIGHT--; }
+}
+
+async function drawNow() {
   const ep = ++NOW_EPOCH;
   const stale = () => ep !== NOW_EPOCH;
 
@@ -1539,6 +1554,7 @@ let NOW_FAST = false, NOW_TICK = 0;
 setInterval(() => {
   NOW_TICK += 1;
   if (location.hash !== "#/" && location.hash) return;
+  if (NOW_INFLIGHT && Date.now() - NOW_STARTED < NOW_STUCK_MS) return;
   if (NOW_FAST || NOW_TICK % 4 === 0) renderNow();
 }, 1000);
 setInterval(tick, 10000);
