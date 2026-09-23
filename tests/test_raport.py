@@ -56,7 +56,7 @@ def test_data_gates_counts(fresh_db):
     assert gates["s_minus"]["have"] == 1          # tylko dokladne S-
     assert gates["eventdata"]["have"] == 1
     assert gates["class_feats"]["have"] == 1      # ocena z meczem
-    assert gates["big_review"]["need"] == 200         # (T) po rewizji 9.09
+    assert gates["big_review"]["need"] == 400         # (23.09) po rewizji 23.09
 
 
 # ---------- P8: sanity potoku ----------

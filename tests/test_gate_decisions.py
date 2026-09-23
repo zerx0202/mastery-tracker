@@ -19,3 +19,14 @@ def test_gate_notes_carry_latest_verdicts(fresh_db):
     gates = {g["key"]: g for g in db.data_gates()}
     for key in ("brier", "eventdata", "class_feats", "big_review"):
         assert "23.09" in gates[key]["note"], key
+
+
+def test_rearmed_thresholds_double_the_sample(fresh_db):
+    # (23.09, "progi tak") powtorka dopiero przy ~podwojonej probie - mniejsze
+    # przyrosty nie ruszaja miar (AUC < 0,1 to szum); S- to prog
+    # wiarygodnosci, nie powtorka
+    need = {g["key"]: g["need"] for g in db.data_gates()}
+    assert need == {"s_minus": 5, "brier": 300, "eventdata": 400,
+                    "class_feats": 400, "big_review": 400}
+    note = {g["key"]: g for g in db.data_gates()}["class_feats"]["note"]
+    assert "90 %" in note

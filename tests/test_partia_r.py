@@ -8,9 +8,10 @@ from tests.conftest import insert_row
 
 def test_gates_carry_rearmed_thresholds_and_notes(fresh_db):
     gates = {g["key"]: g for g in db.data_gates()}
-    assert gates["class_feats"]["need"] == 150 and "odrzucone" in gates["class_feats"]["note"]
-    assert gates["brier"]["need"] == 20 and gates["s_minus"]["need"] == 5
-    assert gates["eventdata"]["need"] == 100 and gates["big_review"]["need"] == 200
+    # (23.09) progi po trzeciej rewizji - pelna lista w test_gate_decisions
+    assert gates["class_feats"]["need"] == 400 and "odrzucone" in gates["class_feats"]["note"]
+    assert gates["brier"]["need"] == 300 and gates["s_minus"]["need"] == 5
+    assert gates["eventdata"]["need"] == 400 and gates["big_review"]["need"] == 400
     assert all(g.get("note") for g in gates.values())
 
 
