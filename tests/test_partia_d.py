@@ -90,8 +90,8 @@ def test_save_grade_dedup_and_censored_replacement(fresh_db):
                         "FROM grade_observation WHERE match_id='EUW1_10'"
                         ).fetchone()
     assert r["grade"] == "A" and r["c"] == 0 and r["source"] is None
-    gates = {g["key"]: g for g in db.data_gates()}
-    assert gates["fatigue"]["have"] == 2, "dokladna ocena wchodzi do licznika"
+    # (23.09) licznik bramki zmeczenia zniknal razem z zamknieta hipoteza;
+    # "dokladna" sprawdza asercja wyzej (censored = 0)
 
 
 # ---------- backfill ocen ze snapshotow: jedyny producent cenzur ----------

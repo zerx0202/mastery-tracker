@@ -204,7 +204,9 @@ def test_system_shows_gates_and_pipeline(page):
     # (P4/P8) zakladka System: liczniki bramek i zdrowie potoku
     page.click('nav a[href="#/system"]')
     panel = page.wait_for_selector('#v-system .panel:has-text("Bramki danych")')
-    assert "/120" in panel.inner_text()         # (T) powtorka zmeczenia przy 120
+    txt = panel.inner_text()
+    # (23.09) hipoteza zmeczenia zamknieta - jej bramka znika z panelu
+    assert "Rewizja eventdata" in txt and "Hipoteza zmęczenia" not in txt
     page.wait_for_selector('#v-system .kv:has-text("Oceny bez meczu")')
     page.wait_for_selector('#v-system .kv:has-text("Ostatni backup")')
     # (42) konsola LCU renderuje sie z polem sciezki i przyciskiem
@@ -356,3 +358,16 @@ def test_slow_ranking_still_renders_and_follows_click(browser, ui_server, monkey
         assert name in pg.inner_text("#hero .who")
     finally:
         ctx.close()
+
+
+def test_hero_chance_comes_from_calibrated_rates(page):
+    # (23.09) szansa w hero = next_p z czestosci (skalibrowane), nie model-p
+    # (przedmeczowo zanizal S- ok. 2x) - te same liczby, ktore licza ranking
+    page.wait_for_selector("#hero .who")
+    lead = page.evaluate("fetch('/api/lobby').then(r => r.json()).then(d => d.targets[0])")
+    assert lead["next_p"] is not None
+    txt = page.inner_text("#hero")
+    # Math.round w JS zaokragla polowki w gore, round() w Pythonie do parzystej
+    pct = int(100 * lead["next_p"] + 0.5)
+    assert f"{pct}% szans na" in txt
+    assert "AUC" not in txt

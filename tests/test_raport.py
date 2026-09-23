@@ -54,7 +54,6 @@ def test_data_gates_counts(fresh_db):
     db.save_live_events(45, [{"EventName": "ChampionKill"}])
     gates = {g["key"]: g for g in db.data_gates()}
     assert gates["s_minus"]["have"] == 1          # tylko dokladne S-
-    assert gates["fatigue"]["have"] == 2          # dokladne, bez ">="
     assert gates["eventdata"]["have"] == 1
     assert gates["class_feats"]["have"] == 1      # ocena z meczem
     assert gates["big_review"]["need"] == 200         # (T) po rewizji 9.09

@@ -626,7 +626,7 @@ async function drawNow() {
         ${rail(b.milestone, GOAL, b.next_grade, b.next_need, b.next_have)}
         ${inSelect && poolBadges(b, lobbyTrade, inSelect)
           ? `<div style="margin-top:7px;margin-left:-8px">${poolBadges(b, lobbyTrade, inSelect)}</div>` : ""}
-        <div class="range" style="margin-top:8px">${modelNote(b)}</div>
+        <div class="range" style="margin-top:8px">${chanceNote(b)}</div>
         <div class="range dim" style="margin-top:4px;font-size:11.5px">
           orientacyjnie ${gamesLine}</div>
         ${balanceLine(bal[b.champion_id])}
@@ -840,15 +840,20 @@ async function renderSide() {
 
 /* Model mowi cos sensownego tylko dla progow, ktore przeszly walidacje.
    Przy S- nie przeszedl, wiec zamiast fikcyjnego procentu piszemy prawde. */
-function modelNote(t) {
-  if (t.model_p != null) {
-    const auc = t.model_auc ? ` · AUC ${t.model_auc}` : "";
-    const g = t.model_games ? ` z ${t.model_games} gier` : "";
-    return `<span class="g">${(100 * t.model_p).toFixed(0)}%</span> szans na
-            <span class="g">${esc(t.next_grade)}</span>${g}${auc}`;
+/* (23.09) Szansa w hero = next_p, czyli czestosci ocen - to samo p, ktore
+   liczy E(c) i ranking. Odczyt Briera na kopii 23.09: next_p skalibrowane
+   (A- Z -0,09, S- Z 0,31), a model-p przedmeczowo zanizal S- ok. 2x
+   (srednio 8 % przy 17 % trafien, n 58) - model dobrze tlumaczy ocene ze
+   statystyk tej samej gry, ale przed gra ich nie zna. Decyzja czlowieka. */
+function chanceNote(t) {
+  if (t.next_p != null) {
+    const own = t.own_games_on_champ;
+    const g = own ? ` · Twoje gry tym championem: ${own}` : "";
+    return `<span class="g">${Math.round(100 * t.next_p)}%</span> szans na
+            <span class="g">${esc(t.next_grade)}</span> w grze${g}`;
   }
   return `<span class="g">${esc(t.next_grade || "?")}</span> —
-          model nie ma jeszcze danych dla tego progu`;
+          brak danych o szansie dla tego progu`;
 }
 
 /* ---------- OCENY ---------- */

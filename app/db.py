@@ -2093,9 +2093,6 @@ def data_gates():
     z tego 3 z next_p), model-p ma osobny odczyt w kalibracji."""
     s_rank = GRADE_RANK["S-"]
     with connect() as con:
-        exact = con.execute(
-            "SELECT COUNT(*) c FROM grade_observation "
-            "WHERE COALESCE(censored,0)=0").fetchone()["c"]
         s_pos = sum(1 for r in con.execute(
             "SELECT grade FROM grade_observation WHERE COALESCE(censored,0)=0")
             if GRADE_RANK.get(r["grade"], -1) >= s_rank)
@@ -2106,31 +2103,30 @@ def data_gates():
             JOIN match_player m ON m.match_id = g.match_id""").fetchone()["c"]
     resolved, _pending = prediction_pairs()
     rates_pairs = sum(1 for r in resolved if r.get("next_p") is not None)
+    # (23.09) Hipoteza zmeczenia ZAMKNIETA decyzja czlowieka: przy 211
+    # dokladnych ocenach i 195 grach w sesjach brak sygnalu w obu testach
+    # (rozgrzewka p 0,28-0,30, rho +0,01/+0,02) przy wysokiej mocy - bramka
+    # znika z listy, tools/fatigue_analysis.py zostaje jako zapis protokolu.
     return [
         {"key": "s_minus", "label": "Model S- (dokładne pozytywy)",
          "have": s_pos, "need": 5,
          "note": "próg wiarygodności modelu S- (poniżej 5 pozytywów = niewiarygodny)"},
         {"key": "brier", "label": "Brier E(c) (pary z next_p)",
          "have": rates_pairs, "need": 20,
-         "note": f"wszystkie pary: {len(resolved)}; odczyty 4.09/7.09/9.09 bez korekt "
-                 "(Z 0,93–1,12), następny przy ~60 parach"},
-        {"key": "fatigue", "label": "Hipoteza zmęczenia (dokładne oceny)",
-         "have": exact, "need": 120,
-         "note": "powtórki 4.09 (43) i 9.09 (80): brak sygnału; rozgrzewka na granicy "
-                 "(rezyd. p 0,031, surowa 0,059) — tools/fatigue_analysis.py"},
+         "note": f"wszystkie pary: {len(resolved)}; 23.09 przy 162: next_p skalibrowane "
+                 "(A- Z −0,09, S- Z 0,31), model-p nie (Z 3,26 / 2,7) — hero pokazuje next_p"},
         {"key": "eventdata", "label": "Rewizja eventdata (gry z logiem)",
          "have": eventdata, "need": 100,
-         "note": "9.09 przy 67: deaths_5_10 r −0,35, p 0,0125 = SYGNAŁ na granicy; "
-                 "zbieranie zostaje, cecha do modelu przy pokryciu ≥ 90 % — "
-                 "tools/timing_analysis.py"},
+         "note": "23.09 przy 185: brak sygnału ponad śmierci (deaths_5_10 r −0,22); "
+                 "zbieranie zostaje — decyzja 23.09 — tools/timing_analysis.py"},
         {"key": "class_feats", "label": "Cechy klasowe (obserwacje)",
          "have": usable, "need": 150,
-         "note": "powtórki 4.09 (63) i 9.09 (100): taken_z odrzucone, mitigated pokrycie "
-                 "63 % < 90 % — tools/class_features_test.py"},
+         "note": "23.09 przy 231: taken_z odrzucone, mitigated pokrycie "
+                 "84 % < 90 % — tools/class_features_test.py"},
         {"key": "big_review", "label": "Rewizja duża: ranking/CUSUM/kalibracja",
          "have": usable, "need": 200,
-         "note": "9.09 przy 100: (46) odrzucona, kNN gorszy (+18 % log-loss), CUSUM "
-                 "stabilny, 44b next_p bez rozrzutu (0,4–0,6) — tools/big_review.py"},
+         "note": "23.09 przy 231: (46) odrzucona, kNN gorszy (+22 % log-loss), CUSUM "
+                 "stabilny, ranking nie wyprzedza reszty — tools/big_review.py"},
     ]
 
 
