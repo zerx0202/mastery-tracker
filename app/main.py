@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import sqlite3
 import time
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import asynccontextmanager
@@ -1718,28 +1719,100 @@ async def split_timeline(split: int | None = None):
     return await asyncio.to_thread(build)
 
 
+# (23.09) Eksport przy 5,7 mln wierszy statystyk: stary /api/export skladal
+# cala baze w pamieci (slowniki + jeden JSON) i curl dostawal 0 B. Oba kanaly
+# wyjscia czytaja teraz SPOJNA kopie robiona krokami po 4096 stron - jak
+# backup.sh: blokada SHARED zywej bazy trwa tylko w trakcie kroku, wiec zapis
+# po grze i snowball nie czekaja na caly eksport. Kopia robocza lezy obok
+# bazy (ten sam wolumen) i znika po wyslaniu.
+EXPORT_CHUNK_ROWS = 5000
+
+
+def _export_snapshot():
+    # sierota po zerwanym pobieraniu (generator nie zawsze dostaje close())
+    # nie moze zjadac dysku wolumenu - starsze niz godzina ida precz
+    for old in db.DB_PATH.parent.glob("_export-*.db"):
+        try:
+            if time.time() - old.stat().st_mtime > 3600:
+                old.unlink()
+        except OSError:
+            pass
+    path = db.DB_PATH.with_name(f"_export-{int(time.time() * 1000)}.db")
+    src = sqlite3.connect(f"file:{db.DB_PATH}?mode=ro", uri=True)
+    dst = sqlite3.connect(path)
+    try:
+        src.backup(dst, pages=4096, sleep=0.02)
+    finally:
+        dst.close()
+        src.close()
+    return path
+
+
+def _drop_snapshot(path):
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _export_json_chunks(path):
+    """JSON {tabela: [wiersze]} porcjami po EXPORT_CHUNK_ROWS wierszy -
+    format jak dotad (tools/db_from_export.py), pamiec stala. Kolumny
+    payload (bloby) pomijane: sa w backupie i w /api/export/db."""
+    # generator StreamingResponse biegnie w puli watkow - kolejne porcje
+    # moga przyjsc z roznych watkow
+    con = sqlite3.connect(path, check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    try:
+        tables = [r["name"] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'")]
+        yield "{"
+        for ti, t in enumerate(tables):
+            cols = [r["name"] for r in con.execute(f"PRAGMA table_info({t})")
+                    if "payload" not in r["name"]]
+            yield ("," if ti else "") + json.dumps(t) + ":["
+            cur = con.execute(f"SELECT {', '.join(cols)} FROM {t}")
+            first = True
+            while True:
+                rows = cur.fetchmany(EXPORT_CHUNK_ROWS)
+                if not rows:
+                    break
+                body = ",".join(json.dumps(dict(r), ensure_ascii=False) for r in rows)
+                yield ("" if first else ",") + body
+                first = False
+            yield "]"
+        yield "}"
+    finally:
+        con.close()
+        _drop_snapshot(path)
+
+
 @api.get("/export", dependencies=[Depends(require_token)])
 async def export_all():
     """Zrzut wszystkich tabel do JSON-a. Drugi kanal wyjscia obok restica -
     dane sa nieodtwarzalne, wiec jedna sciezka ratunku to za malo.
     Bloby (skompresowane eog) pomijamy: sa w backupie, a tu wazy najwiecej.
     Token jak na zapisach: pelny zrzut bazy to nie jest widok publiczny."""
-    def dump():
-        out = {}
-        with db.connect() as con:
-            tables = [r["name"] for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name NOT LIKE 'sqlite_%'")]
-            for t in tables:
-                cols = [r["name"] for r in con.execute(f"PRAGMA table_info({t})")
-                        if "payload" not in r["name"]]
-                sel = ", ".join(cols)
-                out[t] = [dict(r) for r in con.execute(f"SELECT {sel} FROM {t}")]
-        return out
-    data = await asyncio.to_thread(dump)
-    from fastapi.responses import JSONResponse
-    return JSONResponse(data, headers={
-        "Content-Disposition": f"attachment; filename=mastery-export-{int(time.time())}.json"})
+    from fastapi.responses import StreamingResponse
+    path = await asyncio.to_thread(_export_snapshot)
+    return StreamingResponse(
+        _export_json_chunks(path), media_type="application/json",
+        headers={"Content-Disposition":
+                 f"attachment; filename=mastery-export-{int(time.time())}.json"})
+
+
+@api.get("/export/db", dependencies=[Depends(require_token)])
+async def export_db():
+    """Spojna kopia SQLite razem z blobami - material pod narzedzia na kopii
+    (DB_PATH=...), bez przepisywania przez JSON."""
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+    path = await asyncio.to_thread(_export_snapshot)
+    return FileResponse(
+        path, media_type="application/vnd.sqlite3",
+        filename=f"mastery-{int(time.time())}.db",
+        background=BackgroundTask(_drop_snapshot, path))
 
 
 @api.get("/predictions/scorecard")
