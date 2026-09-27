@@ -1235,12 +1235,16 @@ async def probe_read(pid: int):
 async def history_missing(limit: int = 10):
     """(P6) Znane gry bez statystyk w match_player - agent dociaga je
     pojedynczo po ID przy bezczynnym kliencie."""
+    if backup_quiet():
+        return {"game_ids": [], "paused": "backup"}
     return {"game_ids": await asyncio.to_thread(db.missing_own_games, limit)}
 
 
 @api.get("/timelines/missing")
 async def timelines_missing(limit: int = 5):
     """Gry misji bez timeline - druga reka petli odzysku agenta."""
+    if backup_quiet():
+        return {"game_ids": [], "paused": "backup"}
     return {"game_ids": await asyncio.to_thread(db.missing_timelines, limit)}
 
 
@@ -1529,6 +1533,46 @@ async def agent_incident(payload: dict):
     return {"stored": True}
 
 
+# (27.09) Cisza na czas kopii bazy. backup.sh kopiuje krokami API backup
+# SQLite, a kazdy zapis innego polaczenia RESTARTUJE kopie od zera - na Macu
+# co drugi backup konczyl sie limitem 600 s i przez ten czas blokowal zapisy
+# po grze ("database is locked", 500 na /lobby i /live). Kopia jednym krokiem
+# trwa 17,9 s (sonda 27.09), czyli dluzej niz busy_timeout 10 s, wiec to nie
+# jest wyjscie. backup.sh zglasza poczatek i koniec kopii, a serwer oddaje
+# w tym oknie pusta prace w tle (snowball, brakujace gry, timeline'y) - agent
+# sam przechodzi w bezczynnosc. Okno wygasa samo (zabity backup.sh), a konczy
+# je tez raport backup-servera.
+BACKUP_QUIET_MAX = 900
+
+
+def backup_quiet():
+    return time.time() < state.get("backup_quiet_until", 0)
+
+
+@write_api.post("/backup/begin")
+async def backup_begin():
+    now = time.time()
+    state["backup_quiet_until"] = now + BACKUP_QUIET_MAX
+    state["backup_quiet_since"] = now
+    await asyncio.to_thread(db.log_event, "backup_begin", {}, int(now))
+    return {"quiet_until": int(state["backup_quiet_until"])}
+
+
+def _end_quiet():
+    since = state.pop("backup_quiet_since", None)
+    state["backup_quiet_until"] = 0
+    return round(time.time() - since, 1) if since else None
+
+
+@write_api.post("/backup/end")
+async def backup_end():
+    secs = _end_quiet()
+    # czas okna ciszy w dzienniku - widac, ile realnie trwa kopia na virtiofs
+    await asyncio.to_thread(db.log_event, "backup_end", {"seconds": secs},
+                            int(time.time()))
+    return {"quiet": False, "seconds": secs}
+
+
 @write_api.post("/backup/report")
 async def backup_report(payload: dict):
     """(P5) backup-server na Macu melduje tu wynik backupu. Dashboard
@@ -1537,6 +1581,7 @@ async def backup_report(payload: dict):
     ok = bool(payload.get("ok"))
     note = str(payload.get("note") or "")[:500]
     ts = int(time.time())
+    _end_quiet()   # bezpiecznik: raport przychodzi po calym backupie
     await asyncio.to_thread(db.set_json_setting, "last_backup",
                             {"ts": ts, "ok": ok, "note": note})
     await asyncio.to_thread(db.log_event, "backup_report",
@@ -1885,6 +1930,8 @@ async def snowball_ingest(payload: dict):
 
 @api.get("/snowball/next")
 async def snowball_next(limit: int = 1):
+    if backup_quiet():
+        return {"puuids": [], "paused": "backup"}
     return {"puuids": await asyncio.to_thread(db.snowball_next, min(limit, 5))}
 
 

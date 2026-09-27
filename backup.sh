@@ -8,6 +8,7 @@ export RESTIC_PASSWORD_FILE="$HOME/.restic-pass"
 export PATH="/opt/homebrew/bin:$PATH"
 
 SNAP="/tmp/mastery-snap.db"
+API="${MASTERY_API:-http://127.0.0.1:8000}"
 
 cd "$HOME/stacks/riot"
 
@@ -18,6 +19,35 @@ if [ -z "$CID" ] || [ "$(/opt/homebrew/bin/docker inspect -f '{{.State.Running}}
   echo "BLAD: kontener backend nie dziala - backupu NIE zrobiono" >&2
   exit 1
 fi
+
+# (27.09) Cisza na czas kopii: kazdy zapis innego polaczenia restartuje kopie
+# API backup od zera, a snowball agenta pisze co 10 s - kopia krecila sie do
+# limitu 600 s i blokowala zapisy po grze. begin = serwer oddaje agentowi
+# pusta prace w tle; end = wraca normalny ruch. end rowniez przy bledzie
+# (trap), a serwer i tak wygasza cisze sam po 15 min. Brak API nie blokuje
+# backupu (|| true) - najwyzej kopia potrwa dluzej, jak dotad.
+quiet() {
+  if [ -n "${MASTERY_API_TOKEN:-}" ]; then
+    curl -s -m 10 -o /dev/null -X POST -H "X-API-Token: $MASTERY_API_TOKEN" \
+      "$API/api/backup/$1" || true
+  else
+    curl -s -m 10 -o /dev/null -X POST "$API/api/backup/$1" || true
+  fi
+}
+# koniec ciszy dokladnie raz: po kopii albo z pulapki przy bledzie
+QUIET_ON=0
+quiet_end() {
+  if [ "$QUIET_ON" = 1 ]; then
+    QUIET_ON=0
+    quiet end
+  fi
+  return 0
+}
+trap quiet_end EXIT
+quiet begin
+QUIET_ON=1
+# paczka snowballa w locie (agent co 10 s) konczy sie, zanim ruszy kopia
+sleep 12
 
 # Kopie robi kontener, a nie host: baza jest na bind moncie przez virtiofs
 # i dwa procesy z roznych stron montu potrafia sie o nia pobic.
@@ -32,6 +62,7 @@ fi
 /opt/homebrew/bin/docker compose exec -T backend \
   python -c "import sqlite3; s=sqlite3.connect('file:/code/data/mastery.db?mode=ro', uri=True); d=sqlite3.connect('/code/data/_snap.db'); s.backup(d, pages=4096, sleep=0.02); d.close(); s.close()"
 mv "$HOME/stacks/riot/data/_snap.db" "$SNAP"
+quiet_end
 sqlite3 "$SNAP" "PRAGMA integrity_check;" | grep -q '^ok$' || { echo "BAZA USZKODZONA - przerywam"; exit 1; }
 
 restic backup "$SNAP" --tag mastery
