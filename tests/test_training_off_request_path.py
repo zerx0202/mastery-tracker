@@ -33,6 +33,8 @@ def test_grade_answers_before_training_finishes(fresh_db, monkeypatch):
         r = client.post("/api/grade", json=GRADE)
         assert r.status_code == 200 and r.json()["new"] == 1
         assert time.time() - t0 < 1.5, "odpowiedz czekala na trening"
+        # (30.09) trening rusza przy starcie nastepnej gry - test_training_waits_for_next_game
+        client.post("/api/live", json={"champion_id": 45, "game_time": 60.0, "raw": {}})
         deadline = time.time() + 10
         while not calls and time.time() < deadline:
             time.sleep(0.05)

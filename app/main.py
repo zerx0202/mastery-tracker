@@ -123,6 +123,47 @@ async def training_idle():
         await asyncio.shield(_TRAIN["task"])
 
 
+# (30.09) KIEDY trenowac. Log agenta 30.09 (7/7 gier): seria 500 i "database
+# is locked" zaczyna sie ~15 s po koncu gry i konczy razem z treningiem
+# (~4 min; kopia 23.09: ocena -> koniec treningu 159-211 s). Na Macu (Colima
+# 2 vCPU, virtiofs) trening w osobnym procesie zjada procesor i dysk
+# dokladnie w oknie zapisu po grze i nastepnego champ selecta - lokalnie na
+# SSD nic nie blokowal (339 s treningu, 0 blokad). Nowa ocena tylko zaznacza
+# trening; rusza on przy starcie nastepnej gry (champ select za nami, ~20 min
+# samych drobnych zapisow live) albo po TRAIN_IDLE_S bez aktywnosci agenta.
+# Ranking liczy szanse z czestosci ocen, nie z trenowanego modelu.
+TRAIN_IDLE_S = 600
+_TRAIN["pending"] = False
+
+
+def note_activity():
+    """Agent cos robi (champ select, gra, zapis po grze) - trening czeka."""
+    state["last_activity"] = time.time()
+
+
+def defer_training():
+    _TRAIN["pending"] = True
+    note_activity()
+
+
+def start_pending_training():
+    if _TRAIN.get("pending"):
+        _TRAIN["pending"] = False
+        request_training()
+
+
+def maybe_train_when_idle():
+    if (_TRAIN.get("pending")
+            and time.time() - state.get("last_activity", 0) >= TRAIN_IDLE_S):
+        start_pending_training()
+
+
+async def deferred_training_loop():
+    while True:
+        await asyncio.sleep(60)
+        maybe_train_when_idle()
+
+
 async def mayhem_sentinel_loop():
     """Riot dzis celowo blokuje Mayhema w match-v5 (403; developer-relations
     #1109 i #1154). Raz na dobe sprawdzamy jednym zapytaniem, czy to sie
@@ -266,6 +307,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(balance_refresh_loop())
     asyncio.create_task(augments_refresh_loop())
     asyncio.create_task(ddragon_refresh_loop())
+    asyncio.create_task(deferred_training_loop())
     asyncio.create_task(asyncio.to_thread(warm_caches))
     state["sync"] = {"running": False, "done": 0, "total": 0, "msg": "nie uruchomiony"}
     state["client"] = httpx.AsyncClient(headers={"X-Riot-Token": API_KEY}, timeout=15.0)
@@ -676,6 +718,7 @@ async def push_lobby(payload: dict):
     # karte 9 na cala gre (przeglad 4.09). Sojusznicy zyja do nastepnego
     # champ selecta; puste ids zeruja tylko cele.
     ts = int(time.time())
+    note_activity()
 
     def store():
         # (U, przeglad) get/set lobby w watku: INSERT OR REPLACE na petli
@@ -907,9 +950,9 @@ async def history_lcu(payload: dict):
         # Trening po ocenie strzela ZA WCZESNIE w potoku: grade laduje
         # ~30 s przed wierszem match_player (ten powstaje dopiero tutaj),
         # a training_rows JOIN-uje oba - swieza ocena wchodzila do modelu
-        # dopiero przy nastepnej grze. Drugi trigger domyka potok; zlecenie
-        # w trakcie treningu po ocenie scala sie w jeden kolejny przebieg.
-        request_training()
+        # dopiero przy nastepnej grze. Drugi trigger domyka potok; oba
+        # zaznaczaja jeden trening przy starcie nastepnej gry (30.09).
+        defer_training()
     return {"received": len(games), "new": new, "errors": errors[:5]}
 
 
@@ -959,9 +1002,10 @@ async def push_grade(payload: dict):
     if new:
         # nowa obserwacja = trening. Bez tego grade_model w settings stoi
         # na stanie sprzed oceny, a predykcje/readiness/targets czytaja
-        # wlasnie jego. W tle i w osobnym procesie: odpowiedz nie czeka
-        # (~1 min), awarie loguje worker (model_train_fail).
-        request_training()
+        # wlasnie jego. W osobnym procesie i przy starcie nastepnej gry
+        # (defer_training), awarie loguje worker (model_train_fail).
+        defer_training()
+    note_activity()
     return {"received": len(raw), "new": new, "errors": errors[:5]}
 
 
@@ -2056,9 +2100,12 @@ async def model_targets(champion_id: int, threshold: str = "S-",
 @write_api.post("/live")
 async def push_live(payload: dict):
     """Agent wysyla tu stan z Live Client Data (port 2999)."""
+    note_activity()
     if payload.get("ended"):
         await asyncio.to_thread(db.clear_live)
         return {"cleared": True}
+    # gra trwa = champ select za nami: czekajacy trening rusza teraz (30.09)
+    start_pending_training()
 
     row = {
         "champion_id": payload.get("champion_id"),
