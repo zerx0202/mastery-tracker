@@ -523,7 +523,20 @@ def mission_projection(goal, mode=None, runs=1000, pool_size=None,
             "capped": results[-1] >= max_games}
 
 
-def train(mode=None, save=True, goal=None):
+# (03.10) Rytm walidacji. Wybor l2 + walidacja LOO to >80 % czasu treningu
+# (401 dopasowan, ~kwadratowo z liczba ocen; 339 s lokalnie przy 231 obs),
+# projekcja misji ~15 %, samo dopasowanie ulamek sekundy. Na Macu (2 vCPU,
+# virtiofs) pelny przebieg dlawil serwer na 4-5 min po kazdej grze, niezaleznie
+# od tego, kiedy go uruchomic (log agenta 03.10). Szybki przebieg: dopasowanie
+# z ostatnio wybranym l2, walidacja i projekcja z ostatniego pelnego. Pelny:
+# pierwszy raz, co VALIDATE_EVERY nowych obserwacji (validate=None) albo na
+# zadanie (validate=True). Model i cechy bez zmian.
+VALIDATE_EVERY = 10
+
+
+def train(mode=None, save=True, goal=None, validate=None):
+    """validate: True = pelna walidacja, False = szybko (o ile byla kiedys
+    pelna), None = pelna co VALIDATE_EVERY nowych obserwacji."""
     rows = training_rows(mode)
     baselines, global_median = champion_baselines(mode)
     external = get_json_setting("external_dpm") or None
@@ -562,13 +575,31 @@ def train(mode=None, save=True, goal=None):
 
     Xs, means, stds = _standardize(X_raw)
     cuts = _cutpoints(specs)
-    l2, l2_report = _choose_l2(X_raw, specs)
+    n = len(X_raw)
+    prev = get_json_setting("grade_model") or {}
+    same = prev.get("mode") == mode and prev.get("features") == FEATURES
+    prev_ord = (prev.get("ordinal") or {}) if same else {}
+    last_n = prev_ord.get("validated_on")
+    if last_n is None or "l2" not in prev_ord:
+        full = True
+    elif validate is None:
+        full = n - last_n >= VALIDATE_EVERY
+    else:
+        full = bool(validate)
+    if full:
+        l2, l2_report = _choose_l2(X_raw, specs)
+        loo = _loo_predictions(X_raw, specs, l2, EPOCHS_VAL)
+        validated_on = n
+    else:
+        l2, l2_report = prev_ord["l2"], prev_ord.get("l2_search")
+        loo = None
+        validated_on = last_n
     beta, alphas = _fit_ordinal(Xs, specs, cuts, l2, EPOCHS_FINAL, LR_ORD)
-    loo = _loo_predictions(X_raw, specs, l2, EPOCHS_VAL)
 
     out["ordinal"] = {
         "l2": l2, "l2_search": l2_report,
-        "trained_on": len(X_raw),
+        "trained_on": n,
+        "validated_on": validated_on, "full_validation": full,
         "cutpoints": {GRADES[c]: round(a, 4) for c, a in alphas.items()},
     }
 
@@ -588,7 +619,9 @@ def train(mode=None, save=True, goal=None):
             info["status"] = "niewiarygodny"
             info["reason"] = f"tylko {pos} pozytywow na {len(y)} obserwacji"
 
-        cv = _threshold_metrics(loo[th])
+        # szybki przebieg: walidacja z ostatniego pelnego (validated_on)
+        cv = (_threshold_metrics(loo[th]) if loo is not None
+              else ((prev.get("models") or {}).get(th) or {}).get("validation"))
         info["validation"] = cv
         if cv and not cv["useful"] and not info.get("status"):
             info["status"] = "bez wartosci predykcyjnej"
@@ -616,10 +649,10 @@ def train(mode=None, save=True, goal=None):
         set_json_setting("champion_baselines",
                          {"per_champ": baselines, "global": global_median})
         log_event("model_train", {
-            "mode": mode, "l2": l2,
+            "mode": mode, "l2": l2, "full": full,
             "samples": {t: out["models"][t].get("samples") for t in THRESHOLDS},
         })
-        if goal:
+        if goal and full:
             # projekcja misji z losowaniem pul - liczona przy kazdym treningu,
             # zeby kafelek czytal gotowa mediane zamiast dolnej granicy
             try:

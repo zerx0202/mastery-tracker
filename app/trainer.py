@@ -26,12 +26,13 @@ def _init_worker():
         pass
 
 
-def train_job(db_path, mode, goal):
+def train_job(db_path, mode, goal, validate=None):
     """Wykonywane w procesie roboczym. Sciezka bazy jawnie, bo DB_PATH
-    z env nie zna swiata testu ani przywroconej kopii."""
+    z env nie zna swiata testu ani przywroconej kopii. validate jak
+    w model.train (rytm walidacji)."""
     from app import db, model
     db.DB_PATH = Path(db_path)
-    return model.train(mode, True, goal)
+    return model.train(mode, True, goal, validate)
 
 
 def pool():

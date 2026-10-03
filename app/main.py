@@ -78,17 +78,20 @@ def _loop_error(loop, e):
 # drugim, a drugi musi zobaczyc wiersz meczu, ktorego pierwszy jeszcze
 # nie mial. TRAIN_IN_PROCESS=0 (testy) = watek zamiast procesu.
 TRAIN_IN_PROCESS = os.getenv("TRAIN_IN_PROCESS", "1") != "0"
-_TRAIN = {"task": None, "again": False}
+_TRAIN = {"task": None, "again": False, "want": "brak"}
+# (03.10) zlecenia scalane do najmocniejszego: pelna > auto > szybka
+_STRENGTH = {"brak": -1, False: 0, None: 1, True: 2}
 
 
-async def run_training(mode=None):
+async def run_training(mode=None, validate=None):
     mode = mode or DEFAULT_MODE
     if not TRAIN_IN_PROCESS:
-        return await asyncio.to_thread(model.train, mode, True, GOAL)
+        return await asyncio.to_thread(model.train, mode, True, GOAL, validate)
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(
-            trainer.pool(), trainer.train_job, str(db.DB_PATH), mode, GOAL)
+            trainer.pool(), trainer.train_job, str(db.DB_PATH), mode, GOAL,
+            validate)
     except BrokenProcessPool:
         # pad procesu roboczego (OOM, kill) - nastepne zlecenie stawia nowy
         trainer.shutdown()
@@ -98,8 +101,9 @@ async def run_training(mode=None):
 async def _training_worker():
     while True:
         _TRAIN["again"] = False
+        want, _TRAIN["want"] = _TRAIN["want"], "brak"
         try:
-            await run_training()
+            await run_training(validate=None if want == "brak" else want)
         except Exception as e:
             await asyncio.to_thread(db.log_event, "model_train_fail",
                                     {"error": f"{type(e).__name__}: {e}"[:200]},
@@ -108,8 +112,11 @@ async def _training_worker():
             return
 
 
-def request_training():
-    """Zlecenie treningu bez czekania na wynik. Wolane z petli zdarzen."""
+def request_training(validate=None):
+    """Zlecenie treningu bez czekania na wynik. Wolane z petli zdarzen.
+    validate jak w model.train; zlecenia w trakcie scalaja sie do najmocniejszego."""
+    if _STRENGTH[validate] > _STRENGTH[_TRAIN["want"]]:
+        _TRAIN["want"] = validate
     t = _TRAIN["task"]
     if t is not None and not t.done():
         _TRAIN["again"] = True
@@ -146,16 +153,19 @@ def defer_training():
     note_activity()
 
 
-def start_pending_training():
+def start_pending_training(validate=False):
+    """Start gry: szybki trening (bez walidacji, 03.10) - pelny przebieg
+    dlawil serwer na 4-5 min w trakcie gry."""
     if _TRAIN.get("pending"):
         _TRAIN["pending"] = False
-        request_training()
+        request_training(validate)
 
 
 def maybe_train_when_idle():
+    # cisza: rytm auto - pelna walidacja, gdy przybylo VALIDATE_EVERY ocen
     if (_TRAIN.get("pending")
             and time.time() - state.get("last_activity", 0) >= TRAIN_IDLE_S):
-        start_pending_training()
+        start_pending_training(validate=None)
 
 
 async def deferred_training_loop():
@@ -1640,7 +1650,8 @@ def model_status(min_games: int = 40):
 
 @write_api.post("/model/train")
 async def model_train(mode: str | None = None):
-    return await run_training(mode)
+    # recznie = zawsze pelna walidacja
+    return await run_training(mode, validate=True)
 
 
 @api.get("/model")
