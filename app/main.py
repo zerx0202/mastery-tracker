@@ -1983,6 +1983,21 @@ async def snowball_ingest(payload: dict):
     return {"kiwi": kiwi, "new_rows": new_rows}
 
 
+@write_api.post("/snowball/fail")
+async def snowball_fail(payload: dict):
+    """Agent zglasza gracza, ktorego historii LCU nie oddal - trafia na
+    koniec kolejki zamiast blokowac jej czolo (db.snowball_next)."""
+    puuid = payload.get("puuid") or ""
+    if not isinstance(puuid, str) or len(puuid) != 36:
+        raise HTTPException(400, "zly puuid")
+    ts = int(time.time())
+    fails = await asyncio.to_thread(db.snowball_fail, puuid, ts)
+    await asyncio.to_thread(db.log_event, "snowball_fail",
+                            {"puuid": puuid[:8], "status": payload.get("status"),
+                             "fails": fails}, ts)
+    return {"fails": fails}
+
+
 @api.get("/snowball/next")
 async def snowball_next(limit: int = 1):
     if backup_quiet():

@@ -2859,6 +2859,9 @@ CREATE TABLE IF NOT EXISTS snowball_seen (
 """
 
 SNOWBALL_REVISIT_DAYS = 7
+# (08.10) Gracz, ktorego historii LCU nie oddal tyle razy z rzedu, czeka na
+# kolejna probe pelne okno rewizyty - nie jest "sprawdzony", tylko odlozony
+SNOWBALL_MAX_FAILS = 3
 
 
 def init_snowball():
@@ -2879,23 +2882,50 @@ def snowball_next(limit=1):
     """Gracze do sprawdzenia: nigdy nie sprawdzani albo starsi niz okno.
     (P7) Priorytet: gracze widziani w wielu wlasnych meczach
     (match_participant) - ich historie karmia normy i karte 9 najszybciej;
-    reszta po staremu, od najdawniej sprawdzanych."""
-    cutoff = int(time.time()) - SNOWBALL_REVISIT_DAYS * 86400
+    reszta po staremu, od najdawniej sprawdzanych.
+    (08.10) Najpierw gracze z najmniejsza liczba nieudanych prob: kolejnosc
+    jest deterministyczna, wiec gracz, ktorego LCU nie oddaje, stal na czele
+    kolejki i blokowal snowball na godziny (log 08.10 od 17:47)."""
+    now = int(time.time())
+    cutoff = now - SNOWBALL_REVISIT_DAYS * 86400
     with connect() as con:
         return [r["puuid"] for r in con.execute("""
             SELECT s.puuid FROM snowball_seen s
             LEFT JOIN (SELECT puuid, COUNT(*) n FROM match_participant
                        GROUP BY puuid) mp ON mp.puuid = s.puuid
             WHERE s.checked_at < ?
-            ORDER BY COALESCE(mp.n, 0) DESC, s.checked_at ASC, s.added_at ASC
-            LIMIT ?""", (cutoff, limit))]
+              AND NOT (s.fails >= ? AND s.failed_at >= ?)
+            ORDER BY s.fails ASC, COALESCE(mp.n, 0) DESC,
+                     s.checked_at ASC, s.added_at ASC
+            LIMIT ?""", (cutoff, SNOWBALL_MAX_FAILS, cutoff, limit))]
 
 
 def snowball_mark(puuid, kiwi_games, new_rows):
     with connect() as con:
         con.execute("UPDATE snowball_seen SET checked_at=?, kiwi_games=?, "
-                    "new_rows=new_rows+? WHERE puuid=?",
+                    "new_rows=new_rows+?, fails=0 WHERE puuid=?",
                     (int(time.time()), kiwi_games, new_rows, puuid))
+
+
+def upgrade_snowball_fails():
+    """(08.10) Licznik nieudanych prob LCU per gracz - patrz snowball_next."""
+    with connect() as con:
+        cols = [r["name"] for r in con.execute("PRAGMA table_info(snowball_seen)")]
+        if "fails" not in cols:
+            con.execute("ALTER TABLE snowball_seen ADD COLUMN fails INTEGER DEFAULT 0")
+        if "failed_at" not in cols:
+            con.execute("ALTER TABLE snowball_seen ADD COLUMN failed_at INTEGER DEFAULT 0")
+
+
+def snowball_fail(puuid, ts):
+    """LCU nie oddal historii gracza. NIE oznacza go jako sprawdzonego
+    (decyzja 23.09) - przesuwa go tylko za graczy bez porazek."""
+    with connect() as con:
+        con.execute("UPDATE snowball_seen SET fails=fails+1, failed_at=? "
+                    "WHERE puuid=?", (ts, puuid))
+        r = con.execute("SELECT fails FROM snowball_seen WHERE puuid=?",
+                        (puuid,)).fetchone()
+        return r["fails"] if r else 0
 
 
 SNOWBALL_MATCH_SCHEMA = """

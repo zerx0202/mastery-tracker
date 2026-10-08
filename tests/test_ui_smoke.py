@@ -61,10 +61,14 @@ def _seed():
             "45": {"Damage Dealt": "-7%", "Damage Received": "+10%"},
             "12": {"Healing": "+20%"},
             "99": {"Damage Dealt": "-5%"}}})
-    db.set_json_setting("pass_state", {"ts": now, "events": [{
-        "name": "Season 3: Act I", "days_left": 21.5,
-        "progress": {"level": 3, "totalLevels": 20},
-        "unclaimed": {"rewardsCount": 0}}]})
+    # stan sprzed doby: Act I wygasl od zapisu, Act II zostaje (08.10)
+    db.set_json_setting("pass_state", {"ts": now - 86400, "events": [
+        {"name": "Season 3: Act I", "days_left": 0.4,
+         "progress": {"level": 48, "totalLevels": 48},
+         "unclaimed": {"rewardsCount": 0}},
+        {"name": "Season 3: Act II", "days_left": 22.5,
+         "progress": {"level": 3, "totalLevels": 20},
+         "unclaimed": {"rewardsCount": 0}}]})
     # (49) sciaga z cache (patch "16.16" = seed); sam wiersz live siejemy
     # dopiero PO starcie serwera - lifespan robi migrate(), a init_live
     # celowo DROP-uje live_game
@@ -162,8 +166,10 @@ def test_pool_badges_show_trade(page):
 def test_pass_tile_renders(page):
     tile = page.wait_for_selector('#side .panel:has-text("Przepustki")')
     txt = tile.inner_text()
-    assert "Season 3: Act I" in txt
-    assert "za 21 dni" in txt
+    assert "Season 3: Act II" in txt
+    assert not re.search(r"Act I\b", txt), "wygasly akt znika, zamiast wisiec za 0 dni"
+    assert "za 21 dni" in txt, "dni liczone od wieku zapisu"
+    assert "stan przepustki z" in txt
     assert "Tempo (7 dni)" in txt
 
 

@@ -726,8 +726,25 @@ async function renderSide() {
     const stale = !lastGrade || (sys.now - lastGrade) > 172800;
 
     let passHtml = "";
-    if (pa && pa.events && pa.events.length) {
-      const evs = [...pa.events].sort((a, b) => a.days_left - b.days_left);
+    // (08.10) days_left to stan z chwili synchronizacji agenta - liczony od
+    // wieku zapisu, wygasle eventy znikaja; inaczej stary akt wisial
+    // "za 0 dni" przez caly dzien, w ktorym agent nie odswiezyl stanu
+    const passAge = pa && pa.ts ? Math.max(0, sys.now - pa.ts) : 0;
+    const evsLive = ((pa && pa.events) || [])
+      .map(e => ({ ...e, days_left: (e.days_left ?? 0) - passAge / 86400 }))
+      .filter(e => e.days_left > 0);
+    const passStale = passAge > 6 * 3600
+      ? `<div class="tagline dim">stan przepustki z ${ago(pa.ts)}</div>` : "";
+    if (pa && pa.events && pa.events.length && !evsLive.length) {
+      passHtml = `
+      <div class="panel">
+        <div class="eyebrow">Przepustki i deadline'y</div>
+        <div class="sub">zapisane eventy wygasły — agent odświeży po starcie klienta</div>
+        ${passStale}
+      </div>`;
+    }
+    if (evsLive.length) {
+      const evs = evsLive.sort((a, b) => a.days_left - b.days_left);
       // Zegar MISJI = event SEZONOWY ("Season 3: Act I") - potwierdzone
       // 1.09 w kliencie: to on konczy misje maestrii (potem okienko na
       // odbior nagrod, potem nowy akt z patchem). "Classic Pass" tez ma
@@ -787,6 +804,7 @@ async function renderSide() {
         ${grace ? `<div class="tagline" style="color:var(--warn)">
           Któryś event w okresie łaski — zaraz zniknie!</div>` : ""}
         ${proj}
+        ${passStale}
       </div>`;
     }
 

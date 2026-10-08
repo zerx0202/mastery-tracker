@@ -7,6 +7,7 @@ serwera raz na minute. Porazka LCU nie moze tez oznaczyc gracza jako
 sprawdzonego pustym ingestem (wypadal z kolejki na 7 dni)."""
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -43,8 +44,10 @@ class Lcu:
     def __init__(self, history):
         self.history = history
 
-    async def get(self, path, timeout=8):
-        return self.history
+    async def get_raw(self, path, timeout=8):
+        if self.history is None:
+            return 500, ""
+        return 200, json.dumps(self.history)
 
 
 class Server:
@@ -83,7 +86,20 @@ def test_lcu_failure_does_not_mark_player_checked():
     a = _agent(history=None)
     a.lcu.history = None
     assert asyncio.run(a._snowball_once()) == "fail"
-    assert a.server.posts == [], "pusty ingest oznaczylby gracza jako sprawdzonego"
+    assert [p for p, _ in a.server.posts] == ["/snowball/fail"],         "pusty ingest oznaczylby gracza jako sprawdzonego"
+
+
+@pytest.mark.parametrize("status,body", [
+    (500, "blad"), (404, ""), (None, "timeout"), (200, "nie json")])
+def test_unreadable_history_is_reported_so_queue_moves_on(status, body):
+    # (08.10) bez zgloszenia ten sam gracz stal na czele kolejki godzinami
+    a = _agent()
+
+    async def raw(path, timeout=8):
+        return status, body
+    a.lcu.get_raw = raw
+    assert asyncio.run(a._snowball_once()) == "fail"
+    assert a.server.posts == [("/snowball/fail", {"puuid": PU, "status": status})]
 
 
 def test_server_failure_counts_as_failure():

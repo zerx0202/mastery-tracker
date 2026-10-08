@@ -106,6 +106,16 @@ def snowball_next_delay(outcome, prev):
         return min(max(prev, SNOWBALL_INTERVAL) * 2, SNOWBALL_BACKOFF_MAX)
     return SNOWBALL_IDLE_POLL
 
+
+# Przepustka: event-hub to kilka lekkich GET-ow; co 30 min wystarczy, zeby
+# zmiana aktu byla widoczna w ciagu sesji, po porazce ponowienie po 2 min
+PASS_SYNC_EVERY = 1800
+PASS_RETRY = 120
+
+
+def pass_next_delay(ok):
+    return PASS_SYNC_EVERY if ok else PASS_RETRY
+
 # Wylacznie dane ULOTNE (zyja tylko na ekranie koncowym) - trzy endpointy
 # nieulotne (local-player mastery, collections, career-stats) byly zrzucane
 # po kazdej grze bez zadnego konsumenta i kasowane rotacja (audyt 2.09)
@@ -369,6 +379,7 @@ class Agent:
         self._grade_done = True    # False tylko w trakcie epizodu
         self._eog_done = True
         self._sb_idle = False      # czy zalogowano juz pusta kolejke snowballa
+        self._pass_skipped = set()  # eventy >120 dni juz odnotowane w logu
         self._my_puuid = None
         self._recover_fails = {}   # gid -> nieudane proby odzysku (A4)
         self._timeline_fails = {}  # gid -> nieudane proby timeline (C3)
@@ -481,10 +492,14 @@ class Agent:
         w endDate eventow. Filtr: koniec w <120 dni (evergreeny 2099
         odpadaja), max 3 eventy."""
         if not self.lcu.port:
-            return
+            return False
         ev = await self.lcu.get("/lol-event-hub/v1/events")
         if not ev:
-            return
+            # (08.10) zaraz po starcie klienta event-hub bywa pusty, a po grze
+            # klient bywa juz zamykany - cichy return zostawial w UI stan
+            # sprzed dni (nowy akt niewidoczny); ponawia pass_loop
+            log("przepustka: event-hub nie oddal eventow - ponowie", "dim")
+            return False
         import datetime as _dt
         now = _dt.datetime.now(_dt.timezone.utc)
         out = []
@@ -498,6 +513,12 @@ class Agent:
             except ValueError:
                 continue
             days = (endt - now).total_seconds() / 86400
+            if eid and 120 < days < 1000 and eid not in self._pass_skipped:
+                self._pass_skipped.add(eid)
+                # evergreeny maja 2099; dluzszy event bez 2099 to sygnal, ze
+                # prog 120 dni odcina nowy akt - slad w logu zamiast zgadywania
+                log(f"przepustka: pominiety {info.get('eventName')} "
+                    f"(koniec za {days:.0f} dni)", "dim")
             if not eid or days < 0 or days > 120:
                 continue
             item = {"event_id": eid,
@@ -511,11 +532,28 @@ class Agent:
             out.append(item)
             if len(out) >= 3:
                 break
-        if out:
-            r = await self.server.post("/pass", {"events": out}, timeout=30)
-            if r and r.get("stored"):
-                log(f"przepustka: {len(out)} eventy, najblizszy deadline za "
-                    f"{min(x['days_left'] for x in out):.0f} dni", "dim")
+        if not out:
+            return False
+        r = await self.server.post("/pass", {"events": out}, timeout=30)
+        if r and r.get("stored"):
+            log(f"przepustka: {len(out)} eventy, najblizszy deadline za "
+                f"{min(x['days_left'] for x in out):.0f} dni", "dim")
+            return True
+        return False
+
+    async def pass_loop(self):
+        """Odswiezanie przepustki w trakcie sesji, nie tylko przy wykryciu
+        klienta i po grze: oba momenty trafialy w klienta nie gotowego albo
+        zamykanego (08.10: caly dzien bez zapisu, UI pokazywal stary akt)."""
+        ok = True
+        while True:
+            await asyncio.sleep(pass_next_delay(ok))
+            try:
+                if self.background_allowed():
+                    ok = await self.sync_pass()
+            except Exception as e:
+                log(f"przepustka: {type(e).__name__}: {e}", "dim")
+                ok = False
 
     async def sync_missions(self):
         """(1) Misje z klienta. Sonda 1.09: /player jest PUT-only, odczyt to
@@ -720,12 +758,26 @@ class Agent:
             return "idle"
         self._sb_idle = False
         pu = puuids[0]
-        h = await self.lcu.get(
+        status, body = await self.lcu.get_raw(
             f"/lol-match-history/v1/products/lol/{pu}/matches"
             f"?begIndex=0&endIndex=19", timeout=20)
-        if h is None:
+        h = None
+        if status == 200:
+            try:
+                h = json.loads(body)
+            except ValueError:
+                pass
+        if not isinstance(h, dict):
             # (23.09) odmowa/timeout LCU to NIE pusta historia: ingest z [] oznaczal
-            # gracza jako sprawdzonego i wypadal z kolejki na 7 dni
+            # gracza jako sprawdzonego i wypadal z kolejki na 7 dni.
+            # (08.10) Ale bez zgloszenia gracz zostawal czolem kolejki i jeden
+            # puuid blokowal snowball na godziny - serwer przesuwa go na koniec.
+            # Status w logu odroznia jednego gracza od awarii calego LCU.
+            why = f"HTTP {status}" if status is not None else str(body)[:80]
+            log(f"snowball: LCU nie oddal historii {pu[:8]}… ({why}) "
+                "- gracz na koniec kolejki", "dim")
+            await self.server.post("/snowball/fail",
+                                   {"puuid": pu, "status": status}, timeout=15)
             return "fail"
         games = (h.get("games") or {}).get("games") or []
         r = await self.server.post("/snowball/ingest",
@@ -1447,6 +1499,7 @@ class Agent:
             asyncio.create_task(self.champ_ids_loop())
             asyncio.create_task(self.poll_loop())
             asyncio.create_task(self.snowball_loop())
+            asyncio.create_task(self.pass_loop())
             asyncio.create_task(self.live_loop())
             asyncio.create_task(self.probe_loop())
             asyncio.create_task(self.recover_loop())
