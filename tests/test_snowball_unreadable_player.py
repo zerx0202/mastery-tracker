@@ -53,3 +53,18 @@ def test_fail_endpoint_records_attempt(fresh_db):
         assert r.status_code == 200 and r.json() == {"fails": 1}
         assert client.post("/api/snowball/fail", json={"puuid": "x"}).status_code == 400
         assert client.get("/api/snowball/next").json()["puuids"] == [P2]
+
+
+ZERO = "00000000-0000-0000-0000-000000000000"
+
+
+def test_empty_puuid_never_enters_or_leaves_the_queue(fresh_db):
+    # (08.10, log 18:50) zrzut eog zawiera zerowy puuid - LCU odpowiada
+    # na niego HTTP 400 zawsze, wiec to on stal na czele kolejki
+    with db.connect() as con:                  # wiersz sprzed poprawki
+        con.execute("INSERT INTO snowball_seen (puuid, added_at) VALUES (?, 1)", (ZERO,))
+    db.snowball_add_candidates([P1], 100)
+    assert db.snowball_next(limit=5) == [P1]
+    with TestClient(app_main.app) as client:
+        r = client.post("/api/snowball/candidates", json={"puuids": [ZERO, P2]})
+        assert r.json()["received"] == 1

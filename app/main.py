@@ -1964,7 +1964,7 @@ async def predictions_scorecard():
 async def snowball_candidates(payload: dict):
     """Agent po kazdej grze przysyla puuid-y pozostalych graczy."""
     puuids = [p for p in payload.get("puuids", [])
-              if isinstance(p, str) and len(p) == 36]
+              if isinstance(p, str) and len(p) == 36 and p != db.NULL_PUUID]
     ts = int(time.time())
     total = await asyncio.to_thread(db.snowball_add_candidates, puuids, ts)
     return {"received": len(puuids), "known_total": total}

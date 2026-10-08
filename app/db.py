@@ -2862,6 +2862,9 @@ SNOWBALL_REVISIT_DAYS = 7
 # (08.10) Gracz, ktorego historii LCU nie oddal tyle razy z rzedu, czeka na
 # kolejna probe pelne okno rewizyty - nie jest "sprawdzony", tylko odlozony
 SNOWBALL_MAX_FAILS = 3
+# (08.10) zrzut eog zawiera tez zerowy puuid (nie gracz) - LCU odpowiada na
+# niego HTTP 400 zawsze; wiersz z rejestru nie jest kasowany, tylko pomijany
+NULL_PUUID = "00000000-0000-0000-0000-000000000000"
 
 
 def init_snowball():
@@ -2893,11 +2896,11 @@ def snowball_next(limit=1):
             SELECT s.puuid FROM snowball_seen s
             LEFT JOIN (SELECT puuid, COUNT(*) n FROM match_participant
                        GROUP BY puuid) mp ON mp.puuid = s.puuid
-            WHERE s.checked_at < ?
+            WHERE s.checked_at < ? AND s.puuid != ?
               AND NOT (s.fails >= ? AND s.failed_at >= ?)
             ORDER BY s.fails ASC, COALESCE(mp.n, 0) DESC,
                      s.checked_at ASC, s.added_at ASC
-            LIMIT ?""", (cutoff, SNOWBALL_MAX_FAILS, cutoff, limit))]
+            LIMIT ?""", (cutoff, NULL_PUUID, SNOWBALL_MAX_FAILS, cutoff, limit))]
 
 
 def snowball_mark(puuid, kiwi_games, new_rows):

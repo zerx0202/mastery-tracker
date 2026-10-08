@@ -665,7 +665,8 @@ class Agent:
         import re
         return [q for q in dict.fromkeys(
             re.findall(r'"puuid"\s*:\s*"([0-9a-f\-]{36})"', text))
-            if q and q != my_puuid]
+            # (08.10) zerowy puuid w zrzucie eog to nie gracz - LCU daje 400
+            if q and q != my_puuid and q.strip("0-")]
 
     async def snowball_harvest(self, texts):
         """Wysyla na serwer puuid-y graczy z podanych zrzutow eog."""

@@ -115,3 +115,11 @@ def test_failures_back_off_to_five_minutes_and_success_resets():
     assert seen[:4] == [20, 40, 80, 160]
     assert max(seen) == ag.SNOWBALL_BACKOFF_MAX == 300
     assert ag.snowball_next_delay("done", d) == 10
+
+
+def test_harvest_skips_empty_puuid():
+    # (08.10) zerowy puuid ze zrzutu eog to nie gracz - LCU daje na nim 400
+    a = _agent()
+    zero = "00000000-0000-0000-0000-000000000000"
+    text = json.dumps([{"puuid": zero}, {"puuid": PU}])
+    assert a._puuids_from_text(text) == [PU]
